@@ -1,0 +1,32 @@
+# Local environment overrides — server addresses and paths, never committed.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Audio library and any stray downloads: large, regenerable, not source.
+*.m4a
+*.webm
+*.opus
+*.part
+*.ytdl
+music/
+
+# SQLite catalogue (arrives in a later phase)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
