@@ -1,11 +1,25 @@
 # Prisma backend
 
+> ## ⚠️ No authentication — never expose this to the internet
+>
+> This service has **no authentication of any kind, by design**, and binds
+> `0.0.0.0`. It is intended for a private LAN and Tailscale only.
+>
+> Do **not** port-forward it, do **not** publish port 8000 through your router,
+> and do **not** put it behind a public reverse proxy. Anyone who can reach it
+> can queue arbitrary downloads and read the entire library: exposing it
+> publishes an open yt-dlp front end running on your hardware.
+
 Self-hosted music download service. This is **phase 1a** of section 9 of the design
 spec: it exists only to prove the two external dependencies work inside Docker —
 ytmusicapi for search and yt-dlp for audio extraction. There is no job queue, no
 library, and no download endpoint yet.
 
 Deployed and verified on `your-server` at `http://YOUR_SERVER_IP:8000`.
+
+`YOUR_SERVER_IP`, `YOUR_USER` and `your-server` throughout this README are
+placeholders — substitute your own server address, SSH username and hostname.
+Every command below is runnable as written once you have.
 
 ## What is here
 

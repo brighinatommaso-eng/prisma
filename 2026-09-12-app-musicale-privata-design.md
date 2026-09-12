@@ -43,7 +43,7 @@ Un'app musicale personale su un solo iPhone, con libreria interamente offline. L
 
 ```
 ┌─────────────────────────────┐         ┌──────────────────────────────┐
-│  your-server       │         │  iPhone                      │
+│  your-server                │         │  iPhone                      │
 │  Ubuntu 24.04 · Docker      │         │  iOS 26                      │
 │                             │         │                              │
 │  ┌───────────────────────┐  │         │  ┌────────────────────────┐  │
