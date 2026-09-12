@@ -1,0 +1,25 @@
+# Prisma backend — phase 1a.
+#
+# Every path and address is an environment variable with a default, so the same
+# file works on the dev machine and on your-server. Override by placing
+# a .env next to this file (it is gitignored) or by exporting the vars.
+#
+#   PRISMA_MUSIC_HOST_DIR  host directory holding the .m4a library
+#   PRISMA_PORT            port on both the host and inside the container
+#   PRISMA_HOST            uvicorn bind address inside the container
+name: prisma
+
+services:
+  backend:
+    build: ./backend
+    image: prisma-backend:latest
+    container_name: prisma-backend
+    restart: unless-stopped
+    ports:
+      - "${PRISMA_PORT:-8000}:${PRISMA_PORT:-8000}"
+    environment:
+      PRISMA_MUSIC_DIR: /music
+      PRISMA_HOST: "${PRISMA_HOST:-0.0.0.0}"
+      PRISMA_PORT: "${PRISMA_PORT:-8000}"
+    volumes:
+      - "${PRISMA_MUSIC_HOST_DIR:-/opt/prisma/music}:/music"
