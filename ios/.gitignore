@@ -1,0 +1,10 @@
+# Per-user Xcode state
+xcuserdata/
+*.xcuserstate
+
+# Build output — CI builds into $RUNNER_TEMP, these catch local builds on a Mac
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM.zip

@@ -1,0 +1,273 @@
+# Builds an unsigned Prisma.ipa for sideloading (spec section 6.1).
+#
+# There is no Mac to reproduce a failure on, so this workflow is written to be
+# debugged from its log alone:
+#   - xcodebuild output is streamed raw, never through a pretty-printer;
+#   - the full log is uploaded as an artifact on every run;
+#   - on failure, a final step extracts the error lines and annotates them;
+#   - the finished .ipa is unpacked and its Info.plist and binary are asserted,
+#     so "green" means the artifact is actually installable, not just that
+#     xcodebuild exited 0.
+#
+# Scripts avoid bash-4-only syntax so they behave the same whichever bash the
+# runner resolves (macOS ships 3.2).
+name: iOS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned Prisma.ipa
+    # Pinned, never macos-latest: a silent image or Xcode bump that breaks the
+    # build is undiagnosable without a Mac. macos-26 rather than macos-15 because
+    # macos-15 stops at Xcode 26.3 and is the older image, deprecated first.
+    # Available Xcodes per image:
+    # https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Explicit bash gives -eo pipefail: a failing xcodebuild piped into tee
+        # must fail the step.
+        shell: bash
+    env:
+      XCODE_VERSION: "26.6"
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      PROJECT: ios/Prisma.xcodeproj
+      SCHEME: Prisma
+      BUNDLE_ID: com.brighina.prisma
+      MIN_OS: "26.0"
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set paths and build identity
+        run: |
+          # The runner context is not available in job-level env, so paths under
+          # RUNNER_TEMP are exported here. SHORT_SHA is what the app displays.
+          {
+            echo "ARCHIVE=$RUNNER_TEMP/Prisma.xcarchive"
+            echo "DERIVED_DATA=$RUNNER_TEMP/DerivedData"
+            echo "BUILD_LOG=$RUNNER_TEMP/xcodebuild.log"
+            echo "IPA_DIR=$RUNNER_TEMP/ipa"
+            echo "SHORT_SHA=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          } >> "$GITHUB_ENV"
+
+      - name: Select Xcode ${{ env.XCODE_VERSION }}
+        run: |
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            echo "::error title=Pinned Xcode missing::$DEVELOPER_DIR does not exist on this runner image. Pick an installed version below and update XCODE_VERSION and DEVELOPER_DIR in .github/workflows/ios.yml."
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          actual="$(xcodebuild -version | awk 'NR == 1')"
+          echo "$actual"
+          if [ "$actual" != "Xcode $XCODE_VERSION" ]; then
+            echo "::error title=Wrong Xcode::Expected 'Xcode $XCODE_VERSION', got '$actual'."
+            exit 1
+          fi
+
+      - name: Environment
+        run: |
+          echo "::group::Runner image"
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          sw_vers
+          echo "bash $BASH_VERSION"
+          echo "::endgroup::"
+          echo "::group::Xcode and SDKs"
+          xcodebuild -version
+          xcodebuild -showsdks
+          echo "::endgroup::"
+          echo "commit $SHORT_SHA, run number $GITHUB_RUN_NUMBER"
+
+      - name: Check the Xcode project opens
+        run: |
+          # plutil catches syntax errors in project.pbxproj with a line number;
+          # xcodebuild -list catches a project that parses but is semantically damaged.
+          plutil -lint "$PROJECT/project.pbxproj"
+          plutil -lint ios/Prisma-Info.plist
+          xcodebuild -list -project "$PROJECT"
+
+      - name: Ensure the iOS platform is installed
+        run: |
+          # Xcode 26 refuses 'generic/platform=iOS' ("iOS 26.x is not installed")
+          # when the runtime matching the iOS SDK is absent, which has happened on
+          # these images after Xcode updates (actions/runner-images#13853, #14000).
+          sdk="$(xcrun --sdk iphoneos --show-sdk-version)"
+          runtimes="$(xcrun simctl list runtimes)"
+          echo "iphoneos SDK: $sdk"
+          echo "$runtimes"
+          # Runtime lines look like: iOS 26.5 (26.5 - 23F77) - com.apple.CoreSimulator...
+          if printf '%s\n' "$runtimes" | awk -v v="$sdk" '$1 == "iOS" && ($2 == v || index($2, v ".") == 1) { found = 1 } END { exit !found }'; then
+            echo "iOS $sdk runtime present."
+          else
+            echo "::warning title=iOS platform missing from image::No iOS $sdk runtime on this image; downloading it. The build continues but takes several minutes longer."
+            xcodebuild -downloadPlatform iOS
+          fi
+          echo "::group::Destinations"
+          xcodebuild -showdestinations -project "$PROJECT" -scheme "$SCHEME"
+          echo "::endgroup::"
+
+      - name: Build and archive (unsigned)
+        run: |
+          # Signing happens later on Windows with Sideloadly, so it is disabled here.
+          # CURRENT_PROJECT_VERSION and PRISMA_COMMIT_SHA identify this exact run on
+          # the app's screen; command-line settings override the project's values.
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE" \
+            -derivedDataPath "$DERIVED_DATA" \
+            -hideShellScriptEnvironment \
+            CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            PRISMA_COMMIT_SHA="$SHORT_SHA" \
+            2>&1 | tee "$BUILD_LOG"
+
+      - name: Package Prisma.ipa
+        run: |
+          app="$ARCHIVE/Products/Applications/Prisma.app"
+          if [ ! -d "$app" ]; then
+            echo "::error title=No app in archive::$app not found. Archive contents follow."
+            find "$ARCHIVE" -maxdepth 4
+            exit 1
+          fi
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$app" "$IPA_DIR/Payload/"
+          cd "$IPA_DIR"
+          zip -qryX Prisma.ipa Payload
+          rm -rf Payload
+          ls -l Prisma.ipa
+
+      - name: Verify Prisma.ipa
+        run: |
+          work="$RUNNER_TEMP/verify"
+          rm -rf "$work"
+          mkdir -p "$work"
+          unzip -q "$IPA_DIR/Prisma.ipa" -d "$work"
+
+          echo "::group::ipa listing"
+          unzip -l "$IPA_DIR/Prisma.ipa"
+          echo "::endgroup::"
+
+          app="$work/Payload/Prisma.app"
+          plist="$app/Info.plist"
+          bin="$app/Prisma"
+          failed=0
+          fail() { echo "::error title=ipa verification::$1"; failed=1; }
+
+          if [ ! -d "$app" ]; then fail "Payload/Prisma.app missing from the ipa"; exit 1; fi
+          if [ ! -f "$plist" ]; then fail "Payload/Prisma.app/Info.plist missing"; exit 1; fi
+          [ -x "$bin" ] || fail "Payload/Prisma.app/Prisma executable missing or not executable"
+          plutil -lint "$plist" || fail "Info.plist does not parse"
+
+          echo "::group::Info.plist"
+          plutil -p "$plist"
+          echo "::endgroup::"
+
+          key() { plutil -extract "$1" raw -o - "$plist" 2>/dev/null || echo "<missing>"; }
+          expect() {
+            actual="$(key "$1")"
+            if [ "$actual" = "$2" ]; then
+              echo "ok  $1 = $actual"
+            else
+              fail "Info.plist $1 is '$actual', expected '$2'"
+            fi
+          }
+          expect CFBundleIdentifier "$BUNDLE_ID"
+          expect CFBundleExecutable Prisma
+          expect CFBundlePackageType APPL
+          expect MinimumOSVersion "$MIN_OS"
+          expect CFBundleVersion "$GITHUB_RUN_NUMBER"
+          expect PrismaCommitSHA "$SHORT_SHA"
+
+          # The binary's own build-version load command must agree with Info.plist.
+          echo "::group::Mach-O"
+          lipo -archs "$bin"
+          xcrun vtool -show-build "$bin"
+          echo "::endgroup::"
+          archs="$(lipo -archs "$bin")"
+          [ "$archs" = "arm64" ] || fail "binary architectures are '$archs', expected 'arm64'"
+          minos="$(xcrun vtool -show-build "$bin" | awk '$1 == "minos" { v = $2 } END { print v }')"
+          [ "$minos" = "$MIN_OS" ] || fail "binary minos is '$minos', expected '$MIN_OS'"
+
+          if [ "$failed" != 0 ]; then exit 1; fi
+
+          {
+            echo "### Prisma.ipa"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Version | \`$(key CFBundleShortVersionString)\` |"
+            echo "| Build | \`$GITHUB_RUN_NUMBER\` |"
+            echo "| Commit | \`$SHORT_SHA\` |"
+            echo "| Minimum iOS | \`$minos\` |"
+            echo "| Toolchain | Xcode \`$XCODE_VERSION\`, SDK \`$(key DTSDKName)\` |"
+            echo "| Size | $(du -h "$IPA_DIR/Prisma.ipa" | cut -f1) |"
+            echo
+            echo "Unsigned. Sign and install with Sideloadly: see \`ios/BUILD.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Prisma.ipa
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ runner.temp }}/ipa/Prisma.ipa
+          # Uploaded as-is, so the download is Prisma.ipa itself rather than a zip
+          # wrapping it. With archive: false the artifact is named after the file.
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload xcodebuild log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summarise build errors
+        if: failure()
+        run: |
+          if [ ! -f "$BUILD_LOG" ]; then
+            echo "xcodebuild never ran; the failure is in an earlier step, see its log."
+            exit 0
+          fi
+          prefix="$GITHUB_WORKSPACE/"
+          # One annotation per distinct compiler diagnostic, with a repo-relative path.
+          # A grep that matches nothing must not abort this step under pipefail, and
+          # awk rather than head avoids a SIGPIPE on sort.
+          { grep -E '^/.+:[0-9]+:[0-9]+: (fatal )?error: ' "$BUILD_LOG" || true; } | sort -u | awk 'NR <= 20' |
+          while IFS= read -r line; do
+            loc="${line%%: error: *}"
+            loc="${loc%%: fatal error: *}"
+            msg="${line#*error: }"
+            file="${loc%:*:*}"
+            pos="${loc#"$file":}"
+            echo "::error file=${file#"$prefix"},line=${pos%%:*},col=${pos#*:}::$msg"
+          done
+          {
+            echo "### xcodebuild errors"
+            echo '```'
+            { grep -nE '(^|: )(fatal )?error: |^\*\* [A-Z ]+ FAILED \*\*|The following build commands failed' "$BUILD_LOG" || true; } | awk 'NR <= 60'
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "::group::Last 80 lines of xcodebuild.log"
+          tail -n 80 "$BUILD_LOG"
+          echo "::endgroup::"
