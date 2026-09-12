@@ -60,6 +60,8 @@ These come from Apple and apply per Apple ID, whichever tool does the signing.
 4. Scroll to **Artifacts** at the bottom of the summary and download **`Prisma.ipa`**.
    It downloads as the `.ipa` itself, not a zip. There is also an `xcodebuild-log`
    artifact, which you only need when a build fails.
+   Use the browser for this. `gh run download` treats the `.ipa` as a zip and unpacks
+   it into a `Payload/` folder, which Sideloadly cannot use.
 
 Artifacts are kept for 30 days. To get an older build, re-run its workflow or push a
 new commit.
