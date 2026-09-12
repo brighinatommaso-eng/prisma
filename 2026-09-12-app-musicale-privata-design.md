@@ -143,7 +143,7 @@ jobs(
 | `GET` | `/tracks/{id}/artwork` | JPEG copertina |
 | `GET` | `/health` | versione yt-dlp, spazio disco, numero brani |
 
-**Attenzione su Range:** `FileResponse` di Starlette non gestisce le richieste Range in tutte le versioni. Va verificato e, se assente, implementato a mano. Senza Range, un download interrotto al 90% riparte da zero.
+**Range — verificato:** `FileResponse` di Starlette **1.6.0 implementa le richieste Range** (`_parse_range_header`, `_handle_single_range`, `_handle_multiple_ranges`), quindi non serve implementarlo a mano. Misurato sul deploy, non dedotto dalla documentazione: `curl -r 0-1023` risponde `206` con `content-range: bytes 0-1023/7069872` e 1024 byte esatti; una richiesta senza header `Range` risponde `200` con il file intero; scaricando lo stesso file in due metà e concatenandole, lo sha256 coincide con quello nel database. `accept-ranges: bytes` è annunciato sia sul 200 sia sul 206. Resta valido il motivo per cui serve: senza Range un download interrotto al 90% ripartirebbe da zero. Da riverificare se la versione di Starlette cambia.
 
 **Coda:** un singolo worker asyncio che consuma la tabella `jobs`. Niente Celery, niente Redis: il carico è un utente e un download alla volta. Aggiungere un broker sarebbe complessità senza beneficio.
 
