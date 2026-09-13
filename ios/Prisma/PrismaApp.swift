@@ -2,9 +2,12 @@ import SwiftUI
 
 @main
 struct PrismaApp: App {
+    @State private var settings = AppSettings()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(settings)
         }
     }
 }

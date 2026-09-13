@@ -2,6 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!--
+	App Transport Security: allow plain http:// to any host.
+
+	The Prisma backend serves plain HTTP on a private network, reached either by a
+	LAN address or a Tailscale address, and the user chooses which at runtime. iOS
+	blocks cleartext HTTP by default, so without this every request fails with
+	URLError -1022.
+
+	NSAllowsLocalNetworking alone is not enough: it does not cover a fully
+	qualified Tailscale MagicDNS name. And if both keys are set, iOS ignores
+	NSAllowsArbitraryLoads. This app is sideloaded for personal use and never goes
+	to App Review, so the broad exception is acceptable here. Tailscale encrypts
+	the traffic between the devices.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<!-- Shown in the iOS prompt the first time the app contacts a LAN address. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Prisma connects to your own music server when its address is on your local network.</string>
+	<!-- Filled by CI with the short commit SHA; shown on the Settings tab. -->
 	<key>PrismaCommitSHA</key>
 	<string>$(PRISMA_COMMIT_SHA)</string>
 </dict>
