@@ -17,13 +17,13 @@ and downloads audio with yt-dlp; a native SwiftUI app keeps the library on the p
 and plays it fully offline. It is sideloaded, never published to the App Store.
 
 The design is in [`2026-09-12-app-musicale-privata-design.md`](2026-09-12-app-musicale-privata-design.md)
-(Italian). Its section 9 sets the build order; the project is currently at step 2.
+(Italian). Its section 9 sets the build order; the project is currently at step 3.
 
 | Step | | State |
 |---|---|---|
 | 1 | Backend, testable with `curl` | phase 1a deployed: search and yt-dlp extraction |
-| 2 | Build pipeline, proven with an empty app | CI builds an installable `.ipa`; the app only shows its build identity |
-| 3 | Functional app, rough UI | not started |
+| 2 | Build pipeline, proven with an empty app | done: CI builds an installable `.ipa`, verified on device |
+| 3 | Functional app, rough UI | in progress: read-only Settings, Search and Library tabs; no downloads or playback yet |
 
 ## Repository layout
 
@@ -47,9 +47,9 @@ GitHub Actions and signed afterwards on Windows.
 - Before uploading, it unpacks the `.ipa` and fails if the bundle id, minimum iOS
   version (26.0), build number or commit SHA are not what they should be. A green run
   means the file is installable, not only that it compiled.
-- The build number is the workflow run number and the commit is the short SHA. The
-  app's only screen shows both, so you can confirm the build on the phone is the one
-  you just made.
+- The build number is the workflow run number and the commit is the short SHA. Both
+  are shown at the bottom of the app's Settings tab, so you can confirm the build on
+  the phone is the one you just made.
 
 **When a build fails**, read the run page from the bottom up. The *Summarise build
 errors* step lists every compiler error with file and line, and each appears as an
@@ -66,6 +66,21 @@ and change `XCODE_VERSION` and `DEVELOPER_DIR` together at the top of the job.
 **Adding source files.** `ios/Prisma/` is a synchronised folder: any `.swift` file
 placed there is compiled with no change to `project.pbxproj`. Build settings still
 live in the project file.
+
+## The app today
+
+Three tabs, in plain SwiftUI with no styling yet. Every request error is shown in
+full on screen (URL, error code, server response), because there is no debugger or
+console on the device.
+
+| Tab | What it does |
+|---|---|
+| **Settings** | Opens first. Stores the backend address on the phone and tests it against `/health`. At the bottom it shows the app's version, build number and commit. |
+| **Search** | Searches YouTube Music through the backend: title, artist, album, duration and a thumbnail per result. |
+| **Library** | Shows the backend's catalogue, albums with covers and their tracks. Pull down to reload. |
+
+Nothing is downloaded or played yet, and nothing except the server address is stored
+on the phone.
 
 ## Installing on the iPhone
 

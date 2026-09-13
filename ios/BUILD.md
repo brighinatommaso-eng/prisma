@@ -92,7 +92,9 @@ approve it. Both steps are one-time for each Apple ID on the phone.
    tap **Turn On** in the prompt that appears, then enter the passcode.
    The Developer Mode entry only appears once a developer-signed app is installed,
    so do step 1.3 first.
-3. Open **Prisma**. The screen lists **Version**, **Build** and **Commit**.
+3. Open **Prisma**. It opens on the **Settings** tab, one of three tabs (Settings,
+   Search, Library). Scroll to the bottom of Settings: the *This build* section lists
+   **Version**, **Build** and **Commit**.
 
 **Check the build.** *Build* must equal the run number and *Commit* the short SHA you
 wrote down in 1.2. If they match, the pipeline works end to end: this is the build you
@@ -149,7 +151,7 @@ in it until you install it again through SideStore.
 4. **Keep the Sideloadly-installed Prisma on the phone while doing this.** SideStore's
    FAQ says installing the same app over an existing one adds it to SideStore's list.
 5. Prisma now appears under My Apps with its own day counter. Open it and check
-   *Build* and *Commit* again.
+   *Build* and *Commit* again, at the bottom of the Settings tab.
 
 If you end up with **two Prisma icons**, SideStore installed it under a different
 bundle identifier (free-account signers can append the team ID). Delete the older
@@ -188,7 +190,8 @@ Push to `main`, wait for a green run, download its `Prisma.ipa`, then:
   SideStore manages Prisma, always update through SideStore, so you stay on the same
   bundle identifier and keep the data.
 
-After updating, open Prisma and check that *Build* shows the new run number.
+After updating, open Prisma and check that *Build*, at the bottom of the Settings tab,
+shows the new run number.
 
 ---
 
