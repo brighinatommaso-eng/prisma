@@ -13,6 +13,7 @@ final class AppModel {
         let container: ModelContainer
         let downloads: DownloadManager
         let sync: LibrarySync
+        let playback: PlaybackEngine
     }
 
     let settings: AppSettings
@@ -30,7 +31,8 @@ final class AppModel {
             settings.onAddressChange = { [downloads] previous, new in
                 downloads.serverAddressChanged(from: previous, to: new)
             }
-            services = Services(container: container, downloads: downloads, sync: sync)
+            let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
+            services = Services(container: container, downloads: downloads, sync: sync, playback: playback)
             launchError = nil
             downloads.checkTransfers(reason: "app launch")
         } catch {

@@ -157,6 +157,21 @@ final class DownloadManager {
         notices.removeAll()
     }
 
+    // MARK: - Used by PlaybackEngine
+
+    /// Playback found this downloaded track's file missing or unreadable. Marks it
+    /// failed with cause `fileMissing`, the same outcome as the launch check for a
+    /// vanished file, so Retry downloads it again.
+    func recordUnplayableFile(_ track: StoredTrack, error: APIError) {
+        guard track.downloadState == .downloaded else { return }
+        track.fileName = nil
+        track.storedBytes = nil
+        track.errorText = error.fullText
+        track.failureCause = .fileMissing
+        track.downloadState = .failed
+        save("recording a track that could not be played")
+    }
+
     // MARK: - Used by LibrarySync
 
     /// Before a track row is deleted: stop its transfer and delete its files.

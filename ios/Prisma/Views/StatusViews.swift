@@ -95,6 +95,13 @@ enum Formatting {
         return "\(clamped / 60) min " + String(format: "%02d", clamped % 60) + " s"
     }
 
+    /// "3:07" for a playback position.
+    static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite else { return "--:--" }
+        let total = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
     static func time(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
     }

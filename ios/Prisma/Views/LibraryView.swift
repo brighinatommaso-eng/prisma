@@ -119,18 +119,7 @@ struct LibraryView: View {
     }
 
     private func sortedTracks(_ list: [StoredTrack]) -> [StoredTrack] {
-        list.sorted {
-            switch ($0.trackNo, $1.trackNo) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (.some, .none):
-                return true
-            case (.none, .some):
-                return false
-            default:
-                return ($0.title ?? "").localizedStandardCompare($1.title ?? "") == .orderedAscending
-            }
-        }
+        StoredTrack.albumOrder(list)
     }
 }
 
@@ -169,13 +158,31 @@ private struct LocalAlbumRow: View {
 private struct LocalTrackRow: View {
     let track: StoredTrack
 
+    @Environment(PlaybackEngine.self) private var playback
+
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(track.trackNo.map { String($0) } ?? "–")
                 .font(.body.monospacedDigit())
                 .frame(minWidth: 24, alignment: .trailing)
             VStack(alignment: .leading, spacing: 2) {
-                Text(track.title ?? "(no title)")
+                if track.downloadState == .downloaded {
+                    // Plays this track and queues the rest of its album.
+                    Button {
+                        playback.play(track: track)
+                    } label: {
+                        Label(track.title ?? "(no title)", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderless)
+                } else {
+                    Text(track.title ?? "(no title)")
+                    Text("Download to play.")
+                        .font(.caption)
+                }
+                if playback.currentTrackID == track.serverID {
+                    Text(playback.isPlaying ? "Now playing" : "Current track, paused")
+                        .font(.caption)
+                }
                 Text(Formatting.duration(track.durationS))
                     .font(.caption)
                 TrackDownloadStatus(track: track)

@@ -24,6 +24,14 @@
 	<!-- Shown in the iOS prompt the first time the app contacts a LAN address. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Prisma connects to your own music server when its address is on your local network.</string>
+	<!--
+	Background audio: keeps playback going with the screen locked or the app in
+	the background. Without it iOS suspends the app and the music stops.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<!-- Filled by CI with the short commit SHA; shown on the Settings tab. -->
 	<key>PrismaCommitSHA</key>
 	<string>$(PRISMA_COMMIT_SHA)</string>
