@@ -22,6 +22,87 @@ enum DownloadState: String, CaseIterable {
     }
 }
 
+/// Why a track is in the `failed` state. Recorded where the failure happens,
+/// never worked out afterwards from the error text.
+enum FailureCause: String, CaseIterable {
+    /// The server could not be reached: a URLError from the pre-flight check or
+    /// from the transfer itself.
+    case unreachable
+    /// Handed to iOS, but no data arrived before the start deadline.
+    case neverStarted
+    /// No valid server address was saved when the download was attempted.
+    case noAddress
+    /// The server answered with an error status, e.g. 404 or 410.
+    case httpStatus
+    /// The received file did not match its SHA-256.
+    case verification
+    /// Not enough free space, or a file operation failed.
+    case storage
+    /// The server gave no SHA-256 or file size for the track.
+    case missingServerData
+    /// The server's copy of the file changed during the download.
+    case serverFileChanged
+    /// The track was marked downloaded but its file was gone.
+    case fileMissing
+    /// iOS cancelled the transfer, e.g. Background App Refresh is off.
+    case systemCancelled
+    case other
+
+    /// Failures a different server address can fix. Saving a new address
+    /// retries exactly these.
+    var isAddressRelated: Bool {
+        switch self {
+        case .unreachable, .neverStarted, .noAddress:
+            return true
+        case .httpStatus, .verification, .storage, .missingServerData, .serverFileChanged,
+             .fileMissing, .systemCancelled, .other:
+            return false
+        }
+    }
+
+    /// Why an address change leaves a failure of this kind alone.
+    var notRevivedReason: String {
+        switch self {
+        case .unreachable, .neverStarted, .noAddress:
+            return "revived by an address change"
+        case .httpStatus:
+            return "the server answered with an error status such as 404, so it does not have the file"
+        case .verification:
+            return "the file failed SHA-256 verification, which an address cannot fix"
+        case .storage:
+            return "not enough free space or a file could not be written"
+        case .missingServerData:
+            return "the server gave no SHA-256 or file size; sync the library first"
+        case .serverFileChanged:
+            return "the server's file changed during the download"
+        case .fileMissing:
+            return "the downloaded file disappeared from this iPhone"
+        case .systemCancelled:
+            return "iOS cancelled the transfer"
+        case .other:
+            return "an error unrelated to reaching the server"
+        }
+    }
+
+    /// Classifies an error by its typed kind.
+    static func of(_ error: APIError) -> FailureCause {
+        switch error.kind {
+        case .transport:
+            return .unreachable
+        case .notConfigured, .invalidAddress:
+            return .noAddress
+        case .http:
+            return .httpStatus
+        case .verification:
+            return .verification
+        case .storage:
+            return .storage
+        case .invalidInput, .cancelled, .invalidResponse, .decoding, .notAnImage, .unexpected:
+            return .other
+        }
+    }
+}
+
 /// Mirror of one album from /library.
 @Model
 final class StoredAlbum {
@@ -82,6 +163,9 @@ final class StoredTrack {
     var lastSessionError: String?
     /// Full error text while `failed`.
     var errorText: String?
+    /// Raw value of `failureCause`. Stored raw, like `downloadStateRaw`; read and
+    /// write it only through `failureCause`.
+    var failureCauseRaw: String?
     /// Informational line about the last automatic action, e.g. a restart.
     var note: String?
     /// Name of the audio file in Application Support/Music while `downloaded`.
@@ -104,7 +188,18 @@ final class StoredTrack {
         set {
             downloadStateRaw = newValue.rawValue
             stateChangedAt = Date()
+            // A cause only describes the current failure.
+            if newValue != .failed {
+                failureCauseRaw = nil
+            }
         }
+    }
+
+    /// Why the track failed; nil while not failed, and for failures recorded
+    /// before causes existed.
+    var failureCause: FailureCause? {
+        get { failureCauseRaw.flatMap { FailureCause(rawValue: $0) } }
+        set { failureCauseRaw = newValue?.rawValue }
     }
 }
 

@@ -93,7 +93,7 @@ final class DownloadManager {
         switch track.downloadState {
         case .notDownloaded, .failed, .cancelled:
             Task {
-                await enqueue(track, note: nil, keepQueuePosition: false, failureLead: nil)
+                await enqueue(track, automatic: false, note: nil, keepQueuePosition: false, failureLead: nil)
             }
         case .queued, .downloading, .downloaded:
             refusals[track.serverID] = .invalidInput("Nothing to do", detail: "This track is already \(track.downloadState.label.lowercased()).")
@@ -196,6 +196,7 @@ final class DownloadManager {
             track.taskIdentifier = nil
             track.resumeData = nil
             track.errorText = "The server's copy of this track changed while it was downloading, so the transfer was stopped. Retry to download the new file."
+            track.failureCause = .serverFileChanged
             track.downloadState = .failed
         case .failed, .cancelled:
             // Resume data refers to the old file and must not be continued.
@@ -257,6 +258,7 @@ final class DownloadManager {
                 let resuming = track.resumeData != nil && track.targetAddress == settings.savedAddress
                 await enqueue(
                     track,
+                    automatic: true,
                     note: "Restarted automatically (\(reason)): iOS no longer had a transfer for it"
                         + (resuming ? ", resuming from where it stopped." : ", starting from the beginning."),
                     keepQueuePosition: true,
@@ -322,6 +324,7 @@ final class DownloadManager {
                 track.fileName = nil
                 track.storedBytes = nil
                 track.errorText = "The track was marked downloaded, but its audio file is no longer on this iPhone. Retry to download it again."
+                track.failureCause = .fileMissing
                 track.downloadState = .failed
                 missing += 1
             }
@@ -416,26 +419,43 @@ final class DownloadManager {
         let bytes: Int
     }
 
+    /// An error from `prepare`, with its cause decided at the check that failed.
+    private nonisolated struct PrepareFailure: Error {
+        let cause: FailureCause
+        let error: APIError
+    }
+
     /// Checks that need no network: session, hash, size, address, free space.
-    private func prepare(_ track: StoredTrack) throws -> Prepared {
+    private func prepare(_ track: StoredTrack) -> Result<Prepared, PrepareFailure> {
         guard session != nil else {
-            throw APIError.invalidInput("Downloads unavailable", detail: "The background download session was not created.")
+            return .failure(PrepareFailure(cause: .other, error: .invalidInput(
+                "Downloads unavailable", detail: "The background download session was not created."
+            )))
         }
         guard let sha = track.sha256?.lowercased(), sha.count == 64 else {
-            throw APIError.invalidInput(
+            return .failure(PrepareFailure(cause: .missingServerData, error: .invalidInput(
                 "Cannot verify this track",
                 detail: "The server gave no valid SHA-256 for track \(track.serverID) (got \"\(track.sha256 ?? "nothing")\"), so a download could not be checked. Sync the library and try again."
-            )
+            )))
         }
         guard let bytes = track.fileBytes, bytes > 0 else {
-            throw APIError.invalidInput(
+            return .failure(PrepareFailure(cause: .missingServerData, error: .invalidInput(
                 "Unknown file size",
                 detail: "The server gave no file size for track \(track.serverID), so free space cannot be checked. Sync the library and try again."
-            )
+            )))
         }
-        let client = try settings.makeClient()
-        try checkFreeSpace(for: track, bytes: bytes)
-        return Prepared(client: client, address: settings.savedAddress, sha: sha, bytes: bytes)
+        let client: APIClient
+        do {
+            client = try settings.makeClient()
+        } catch {
+            return .failure(PrepareFailure(cause: .noAddress, error: .from(error)))
+        }
+        do {
+            try checkFreeSpace(for: track, bytes: bytes)
+        } catch {
+            return .failure(PrepareFailure(cause: .storage, error: .from(error)))
+        }
+        return .success(Prepared(client: client, address: settings.savedAddress, sha: sha, bytes: bytes))
     }
 
     /// Every download goes through here: local checks, then a pre-flight request
@@ -446,24 +466,36 @@ final class DownloadManager {
     /// `failureLead` explains an automatic restart that could not be done.
     /// Returns the error when the pre-flight could not reach the server at all, so
     /// a batch can stop probing an address that is not there.
+    /// `automatic` is false only for a tap on Download or Retry, where a local
+    /// problem is shown as a refusal and the track is left as it was.
     @discardableResult
-    private func enqueue(_ track: StoredTrack, note: String?, keepQueuePosition: Bool, failureLead: String?) async -> APIError? {
+    private func enqueue(
+        _ track: StoredTrack,
+        automatic: Bool,
+        note: String?,
+        keepQueuePosition: Bool,
+        failureLead: String?
+    ) async -> APIError? {
         let trackID = track.serverID
         let stateBefore = track.downloadState
-        let isAutomatic = stateBefore == .queued || stateBefore == .downloading
 
         let prepared: Prepared
-        do {
-            prepared = try prepare(track)
-        } catch {
-            let apiError = APIError.from(error)
-            if isAutomatic {
-                failTrack(track, error: apiError, lead: failureLead)
+        switch prepare(track) {
+        case .success(let value):
+            prepared = value
+        case .failure(let failure):
+            if automatic {
+                failTrack(track, error: failure.error, lead: failureLead, cause: failure.cause)
             } else {
                 // Nothing was attempted: refuse and leave the track as it was.
-                refusals[trackID] = apiError
+                refusals[trackID] = failure.error
             }
             return nil
+        }
+        // The queue position is when the download was asked for, so tracks whose
+        // pre-flight fails keep their place for a later revival.
+        if !keepQueuePosition || track.queuedAt == nil {
+            track.queuedAt = Date()
         }
 
         preflights[trackID] = Date()
@@ -478,7 +510,8 @@ final class DownloadManager {
                 track,
                 error: apiError,
                 lead: (failureLead.map { $0 + " " } ?? "")
-                    + "Pre-flight check failed: the server did not serve this track's file, so no transfer was queued."
+                    + "Pre-flight check failed: the server did not serve this track's file, so no transfer was queued.",
+                cause: .of(apiError)
             )
             return apiError.kind == .transport ? apiError : nil
         }
@@ -487,9 +520,9 @@ final class DownloadManager {
         guard !track.isDeleted, track.downloadState == stateBefore else { return nil }
 
         do {
-            try handToSession(track, prepared: prepared, probe: probe, note: note, keepQueuePosition: keepQueuePosition)
+            try handToSession(track, prepared: prepared, probe: probe, note: note)
         } catch {
-            failTrack(track, error: .from(error), lead: failureLead)
+            failTrack(track, error: .from(error), lead: failureLead, cause: .other)
         }
         return nil
     }
@@ -498,8 +531,7 @@ final class DownloadManager {
         _ track: StoredTrack,
         prepared: Prepared,
         probe: TrackFileProbe,
-        note: String?,
-        keepQueuePosition: Bool
+        note: String?
     ) throws {
         guard let session else {
             throw APIError.invalidInput("Downloads unavailable", detail: "The background download session was not created.")
@@ -525,9 +557,6 @@ final class DownloadManager {
         track.resumeData = nil
         track.downloadToken = token
         track.taskIdentifier = task.taskIdentifier
-        if !keepQueuePosition || track.queuedAt == nil {
-            track.queuedAt = Date()
-        }
         track.attemptStartedAt = Date()
         track.targetAddress = prepared.address
         track.preflightSummary = probe.summary
@@ -542,7 +571,7 @@ final class DownloadManager {
 
     /// Stores an error in the same shape as `APIError.fullText` (title first), so
     /// the row renders it like every other error in the app.
-    private func failTrack(_ track: StoredTrack, error: APIError, lead: String?) {
+    private func failTrack(_ track: StoredTrack, error: APIError, lead: String?, cause: FailureCause) {
         if let token = track.downloadToken {
             progress[token] = nil
         }
@@ -550,6 +579,7 @@ final class DownloadManager {
         track.taskIdentifier = nil
         track.preflightSummary = nil
         track.errorText = error.title + "\n" + (lead.map { $0 + "\n" } ?? "") + error.detailText
+        track.failureCause = cause
         track.downloadState = .failed
         save("recording a failed download")
     }
@@ -558,16 +588,19 @@ final class DownloadManager {
 
     /// Called when a different server address is saved in Settings.
     ///
-    /// Queued transfers were built against the old address and would keep
-    /// retrying it, so they are stopped and queued again, in their original order,
-    /// each after a pre-flight check against the new address.
+    /// Two kinds of track are sent through the pre-flight again, together and in
+    /// their original queue order:
+    /// - queued transfers built against the old address, which would keep
+    ///   retrying it; they are stopped first;
+    /// - failed tracks whose recorded cause is address-related
+    ///   (`FailureCause.isAddressRelated`): the pre-flight or the transfer could
+    ///   not reach the server, or it never started. Other failures are left alone.
     ///
     /// Transfers already receiving data are left to finish: data arriving proves
     /// the old address reaches the server, every file is checked against its
     /// SHA-256 whichever address served it, and restarting would throw the
     /// progress away. If one later fails, Retry uses the new address.
     func serverAddressChanged(from previous: String, to new: String) {
-        guard !previous.isEmpty else { return }
         Task {
             await retarget(from: previous, to: new)
         }
@@ -578,7 +611,7 @@ final class DownloadManager {
         do {
             tracks = try context.fetch(FetchDescriptor<StoredTrack>())
         } catch {
-            notice("The server address changed, but queued downloads could not be read to re-target them: \(error.localizedDescription)")
+            notice("The server address changed, but downloads could not be read to re-target them: \(error.localizedDescription)")
             return
         }
 
@@ -589,32 +622,50 @@ final class DownloadManager {
             discardedResume += 1
         }
 
-        let queued = tracks
-            .filter { $0.downloadState == .queued && $0.targetAddress != new && preflights[$0.serverID] == nil }
-            .sorted { ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast) }
+        let queued = tracks.filter {
+            $0.downloadState == .queued && $0.targetAddress != new && preflights[$0.serverID] == nil
+        }
+        let revivable = tracks.filter {
+            $0.downloadState == .failed && ($0.failureCause?.isAddressRelated ?? false) && preflights[$0.serverID] == nil
+        }
+        let leftAlone = tracks.filter {
+            $0.downloadState == .failed && !($0.failureCause?.isAddressRelated ?? false)
+        }
         let running = tracks.filter { $0.downloadState == .downloading && $0.targetAddress != new }
+        let wasQueued = Set(queued.map(\.serverID))
+        let candidates = (queued + revivable)
+            .sorted { ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast) }
 
         // Stop every old transfer before checking any, so none keeps retrying the
-        // old address while the others wait their turn.
-        for track in queued {
-            if let token = track.downloadToken {
-                progress[token] = nil
-                cancelTransfer(token: token)
+        // old address while the others wait their turn. Every candidate is marked
+        // as pending so the transfer check and the start deadline leave it alone.
+        for track in candidates {
+            if wasQueued.contains(track.serverID) {
+                if let token = track.downloadToken {
+                    progress[token] = nil
+                    cancelTransfer(token: token)
+                }
+                track.downloadToken = nil
+                track.taskIdentifier = nil
+                track.resumeData = nil
             }
-            track.downloadToken = nil
-            track.taskIdentifier = nil
-            track.resumeData = nil
             preflights[track.serverID] = Date()
         }
         save("stopping transfers built against the previous address")
 
-        var started = 0
-        var failed = 0
+        var requeued = 0
+        var revived = 0
+        var failedAgain = 0
         var skipped = 0
         var unreachable: APIError?
-        for track in queued {
+        for track in candidates {
             preflights[track.serverID] = nil
-            guard !track.isDeleted, track.downloadState == .queued else {
+            let fromQueue = wasQueued.contains(track.serverID)
+            // Changed meanwhile: cancelled, retried or dismissed by hand, or removed by a sync.
+            let unchanged = fromQueue
+                ? track.downloadState == .queued
+                : track.downloadState == .failed && (track.failureCause?.isAddressRelated ?? false)
+            guard !track.isDeleted, unchanged else {
                 skipped += 1
                 continue
             }
@@ -622,30 +673,52 @@ final class DownloadManager {
                 failTrack(
                     track,
                     error: unreachable,
-                    lead: "Not checked separately: the pre-flight check for the previous track in the queue could not reach the server at \(new)."
+                    lead: "Not checked separately: the pre-flight check for an earlier track in the queue could not reach the server at \(new).",
+                    cause: .unreachable
                 )
-                failed += 1
+                failedAgain += 1
                 continue
             }
             unreachable = await enqueue(
                 track,
-                note: "Re-targeted to \(new) after the server address changed.",
+                automatic: true,
+                note: fromQueue
+                    ? "Re-targeted to \(new) after the server address changed."
+                    : "Retried automatically against \(new) after the server address changed; it had failed because the server could not be reached.",
                 keepQueuePosition: true,
-                failureLead: "The server address changed and this download could not be re-targeted."
+                failureLead: "The server address changed to \(new), and retrying this download against it failed."
             )
             if track.downloadState == .queued {
-                started += 1
+                if fromQueue { requeued += 1 } else { revived += 1 }
             } else {
-                failed += 1
+                failedAgain += 1
             }
         }
 
-        var lines = ["Server address changed from \(previous) to \(new)."]
-        if !queued.isEmpty {
-            var line = "\(queued.count) queued download(s) re-targeted in their original order: \(started) queued again against the new address"
-            if failed > 0 { line += ", \(failed) failed their pre-flight check (their rows show why)" }
-            if skipped > 0 { line += ", \(skipped) skipped because they were cancelled or removed meanwhile" }
+        var lines = ["Server address changed from \(previous.isEmpty ? "(none)" : previous) to \(new)."]
+        if !candidates.isEmpty {
+            var parts: [String] = []
+            if !queued.isEmpty { parts.append("\(queued.count) queued") }
+            if !revivable.isEmpty { parts.append("\(revivable.count) failed because the server could not be reached") }
+            var line = "Checked again against the new address, in their original order: " + parts.joined(separator: " and ") + "."
+            line += " Result: \(requeued + revived) now queued"
+            if revived > 0 { line += " (\(revived) of them revived from failed)" }
+            if failedAgain > 0 { line += ", \(failedAgain) failed again (their rows show why)" }
+            if skipped > 0 { line += ", \(skipped) skipped because they were changed or removed meanwhile" }
             lines.append(line + ".")
+        }
+        if !leftAlone.isEmpty {
+            var byCause: [String: Int] = [:]
+            for track in leftAlone {
+                let reason = track.failureCause?.notRevivedReason
+                    ?? "the failure was recorded before this build tracked causes, so it cannot be told apart"
+                byCause[reason, default: 0] += 1
+            }
+            let detail = byCause
+                .sorted { $0.value > $1.value }
+                .map { "\($0.value): \($0.key)" }
+                .joined(separator: "\n  ")
+            lines.append("\(leftAlone.count) failed download(s) left alone, still retryable by hand, because an address change cannot fix them:\n  " + detail)
         }
         if !running.isEmpty {
             lines.append("\(running.count) running transfer(s) left to finish on the previous address: they were already receiving data, and each file is checked against its SHA-256 whichever address served it, so restarting would only discard progress. If one fails, Retry uses the new address.")
@@ -653,7 +726,7 @@ final class DownloadManager {
         if discardedResume > 0 {
             lines.append("\(discardedResume) failed or cancelled download(s) had resume data for the previous address discarded; Retry starts them from the beginning.")
         }
-        if queued.isEmpty && running.isEmpty && discardedResume == 0 {
+        if candidates.isEmpty && leftAlone.isEmpty && running.isEmpty && discardedResume == 0 {
             lines.append("No downloads were affected.")
         }
         notice(lines.joined(separator: "\n"))
@@ -728,7 +801,7 @@ final class DownloadManager {
                     "Hint: the server may not be reachable at \(target). Open Settings, check the address with Test connection, then tap Retry.",
                 ]
             )
-            failTrack(track, error: error, lead: nil)
+            failTrack(track, error: error, lead: nil, cause: .neverStarted)
             neverStarted.append(track.title ?? track.serverID)
         }
         if !neverStarted.isEmpty {
@@ -852,6 +925,7 @@ final class DownloadManager {
 
         case .outcome(.failed(let error)):
             track.errorText = error.fullText
+            track.failureCause = .of(error)
             track.downloadState = .failed
 
         case .transportError(let error, let resumeData, let reason):
@@ -867,6 +941,7 @@ final class DownloadManager {
                     preflights[track.serverID] = nil
                     await enqueue(
                         track,
+                        automatic: true,
                         note: "Restarted automatically: closing the app from the app switcher stopped the transfer"
                             + (resumeData != nil ? ". Resuming from where it stopped if the address is unchanged." : ". Starting from the beginning."),
                         keepQueuePosition: true,
@@ -883,6 +958,7 @@ final class DownloadManager {
                     text += "\nRetry continues from where it stopped."
                 }
                 track.errorText = text
+                track.failureCause = reason != nil ? .systemCancelled : .of(error)
                 track.downloadState = .failed
             }
         }
