@@ -6,7 +6,7 @@ import UIKit
 /// state. Used by both the Library and Downloads tabs.
 struct TrackDownloadStatus: View {
     let track: StoredTrack
-    /// Downloads tab: also show how long a queued item has been waiting.
+    /// Downloads tab: also show when the track first entered the queue.
     var showTiming = false
 
     @Environment(DownloadManager.self) private var downloads
@@ -16,7 +16,16 @@ struct TrackDownloadStatus: View {
             Text(stateLine)
                 .font(.caption)
 
-            if track.downloadState == .queued || track.downloadState == .downloading {
+            if let since = downloads.preflights[track.serverID] {
+                LoadingRow(
+                    message: "Pre-flight: checking the server can serve this file…",
+                    since: since,
+                    timeout: APIClient.Timeout.probe
+                )
+                .font(.caption)
+            } else if track.downloadState == .queued {
+                queuedView
+            } else if track.downloadState == .downloading {
                 progressView
             }
 
@@ -26,22 +35,17 @@ struct TrackDownloadStatus: View {
             }
 
             if track.downloadState == .failed, let errorText = track.errorText {
-                Text(errorText)
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button("Copy error text") {
-                    UIPasteboard.general.string = errorText
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
+                ErrorReport(storedText: errorText)
             }
 
             if let refusal = downloads.refusals[track.serverID] {
                 ErrorReport(error: refusal)
             }
 
-            actions
+            // No actions while a pre-flight runs: its result decides the state.
+            if downloads.preflights[track.serverID] == nil {
+                actions
+            }
         }
     }
 
@@ -56,6 +60,33 @@ struct TrackDownloadStatus: View {
         }
     }
 
+    /// Queued: how long this attempt has waited, what iOS last said, and when it
+    /// will give up, so waiting is never silent.
+    @ViewBuilder
+    private var queuedView: some View {
+        if let started = track.attemptStartedAt {
+            TimelineView(.periodic(from: started, by: 1)) { context in
+                let waited = Int(context.date.timeIntervalSince(started))
+                Text("Waiting \(Formatting.elapsed(waited)) for iOS to start the transfer. If no data arrives within \(Int(DownloadManager.startDeadline / 60)) min it fails as never started.")
+                    .font(.caption2.monospacedDigit())
+            }
+        } else {
+            Text("Queued, but no start time was recorded for this attempt.")
+                .font(.caption2)
+        }
+        Text("Last problem reported by iOS: \(track.lastSessionError ?? "none so far")")
+            .font(.caption2)
+        if let summary = track.preflightSummary {
+            Text(summary)
+                .font(.caption2)
+                .textSelection(.enabled)
+        }
+        if showTiming, let queuedAt = track.queuedAt {
+            Text("In the queue since \(Formatting.time(queuedAt)).")
+                .font(.caption2)
+        }
+    }
+
     @ViewBuilder
     private var progressView: some View {
         if let token = track.downloadToken, let progress = downloads.progress[token], progress.expected > 0 {
@@ -63,16 +94,8 @@ struct TrackDownloadStatus: View {
             Text("\(Int((Double(progress.received) / Double(progress.expected) * 100).rounded()))%: \(Formatting.bytes(Int(progress.received))) of \(Formatting.bytes(Int(progress.expected)))")
                 .font(.caption2.monospacedDigit())
         } else {
-            Text(track.downloadState == .queued
-                 ? "Waiting for iOS to start the transfer."
-                 : "No progress reported since the app opened; the transfer is running in the background.")
+            Text("No progress reported since the app opened; the transfer is running in the background.")
                 .font(.caption2)
-        }
-        if showTiming, let queuedAt = track.queuedAt {
-            TimelineView(.periodic(from: queuedAt, by: 1)) { context in
-                Text("Queued \(Int(context.date.timeIntervalSince(queuedAt)))s ago. iOS gives up after \(Int(DownloadManager.transferTimeout / 60)) min without finishing.")
-                    .font(.caption2.monospacedDigit())
-            }
         }
     }
 

@@ -12,6 +12,21 @@ nonisolated struct APIResponse<Value: Sendable>: Sendable {
     var bodyText: String { String(decoding: body, as: UTF8.self) }
 }
 
+/// A successful pre-flight check of a track's file URL.
+nonisolated struct TrackFileProbe: Sendable {
+    let url: URL
+    let status: Int
+    let milliseconds: Int
+    let contentRange: String?
+    let checkedAt: Date
+
+    var summary: String {
+        "Pre-flight OK at \(checkedAt.formatted(date: .omitted, time: .standard)): HTTP \(status) in \(milliseconds) ms"
+            + (contentRange.map { ", Content-Range \($0)" } ?? "")
+            + " from \(url.absoluteString)"
+    }
+}
+
 /// Result of a conditional cover request.
 nonisolated enum CoverFetch: Sendable {
     /// 304: the file already on disk is current.
@@ -36,6 +51,9 @@ nonisolated struct APIClient: Sendable {
         static let search: TimeInterval = 45
         static let library: TimeInterval = 20
         static let image: TimeInterval = 20
+        /// Pre-flight before a background download: long enough for a Tailscale
+        /// round trip, short enough that a wrong address fails while you watch.
+        static let probe: TimeInterval = 6
     }
 
     let address: ServerAddress
@@ -87,6 +105,63 @@ nonisolated struct APIClient: Sendable {
     func trackFileURL(trackID: String) throws -> URL {
         let segment = try ServerAddress.pathSegment(trackID)
         return try address.endpoint("/tracks/" + segment + "/file")
+    }
+
+    /// Checks the server will serve this track's file, without downloading it.
+    ///
+    /// The backend has no HEAD handler, so this is a GET for the first byte
+    /// (`Range: bytes=0-0`, which the backend answers with 206). Only the response
+    /// headers are read and the task is cancelled straight after, so even a server
+    /// that ignored Range could not send the body.
+    func probeTrackFile(trackID: String) async throws -> TrackFileProbe {
+        let url = try trackFileURL(trackID: trackID)
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: Timeout.probe)
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        request.setValue("audio/*", forHTTPHeaderField: "Accept")
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await Self.session.bytes(for: request)
+        } catch {
+            throw APIError.transport(error, url: url)
+        }
+        defer { bytes.task.cancel() }
+        let elapsed = clock.now - start
+        let milliseconds = Int(elapsed.components.seconds) * 1000
+            + Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse(url: url, response: response)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            // Error bodies are small FastAPI JSON; read at most 4 KB of one.
+            var body = Data()
+            var readProblem: String?
+            do {
+                for try await byte in bytes {
+                    body.append(byte)
+                    if body.count >= 4096 { break }
+                }
+            } catch {
+                readProblem = "The error body could not be read completely: \(error.localizedDescription)"
+            }
+            let error = APIError.http(
+                status: http.statusCode, url: url,
+                contentType: http.value(forHTTPHeaderField: "Content-Type"), body: body
+            )
+            guard let readProblem else { throw error }
+            throw APIError(kind: error.kind, title: error.title, url: error.url, details: error.details + [readProblem])
+        }
+        return TrackFileProbe(
+            url: url,
+            status: http.statusCode,
+            milliseconds: milliseconds,
+            contentRange: http.value(forHTTPHeaderField: "Content-Range"),
+            checkedAt: Date()
+        )
     }
 
     /// Image bytes, checked to be declared as an image. The caller still has to

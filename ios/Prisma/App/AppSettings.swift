@@ -9,6 +9,10 @@ final class AppSettings {
 
     @ObservationIgnored private let defaults: UserDefaults
 
+    /// Called after a different address is saved, with the previous and new value.
+    /// AppModel points this at DownloadManager, so queued work follows the address.
+    @ObservationIgnored var onAddressChange: ((_ previous: String, _ new: String) -> Void)?
+
     /// The normalised address as saved, or "" when none has been saved.
     private(set) var savedAddress: String
 
@@ -23,8 +27,12 @@ final class AppSettings {
     func save(_ text: String) throws -> ServerAddress {
         let address = try ServerAddress.parse(text)
         let value = address.url.absoluteString
+        let previous = savedAddress
         defaults.set(value, forKey: Self.serverAddressKey)
         savedAddress = value
+        if previous != value {
+            onAddressChange?(previous, value)
+        }
         return address
     }
 

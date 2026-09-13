@@ -69,7 +69,17 @@ final class StoredTrack {
     /// description, so an event from an older attempt can be recognised.
     var downloadToken: String?
     var taskIdentifier: Int?
+    /// When the track first entered the queue. Kept when an attempt is replaced,
+    /// so re-targeted downloads keep their order.
     var queuedAt: Date?
+    /// When the current background task was created. The start deadline counts from here.
+    var attemptStartedAt: Date?
+    /// The server address the current or last attempt was built against.
+    var targetAddress: String?
+    /// Result of the pre-flight check for the current attempt.
+    var preflightSummary: String?
+    /// The last problem iOS reported about the current attempt while it waited.
+    var lastSessionError: String?
     /// Full error text while `failed`.
     var errorText: String?
     /// Informational line about the last automatic action, e.g. a restart.

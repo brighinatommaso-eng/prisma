@@ -27,6 +27,9 @@ final class AppModel {
             let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self)
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
+            settings.onAddressChange = { [downloads] previous, new in
+                downloads.serverAddressChanged(from: previous, to: new)
+            }
             services = Services(container: container, downloads: downloads, sync: sync)
             launchError = nil
             downloads.checkTransfers(reason: "app launch")

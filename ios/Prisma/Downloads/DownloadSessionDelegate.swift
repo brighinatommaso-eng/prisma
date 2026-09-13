@@ -11,6 +11,7 @@ nonisolated enum TaskResult: Sendable {
 
 nonisolated enum DownloadEvent: Sendable {
     case progress(trackID: String, token: String, received: Int64, expected: Int64)
+    case waitingForConnectivity(trackID: String, token: String, at: Date)
     case finished(trackID: String, token: String, result: TaskResult)
     case unmatched(taskIdentifier: Int, error: APIError)
     /// iOS has delivered every event queued for the background session.
@@ -112,6 +113,14 @@ nonisolated final class DownloadSessionDelegate: NSObject, URLSessionDownloadDel
             )))
         }
         deliver(.finished(trackID: descriptor.trackID, token: descriptor.token, result: result))
+    }
+
+    /// iOS reports a transfer that cannot currently reach the network. It does
+    /// not report connection refusals or timeouts while retrying; those surface
+    /// only through the pre-flight check and the start deadline.
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        guard case .success(let descriptor) = DownloadTaskDescriptor.decode(task.taskDescription) else { return }
+        deliver(.waitingForConnectivity(trackID: descriptor.trackID, token: descriptor.token, at: Date()))
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
