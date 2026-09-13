@@ -17,6 +17,8 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
         case invalidResponse
         case decoding
         case notAnImage
+        case storage
+        case verification
         case unexpected
     }
 
@@ -173,6 +175,24 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
             title: "Image could not be decoded",
             url: url.absoluteString,
             details: ["The server declared \(byteCount) bytes of image data, but iOS could not decode them."]
+        )
+    }
+
+    /// A file or database operation failed. `location` is a file path or URL.
+    static func storage(_ title: String, location: URL?, error: Error) -> APIError {
+        if let apiError = error as? APIError {
+            return APIError(kind: .storage, title: title, url: location?.path(percentEncoded: false),
+                            details: [apiError.title] + apiError.details)
+        }
+        let nsError = error as NSError
+        return APIError(
+            kind: .storage,
+            title: title,
+            url: location?.path(percentEncoded: false),
+            details: [
+                "\(nsError.domain) \(nsError.code): \(error.localizedDescription)",
+                "Debug: \(String(describing: error))",
+            ]
         )
     }
 

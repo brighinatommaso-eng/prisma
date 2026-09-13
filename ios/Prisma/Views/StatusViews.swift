@@ -69,6 +69,14 @@ enum Formatting {
         return "\(ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)) (\(count) bytes)"
     }
 
+    static func time(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .standard)
+    }
+
+    static func dateTime(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .standard)
+    }
+
     static func serverLine(_ savedAddress: String) -> String {
         savedAddress.isEmpty ? "Server: not set. Set it in Settings." : "Server: \(savedAddress)"
     }

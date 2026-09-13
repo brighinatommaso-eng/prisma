@@ -12,11 +12,18 @@ nonisolated struct APIResponse<Value: Sendable>: Sendable {
     var bodyText: String { String(decoding: body, as: UTF8.self) }
 }
 
-/// The only code that talks to the Prisma backend.
+/// Result of a conditional cover request.
+nonisolated enum CoverFetch: Sendable {
+    /// 304: the file already on disk is current.
+    case notModified
+    case downloaded(Data, etag: String?)
+}
+
+/// The only code that talks to the Prisma backend in the foreground.
 ///
 /// Views never build URLs: they call a method here and get a decoded value, or an
-/// `APIError` that already holds the full on-screen text. The client holds no
-/// state besides the address, so it is cheap to create for each request.
+/// `APIError` that already holds the full on-screen text. Audio downloads go
+/// through `DownloadManager`'s background session, but take their URL from here.
 nonisolated struct APIClient: Sendable {
     /// Idle timeouts in seconds: how long a request may go without receiving data
     /// before failing with URLError.timedOut. Each is longer than the backend's own
@@ -38,7 +45,8 @@ nonisolated struct APIClient: Sendable {
     }
 
     private static let session: URLSession = {
-        // Ephemeral: nothing is written to disk. Persistence arrives with downloads.
+        // Ephemeral: nothing is written to disk by URLSession. Covers the app keeps
+        // are written explicitly by LibrarySync.
         let configuration = URLSessionConfiguration.ephemeral
         // Fail immediately with no network (airplane mode) rather than waiting for
         // a connection to appear.
@@ -61,14 +69,24 @@ nonisolated struct APIClient: Sendable {
         )
     }
 
-    /// The full catalogue: no `since`, so no delta logic yet.
-    func library() async throws -> APIResponse<Library> {
-        try await getJSON("/library", timeout: Timeout.library)
+    /// The full catalogue when `since` is nil, otherwise only what changed after it.
+    func library(since: Int?) async throws -> APIResponse<Library> {
+        var query: [(name: String, value: String)] = []
+        if let since {
+            query.append((name: "since", value: String(since)))
+        }
+        return try await getJSON("/library", query: query, timeout: Timeout.library)
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.
     func resolve(_ reference: String) throws -> URL {
         try address.resolve(reference)
+    }
+
+    /// GET /tracks/{id}/file, for the background download session.
+    func trackFileURL(trackID: String) throws -> URL {
+        let segment = try ServerAddress.pathSegment(trackID)
+        return try address.endpoint("/tracks/" + segment + "/file")
     }
 
     /// Image bytes, checked to be declared as an image. The caller still has to
@@ -81,12 +99,29 @@ nonisolated struct APIClient: Sendable {
         return fetched.data
     }
 
+    /// A cover, skipped with 304 when `etag` still matches the server's file.
+    func cover(at url: URL, etag: String?) async throws -> CoverFetch {
+        var headers: [String: String] = [:]
+        if let etag {
+            headers["If-None-Match"] = etag
+        }
+        let fetched = try await fetch(url, accept: "image/*", timeout: Timeout.image, headers: headers)
+        if fetched.status == 304 {
+            return .notModified
+        }
+        guard let contentType = fetched.contentType, contentType.lowercased().hasPrefix("image/") else {
+            throw APIError.notAnImage(url: url, contentType: fetched.contentType, byteCount: fetched.data.count)
+        }
+        return .downloaded(fetched.data, etag: fetched.etag)
+    }
+
     // MARK: - Transport
 
     private nonisolated struct Fetched: Sendable {
         let data: Data
         let status: Int
         let contentType: String?
+        let etag: String?
         let milliseconds: Int
     }
 
@@ -113,9 +148,24 @@ nonisolated struct APIClient: Sendable {
         )
     }
 
-    private func fetch(_ url: URL, accept: String, timeout: TimeInterval) async throws -> Fetched {
-        var request = URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: timeout)
+    private func fetch(
+        _ url: URL,
+        accept: String,
+        timeout: TimeInterval,
+        headers: [String: String] = [:]
+    ) async throws -> Fetched {
+        // A conditional request must reach the server, not be answered from the
+        // in-memory cache, so its 304 comes back to the caller.
+        let isConditional = headers["If-None-Match"] != nil
+        var request = URLRequest(
+            url: url,
+            cachePolicy: isConditional ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy,
+            timeoutInterval: timeout
+        )
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
 
         let clock = ContinuousClock()
         let start = clock.now
@@ -134,9 +184,16 @@ nonisolated struct APIClient: Sendable {
             throw APIError.invalidResponse(url: url, response: response)
         }
         let contentType = http.value(forHTTPHeaderField: "Content-Type")
-        guard (200...299).contains(http.statusCode) else {
+        let isNotModified = isConditional && http.statusCode == 304
+        guard (200...299).contains(http.statusCode) || isNotModified else {
             throw APIError.http(status: http.statusCode, url: url, contentType: contentType, body: data)
         }
-        return Fetched(data: data, status: http.statusCode, contentType: contentType, milliseconds: milliseconds)
+        return Fetched(
+            data: data,
+            status: http.statusCode,
+            contentType: contentType,
+            etag: http.value(forHTTPHeaderField: "ETag"),
+            milliseconds: milliseconds
+        )
     }
 }

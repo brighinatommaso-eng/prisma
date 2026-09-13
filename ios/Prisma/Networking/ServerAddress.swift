@@ -86,6 +86,20 @@ nonisolated struct ServerAddress: Sendable, Equatable {
         return result
     }
 
+    /// Percent-encodes one path segment, e.g. a track id, so it cannot add path levels.
+    static func pathSegment(_ value: String) throws -> String {
+        guard let encoded = value.addingPercentEncoding(withAllowedCharacters: pathSegmentAllowed) else {
+            throw APIError.invalidInput("Could not encode a path segment", detail: "The text \"\(value)\" could not be percent-encoded.")
+        }
+        return encoded
+    }
+
+    private static let pathSegmentAllowed: CharacterSet = {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#;")
+        return allowed
+    }()
+
     /// Query values are encoded strictly: "+" in particular, which the backend
     /// would otherwise read as a space.
     private static let queryValueAllowed: CharacterSet = {
