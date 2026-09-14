@@ -11,16 +11,16 @@ struct RootView: View {
         if let services = model.services {
             TabView {
                 Tab("Settings", systemImage: "gear") {
-                    withMiniPlayer(NavigationStack { SettingsView() })
+                    NavigationStack { withMiniPlayer(SettingsView()) }
                 }
                 Tab("Search", systemImage: "magnifyingglass") {
-                    withMiniPlayer(NavigationStack { SearchView() })
+                    NavigationStack { withMiniPlayer(SearchView()) }
                 }
                 Tab("Library", systemImage: "square.stack") {
-                    withMiniPlayer(NavigationStack { LibraryView() })
+                    NavigationStack { withMiniPlayer(LibraryView()) }
                 }
                 Tab("Downloads", systemImage: "arrow.down.circle") {
-                    withMiniPlayer(NavigationStack { DownloadsView() })
+                    NavigationStack { withMiniPlayer(DownloadsView()) }
                 }
             }
             .fullScreenCover(isPresented: $showingPlayer) {
@@ -58,7 +58,13 @@ struct RootView: View {
         }
     }
 
-    /// The mini-player sits above the tab bar, on every tab.
+    /// The mini-player sits above the tab bar, on every tab, and shrinks the safe
+    /// area of the screen beneath it so the last row of a list scrolls clear of it.
+    ///
+    /// Applied to each tab's root screen, inside its NavigationStack. Applied
+    /// outside, the inset stops at the navigation stack (a UIKit container) and
+    /// never reaches the List, which is how build 8 drew the bar over the last row.
+    /// When nothing is loaded MiniPlayerView renders no view, so the inset is zero.
     private func withMiniPlayer<Content: View>(_ content: Content) -> some View {
         content.safeAreaInset(edge: .bottom, spacing: 0) {
             MiniPlayerView {
