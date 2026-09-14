@@ -57,6 +57,21 @@ nonisolated struct RGBColor: Equatable, Sendable {
         )
     }
 
+    /// Moves HLS saturation `amount` of the way towards fully saturated, keeping hue
+    /// and lightness. Greys (saturation below `greyThreshold`) have no hue and are
+    /// returned unchanged.
+    func boostingSaturation(by amount: Double, greyThreshold: Double) -> RGBColor {
+        let (hue, lightness, saturation) = hls
+        guard amount > 0, saturation >= greyThreshold else { return self }
+        let boosted = min(1, saturation + (1 - saturation) * amount)
+        let rgb = Self.rgb(hue: hue, lightness: lightness, saturation: boosted)
+        return RGBColor(
+            red: Double(Self.byte(rgb.0)) / 255,
+            green: Double(Self.byte(rgb.1)) / 255,
+            blue: Double(Self.byte(rgb.2)) / 255
+        )
+    }
+
     private static func byte(_ component: Double) -> Int {
         Int((min(1, max(0, component)) * 255).rounded())
     }
@@ -135,6 +150,16 @@ nonisolated struct AuraPalette: Equatable, Sendable {
     func clampingLightness(to maximum: Double) -> AuraPalette {
         let clamped = colors.map { $0.clampingLightness(to: maximum) }
         return AuraPalette(clamped[0], clamped[1], clamped[2], clamped[3])
+    }
+
+    func boostingSaturation(by amount: Double, greyThreshold: Double) -> AuraPalette {
+        let boosted = colors.map { $0.boostingSaturation(by: amount, greyThreshold: greyThreshold) }
+        return AuraPalette(boosted[0], boosted[1], boosted[2], boosted[3])
+    }
+
+    /// The colour with the highest relative luminance: the worst case for white text.
+    var brightest: RGBColor {
+        colors.max { $0.relativeLuminance < $1.relativeLuminance } ?? colors[0]
     }
 
     var meanLuminance: Double {

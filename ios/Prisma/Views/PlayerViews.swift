@@ -31,12 +31,16 @@ struct MiniPlayerView: View {
                     }
                     .buttonStyle(.plain)
 
+                    // Each control is its own button with the whole 50 pt square as its
+                    // hit area. A plain button otherwise only responds on the drawn
+                    // glyph, so taps on the empty part of the frame did nothing.
                     Button {
                         playback.togglePlayPause()
                     } label: {
                         Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                             .font(.title2)
-                            .frame(width: 44, height: 44)
+                            .frame(width: 50, height: 50)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(playback.isPlaying ? "Pause" : "Play")
@@ -46,20 +50,23 @@ struct MiniPlayerView: View {
                     } label: {
                         Image(systemName: "forward.fill")
                             .font(.title2)
-                            .frame(width: 44, height: 44)
+                            .frame(width: 50, height: 50)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(!playback.hasNext)
                     .accessibilityLabel("Next track")
                 }
-                .padding(.horizontal)
-                .padding(.vertical, 6)
+                .padding(.leading)
+                .padding(.trailing, 8)
+                .padding(.vertical, 3)
 
                 if let error = playback.lastError {
                     Button(action: openPlayer) {
                         Text("Playback error: \(error.title). Tap for details.")
                             .font(.caption)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .padding(.horizontal)
@@ -74,6 +81,7 @@ struct MiniPlayerView: View {
                     Text("Playback error: \(error.title). Tap for details.")
                         .font(.caption)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .padding()

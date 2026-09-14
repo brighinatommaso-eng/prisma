@@ -41,7 +41,8 @@ struct ThemeInspectorView: View {
                     SwatchRow(
                         index: index,
                         color: color,
-                        incoming: resolved.incoming?.colors[index]
+                        incoming: resolved.incoming?.colors[index],
+                        clamped: resolved.clamped?.colors[index]
                     )
                 }
             } header: {
@@ -50,16 +51,22 @@ struct ThemeInspectorView: View {
 
             Section {
                 FieldRow(label: "Mean relative luminance", value: String(format: "%.3f", resolved.luminance))
-                if let top = resolved.surface.scrimTop, let bottom = resolved.surface.scrimBottom {
-                    FieldRow(label: "Scrim opacity", value: String(format: "%.2f (top), %.2f (bottom)", top, bottom))
+                if let base = resolved.surface.scrimBase,
+                   let top = resolved.surface.scrimTop,
+                   let bottom = resolved.surface.scrimBottom {
+                    FieldRow(label: "Scrim base (computed)", value: String(format: "%.2f", base))
+                    FieldRow(label: "Scrim as drawn", value: String(format: "top %.2f, bottom %.2f (ceiling %.2f)", top, bottom, ThemeResolver.scrimCeiling))
+                    CompositeRow(label: "Brightest colour under the scrim, top", source: resolved.palette.brightest, opacity: top)
+                    CompositeRow(label: "Brightest colour under the scrim, bottom", source: resolved.palette.brightest, opacity: bottom)
                 } else {
-                    FieldRow(label: "Scrim opacity", value: "none: no scrim in \(resolved.mode.label)")
+                    FieldRow(label: "Scrim", value: "none: no scrim in \(resolved.mode.label)")
                 }
                 Text(String(
-                    format: "Scrim is %.2f at luminance ≤ %.2f and %.2f at ≥ %.2f, linear in between. Colours from the server are clamped to HLS lightness %.2f; presets are not.",
+                    format: "Base is %.2f at luminance ≤ %.2f and %.2f at ≥ %.2f, linear in between. Drawn from base − %.2f at the top to base + %.2f at the bottom, never above %.2f. Colours from the server are clamped to HLS lightness %.2f, then saturation moves %.0f%% towards full; presets are used as they are.",
                     ThemeResolver.scrimMinimum, ThemeResolver.luminanceAtMinimum,
-                    ThemeResolver.scrimMaximum, ThemeResolver.luminanceAtMaximum,
-                    ThemeResolver.maxLightness
+                    ThemeResolver.scrimCeiling, ThemeResolver.luminanceAtMaximum,
+                    ThemeResolver.scrimSpread, ThemeResolver.scrimSpread, ThemeResolver.scrimCeiling,
+                    ThemeResolver.maxLightness, ThemeResolver.saturationBoost * 100
                 ))
                 .font(.caption)
             } header: {
@@ -119,10 +126,43 @@ struct ThemeInspectorView: View {
     }
 }
 
+/// A source colour composited with the scrim at one opacity: what is actually on
+/// screen there, and how readable white text is on it.
+private struct CompositeRow: View {
+    let label: String
+    let source: RGBColor
+    let opacity: Double
+
+    var body: some View {
+        let result = ThemeResolver.composite(source, scrimOpacity: opacity)
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(result.color)
+                .frame(width: 48, height: 48)
+                .overlay(
+                    Text("Aa")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                )
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary, lineWidth: 1))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                    .font(.caption)
+                Text(String(format: "%@ over %@ at %.2f → %@", source.hex, ThemeResolver.scrimColor.hex, opacity, result.hex))
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                Text(String(format: "white text contrast %.1f:1", ThemeResolver.whiteTextContrast(on: result)))
+                    .font(.caption.monospaced())
+            }
+        }
+    }
+}
+
 private struct SwatchRow: View {
     let index: Int
     let color: RGBColor
     let incoming: RGBColor?
+    let clamped: RGBColor?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -136,8 +176,8 @@ private struct SwatchRow: View {
                     .textSelection(.enabled)
                 Text(String(format: "luminance %.3f, lightness %.2f", color.relativeLuminance, color.lightness))
                     .font(.caption.monospaced())
-                if let incoming, incoming != color {
-                    Text("received \(incoming.hex) (lightness \(String(format: "%.2f", incoming.lightness))), clamped")
+                if let incoming, let clamped, incoming != color {
+                    Text("received \(incoming.hex) → clamped \(clamped.hex) → boosted \(color.hex)")
                         .font(.caption.monospaced())
                 }
             }

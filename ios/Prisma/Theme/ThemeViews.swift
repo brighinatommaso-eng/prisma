@@ -39,7 +39,9 @@ struct ThemeBackground: View {
     }
 }
 
-/// Four blurred ellipses, laid out as the prototype's `.aura` (inset -32%, blur 74).
+/// Four blurred ellipses, laid out as the prototype's `.aura` (inset -32%). The blur
+/// is lighter than the prototype's 74: SwiftUI's blur spreads further than CSS's at
+/// the same number, and at 74 the four sources merged into one uniform wash.
 struct AuraView: View {
     let palette: AuraPalette
 
@@ -54,7 +56,7 @@ struct AuraView: View {
                 blob(3, width: width, height: height, x: 0.44, y: 0.58, w: 0.62, h: 0.42)
             }
             .frame(width: width, height: height, alignment: .topLeading)
-            .blur(radius: 74)
+            .blur(radius: 46)
             .offset(x: -proxy.size.width * 0.32, y: -proxy.size.height * 0.32)
         }
     }

@@ -28,7 +28,11 @@ nonisolated struct SurfaceStyle: Equatable, Sendable {
     /// inverts (spec 5.5): system material, not hand-painted.
     let colorScheme: ColorScheme
     let showsAura: Bool
-    /// Scrim opacity at the top of the screen; nil where spec 5.6 says there is none.
+    /// The single scrim value computed from the palette's luminance. nil where
+    /// spec 5.6 says there is no scrim.
+    let scrimBase: Double?
+    /// The opacities actually drawn: the base spread around itself, never above
+    /// the ceiling.
     let scrimTop: Double?
     let scrimBottom: Double?
 }
@@ -38,8 +42,10 @@ nonisolated struct ResolvedTheme: Equatable, Sendable {
     let mode: ThemeMode
     /// The colours actually drawn.
     let palette: AuraPalette
-    /// The colours as received, before the lightness clamp. Adaptive only.
+    /// Adaptive only: the colours as received, and after the lightness clamp but
+    /// before the saturation boost.
     let incoming: AuraPalette?
+    let clamped: AuraPalette?
     let source: String
     let problem: String?
     let luminance: Double
@@ -50,17 +56,28 @@ nonisolated struct ResolvedTheme: Equatable, Sendable {
 nonisolated enum ThemeResolver {
     /// Same ceiling as the backend's MAX_LIGHTNESS in app/palette.py.
     static let maxLightness = 0.70
-    /// Spec 5.6.
+    /// After the clamp, saturation moves this fraction of the way to fully
+    /// saturated, so a clamped light palette stays colourful instead of going grey.
+    static let saturationBoost = 0.45
+    /// Below this HLS saturation a colour is a grey with no hue to boost.
+    static let greySaturation = 0.02
+
+    /// Spec 5.6 floor for the computed scrim value.
     static let scrimMinimum = 0.42
-    static let scrimMaximum = 0.78
-    /// Mean luminance at and below which the scrim is at its minimum, and at and
-    /// above which it is at its maximum. Chosen so the Prisma preset gets 0.50, the
-    /// prototype's value, and a white cover (after the clamp) reaches the maximum.
-    static let luminanceAtMinimum = 0.27
-    static let luminanceAtMaximum = 0.45
-    /// The prototype's scrim is a gradient, 0.50 at the top to 0.80 at the bottom.
-    static let scrimBottomLift = 0.30
-    static let scrimBottomCeiling = 0.95
+    /// Nothing drawn exceeds this. Lowered from the spec's 0.78: the lightness clamp
+    /// already darkens the worst palettes, so the scrim does not compensate twice.
+    static let scrimCeiling = 0.68
+    /// The drawn gradient runs from base - spread at the top to base + spread at
+    /// the bottom, clamped to the ceiling.
+    static let scrimSpread = 0.10
+    /// Mean luminance at and below which the base is at its floor, and at and above
+    /// which it reaches the ceiling. Prisma (0.31) lands at 0.44, lighter than the
+    /// 0.51 of build 11.
+    static let luminanceAtMinimum = 0.30
+    static let luminanceAtMaximum = 0.50
+
+    /// The scrim colour, prototype --bg.
+    static let scrimColor = ThemeCatalog.auraBackground
 
     nonisolated enum AdaptiveSource: Equatable, Sendable {
         case nothingPlaying
@@ -68,23 +85,45 @@ nonisolated enum ThemeResolver {
         case test(NamedPalette)
     }
 
-    static func scrimOpacity(forLuminance luminance: Double) -> Double {
+    static func scrimBase(forLuminance luminance: Double) -> Double {
         let span = luminanceAtMaximum - luminanceAtMinimum
         let t = min(1, max(0, (luminance - luminanceAtMinimum) / span))
-        return scrimMinimum + (scrimMaximum - scrimMinimum) * t
+        return scrimMinimum + (scrimCeiling - scrimMinimum) * t
     }
 
-    private typealias Choice = (palette: AuraPalette, incoming: AuraPalette?, source: String, problem: String?)
+    static func scrimTop(base: Double) -> Double {
+        min(scrimCeiling, max(0, base - scrimSpread))
+    }
+
+    static func scrimBottom(base: Double) -> Double {
+        min(scrimCeiling, max(0, base + scrimSpread))
+    }
+
+    /// `color` seen through the scrim at `opacity`.
+    static func composite(_ color: RGBColor, scrimOpacity opacity: Double) -> RGBColor {
+        RGBColor(
+            red: color.red * (1 - opacity) + scrimColor.red * opacity,
+            green: color.green * (1 - opacity) + scrimColor.green * opacity,
+            blue: color.blue * (1 - opacity) + scrimColor.blue * opacity
+        )
+    }
+
+    /// WCAG contrast ratio of white text on `background`.
+    static func whiteTextContrast(on background: RGBColor) -> Double {
+        1.05 / (background.relativeLuminance + 0.05)
+    }
+
+    private typealias Choice = (palette: AuraPalette, incoming: AuraPalette?, clamped: AuraPalette?, source: String, problem: String?)
 
     static func resolve(mode: ThemeMode, preset: NamedPalette, adaptive: AdaptiveSource) -> ResolvedTheme {
         let choice: Choice
         switch mode {
         case .preset:
             let parsed = presetPalette(preset)
-            choice = (parsed.palette, nil, "Preset \(preset.name)", parsed.problem)
+            choice = (parsed.palette, nil, nil, "Preset \(preset.name)", parsed.problem)
         case .monoDark, .monoLight:
             let parsed = presetPalette(preset)
-            choice = (parsed.palette, nil, "None: \(mode.label) is a flat theme without an aura", parsed.problem)
+            choice = (parsed.palette, nil, nil, "None: \(mode.label) is a flat theme without an aura", parsed.problem)
         case .adaptive:
             choice = adaptiveChoice(adaptive)
         }
@@ -93,25 +132,26 @@ nonisolated enum ThemeResolver {
         let surface: SurfaceStyle
         switch mode {
         case .adaptive, .preset:
-            let top = scrimOpacity(forLuminance: luminance)
+            let base = scrimBase(forLuminance: luminance)
             surface = SurfaceStyle(
                 background: ThemeCatalog.auraBackground,
                 colorScheme: .dark,
                 showsAura: true,
-                scrimTop: top,
-                scrimBottom: min(scrimBottomCeiling, top + scrimBottomLift)
+                scrimBase: base,
+                scrimTop: scrimTop(base: base),
+                scrimBottom: scrimBottom(base: base)
             )
         case .monoDark:
             surface = SurfaceStyle(background: ThemeCatalog.monoDarkBackground, colorScheme: .dark,
-                                   showsAura: false, scrimTop: nil, scrimBottom: nil)
+                                   showsAura: false, scrimBase: nil, scrimTop: nil, scrimBottom: nil)
         case .monoLight:
             surface = SurfaceStyle(background: ThemeCatalog.monoLightBackground, colorScheme: .light,
-                                   showsAura: false, scrimTop: nil, scrimBottom: nil)
+                                   showsAura: false, scrimBase: nil, scrimTop: nil, scrimBottom: nil)
         }
 
         return ResolvedTheme(
-            mode: mode, palette: choice.palette, incoming: choice.incoming, source: choice.source,
-            problem: choice.problem, luminance: luminance, surface: surface
+            mode: mode, palette: choice.palette, incoming: choice.incoming, clamped: choice.clamped,
+            source: choice.source, problem: choice.problem, luminance: luminance, surface: surface
         )
     }
 
@@ -121,11 +161,11 @@ nonisolated enum ThemeResolver {
         switch adaptive {
         case .nothingPlaying:
             let prisma = prismaPalette()
-            return (prisma.palette, nil, "Prisma preset: nothing is playing", prisma.problem)
+            return (prisma.palette, nil, nil, "Prisma preset: nothing is playing", prisma.problem)
         case .track(let title, let album, let hexes):
             guard let hexes else {
                 let prisma = prismaPalette()
-                return (prisma.palette, nil, "Prisma preset: the album of “\(title)” has no palette", prisma.problem)
+                return (prisma.palette, nil, nil, "Prisma preset: the album of “\(title)” has no palette", prisma.problem)
             }
             return incomingChoice(label: "“\(title)” (\(album ?? "no album"))", hexes: hexes)
         case .test(let named):
@@ -133,15 +173,18 @@ nonisolated enum ThemeResolver {
         }
     }
 
-    /// Colours from outside (the server, or a test): parsed, then clamped in lightness.
+    /// Colours from outside (the server, or a test): parsed, clamped in lightness,
+    /// then boosted in saturation.
     private static func incomingChoice(label: String, hexes: [String]) -> Choice {
         switch AuraPalette.parse(hexes) {
         case .success(let parsed):
-            return (parsed.clampingLightness(to: maxLightness), parsed, label, nil)
+            let clamped = parsed.clampingLightness(to: maxLightness)
+            let boosted = clamped.boostingSaturation(by: saturationBoost, greyThreshold: greySaturation)
+            return (boosted, parsed, clamped, label, nil)
         case .failure(let failure):
             let prisma = prismaPalette()
             let problems = [failure.message, prisma.problem].compactMap { $0 }
-            return (prisma.palette, nil, "Prisma preset: the palette of \(label) could not be used",
+            return (prisma.palette, nil, nil, "Prisma preset: the palette of \(label) could not be used",
                     problems.joined(separator: " "))
         }
     }
@@ -153,7 +196,7 @@ nonisolated enum ThemeResolver {
         return presetPalette(prisma)
     }
 
-    /// Presets are used exactly as in spec 5.3: never clamped.
+    /// Presets are used exactly as in spec 5.3: never clamped or boosted.
     private static func presetPalette(_ named: NamedPalette) -> (palette: AuraPalette, problem: String?) {
         switch named.parsed {
         case .success(let parsed):
