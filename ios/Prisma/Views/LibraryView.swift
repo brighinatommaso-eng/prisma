@@ -13,9 +13,49 @@ struct LibraryView: View {
     @Query private var records: [SyncRecord]
 
     @State private var confirmingFullResync = false
+    @State private var filter: LibraryFilter = .albums
 
     var body: some View {
         List {
+            Section {
+                Picker("Show", selection: $filter) {
+                    ForEach(LibraryFilter.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            switch filter {
+            case .albums:
+                albumsContent
+            case .playlists:
+                PlaylistsContent()
+            case .favourites:
+                FavouritesContent()
+            }
+        }
+        .navigationTitle("Library")
+        .toolbar {
+            if filter == .playlists {
+                EditButton()
+            }
+        }
+        .refreshable { [sync] in
+            await sync.refresh()
+        }
+        .confirmationDialog("Full resync", isPresented: $confirmingFullResync, titleVisibility: .visible) {
+            Button("Resync everything", role: .destructive) {
+                sync.syncNow(full: true)
+            }
+        } message: {
+            Text("Downloads the whole catalogue again. Albums and tracks the server no longer lists are removed from this iPhone, together with their downloaded files.")
+        }
+    }
+
+    /// The albums view, unchanged from before filters existed.
+    @ViewBuilder
+    private var albumsContent: some View {
             Section {
                 syncStatus
                 Button("Sync changes") { sync.syncNow(full: false) }
@@ -61,18 +101,6 @@ struct LibraryView: View {
                     Text("Tracks without an album").textCase(nil)
                 }
             }
-        }
-        .navigationTitle("Library")
-        .refreshable { [sync] in
-            await sync.refresh()
-        }
-        .confirmationDialog("Full resync", isPresented: $confirmingFullResync, titleVisibility: .visible) {
-            Button("Resync everything", role: .destructive) {
-                sync.syncNow(full: true)
-            }
-        } message: {
-            Text("Downloads the whole catalogue again. Albums and tracks the server no longer lists are removed from this iPhone, together with their downloaded files.")
-        }
     }
 
     @ViewBuilder
@@ -159,6 +187,7 @@ private struct LocalTrackRow: View {
     let track: StoredTrack
 
     @Environment(PlaybackEngine.self) private var playback
+    @State private var addingToPlaylist = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -185,8 +214,16 @@ private struct LocalTrackRow: View {
                 }
                 Text(Formatting.duration(track.durationS))
                     .font(.caption)
+                HStack(spacing: 20) {
+                    FavouriteButton(track: track)
+                    Button("Add to playlist…") { addingToPlaylist = true }
+                }
+                .buttonStyle(.borderless)
                 TrackDownloadStatus(track: track)
             }
+        }
+        .sheet(isPresented: $addingToPlaylist) {
+            AddToPlaylistSheet(track: track)
         }
     }
 }

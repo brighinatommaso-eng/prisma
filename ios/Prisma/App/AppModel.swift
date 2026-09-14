@@ -15,6 +15,7 @@ final class AppModel {
         let sync: LibrarySync
         let playback: PlaybackEngine
         let theme: ThemeEngine
+        let playlists: PlaylistStore
     }
 
     let settings: AppSettings
@@ -26,7 +27,7 @@ final class AppModel {
         let settings = AppSettings()
         self.settings = settings
         do {
-            let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self)
+            let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self, Playlist.self, PlaylistEntry.self)
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
             settings.onAddressChange = { [downloads] previous, new in
@@ -34,7 +35,9 @@ final class AppModel {
             }
             let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
             let theme = ThemeEngine(playback: playback)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme)
+            let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
+            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists)
+            playlists.removeOrphanedEntries()
             launchError = nil
             downloads.checkTransfers(reason: "app launch")
         } catch {

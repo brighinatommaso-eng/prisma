@@ -64,13 +64,19 @@ final class PlaybackEngine {
     /// Why the lock screen has no artwork, when a cover file exists but cannot be read.
     private(set) var artworkProblem: String?
 
-    /// The queue before shuffling, so turning shuffle off restores album order.
+    /// The queue before shuffling (album or playlist order), so turning shuffle off
+    /// restores it.
     @ObservationIgnored private var albumOrder: [String] = []
+    /// For each queue position, its position in `albumOrder`. Shuffle works on
+    /// positions rather than track ids, because a playlist can hold the same track
+    /// more than once.
+    @ObservationIgnored private var queueSources: [Int] = []
     @ObservationIgnored private let player = AVQueuePlayer()
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let downloads: DownloadManager
-    /// Which track each AVPlayerItem in the player belongs to.
-    @ObservationIgnored private var itemTrackIDs: [ObjectIdentifier: String] = [:]
+    /// Which queue position each AVPlayerItem in the player plays. A position, not a
+    /// track id, so a track that appears twice is still tracked correctly.
+    @ObservationIgnored private var itemQueueIndices: [ObjectIdentifier: Int] = [:]
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var notificationObservers: [any NSObjectProtocol] = []
     @ObservationIgnored private var commandTargets: [(MPRemoteCommand, Any)] = []
@@ -93,7 +99,8 @@ final class PlaybackEngine {
         static let position = "playback.position"
         static let shuffle = "playback.shuffle"
         static let repeatMode = "playback.repeatMode"
-        static let all = [queue, albumOrder, index, position, shuffle, repeatMode]
+        static let queueSources = "playback.queueSources"
+        static let all = [queue, albumOrder, index, position, shuffle, repeatMode, queueSources]
     }
 
     init(context: ModelContext, downloads: DownloadManager) {
@@ -141,9 +148,56 @@ final class PlaybackEngine {
         if ids.first != track.serverID {
             ids.insert(track.serverID, at: 0)
         }
+        startQueue(ids, at: 0)
+    }
+
+    /// Plays a playlist: the queue is its downloaded tracks in playlist order, and
+    /// playback starts at the entry at `startOffset` in `tracks`. Tracks that are not
+    /// downloaded are left out. An offset rather than a track, because a playlist can
+    /// hold the same track twice.
+    func play(playlistTracks tracks: [StoredTrack], startingAt startOffset: Int) {
+        lastError = nil
+        message = nil
+        guard tracks.indices.contains(startOffset) else {
+            lastError = .invalidInput("Could not start the playlist", detail: "Entry \(startOffset) is outside the playlist's \(tracks.count) tracks.")
+            return
+        }
+        let start = tracks[startOffset]
+        guard start.downloadState == .downloaded else {
+            lastError = .invalidInput(
+                "“\(start.title ?? start.serverID)” is not downloaded",
+                detail: "Only tracks stored on this iPhone can be played. Download it first."
+            )
+            return
+        }
+        var ids: [String] = []
+        var startIndex: Int?
+        for (offset, track) in tracks.enumerated() where !track.isDeleted && track.downloadState == .downloaded {
+            if offset == startOffset {
+                startIndex = ids.count
+            }
+            ids.append(track.serverID)
+        }
+        guard let startIndex else {
+            lastError = .invalidInput("Could not start the playlist", detail: "The tapped track is not among the playlist's downloaded tracks.")
+            return
+        }
+        startQueue(ids, at: startIndex)
+    }
+
+    /// Replaces the queue with `ids` and starts playing at `start`. With shuffle on,
+    /// the starting track plays first and the rest follow in random order.
+    private func startQueue(_ ids: [String], at start: Int) {
         albumOrder = ids
-        queue = shuffle ? [track.serverID] + ids.dropFirst().shuffled() : ids
-        load(index: 0, position: 0, autoplay: true)
+        if shuffle {
+            queueSources = [start] + ids.indices.filter { $0 != start }.shuffled()
+            queue = queueSources.map { ids[$0] }
+            load(index: 0, position: 0, autoplay: true)
+        } else {
+            queueSources = Array(ids.indices)
+            queue = ids
+            load(index: start, position: 0, autoplay: true)
+        }
     }
 
     func play() {
@@ -227,13 +281,18 @@ final class PlaybackEngine {
     func setShuffle(_ enabled: Bool) {
         guard enabled != shuffle else { return }
         shuffle = enabled
-        if let currentID = currentTrackID {
+        if let index = currentIndex, queueSources.indices.contains(index) {
+            let source = queueSources[index]
             if enabled {
-                queue = [currentID] + albumOrder.filter { $0 != currentID }.shuffled()
+                queueSources = [source] + albumOrder.indices.filter { $0 != source }.shuffled()
                 currentIndex = 0
             } else {
-                queue = albumOrder
-                currentIndex = albumOrder.firstIndex(of: currentID) ?? 0
+                queueSources = Array(albumOrder.indices)
+                currentIndex = source
+            }
+            queue = queueSources.map { albumOrder[$0] }
+            if let current = player.currentItem, let currentIndex {
+                itemQueueIndices[ObjectIdentifier(current)] = currentIndex
             }
             preloadNext()
             updateNowPlaying()
@@ -269,6 +328,7 @@ final class PlaybackEngine {
         }
         defaults.set(queue, forKey: Key.queue)
         defaults.set(albumOrder, forKey: Key.albumOrder)
+        defaults.set(queueSources, forKey: Key.queueSources)
         defaults.set(currentIndex, forKey: Key.index)
         defaults.set(currentPosition, forKey: Key.position)
         defaults.set(shuffle, forKey: Key.shuffle)
@@ -314,7 +374,7 @@ final class PlaybackEngine {
     private func load(index: Int, position: TimeInterval, autoplay: Bool) {
         replacingItems = true
         player.removeAllItems()
-        itemTrackIDs.removeAll()
+        itemQueueIndices.removeAll()
         replacingItems = false
         pendingSeek = nil
 
@@ -329,7 +389,7 @@ final class PlaybackEngine {
             switch playableFile(for: track) {
             case .file(let url):
                 let item = AVPlayerItem(url: url)
-                itemTrackIDs[ObjectIdentifier(item)] = track.serverID
+                itemQueueIndices[ObjectIdentifier(item)] = target
                 currentIndex = target
                 duration = Double(track.durationS ?? 0)
                 elapsed = target == index ? position : 0
@@ -370,7 +430,7 @@ final class PlaybackEngine {
         player.actionAtItemEnd = repeatMode == .one ? .pause : .advance
         let upcoming = player.items().filter { $0 !== current }
 
-        var wanted: (id: String, url: URL)?
+        var wanted: (index: Int, url: URL)?
         if repeatMode != .one {
             var candidate = nextIndex(after: index)
             var tried = 0
@@ -382,7 +442,7 @@ final class PlaybackEngine {
                 }
                 switch playableFile(for: track) {
                 case .file(let url):
-                    wanted = (id: track.serverID, url: url)
+                    wanted = (index: target, url: url)
                 case .notDownloaded:
                     break
                 case .unplayable(let error):
@@ -394,17 +454,17 @@ final class PlaybackEngine {
         }
 
         if upcoming.count == 1, let only = upcoming.first, let wanted,
-           itemTrackIDs[ObjectIdentifier(only)] == wanted.id {
+           itemQueueIndices[ObjectIdentifier(only)] == wanted.index {
             updateCommands()
             return
         }
         for item in upcoming {
             player.remove(item)
-            itemTrackIDs[ObjectIdentifier(item)] = nil
+            itemQueueIndices[ObjectIdentifier(item)] = nil
         }
         if let wanted {
             let item = AVPlayerItem(url: wanted.url)
-            itemTrackIDs[ObjectIdentifier(item)] = wanted.id
+            itemQueueIndices[ObjectIdentifier(item)] = wanted.index
             player.insert(item, after: current)
         }
         updateCommands()
@@ -458,17 +518,15 @@ final class PlaybackEngine {
             queueEnded()
             return
         }
-        guard let trackID = itemTrackIDs[ObjectIdentifier(item)] else {
+        guard let index = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(index) else {
             report("The player moved to an item Prisma did not queue", error: nil)
             return
         }
-        let previousID = currentTrackID
-        if let index = queue.firstIndex(of: trackID) {
-            currentIndex = index
-        }
+        let previousIndex = currentIndex
+        currentIndex = index
         let live = Set(player.items().map { ObjectIdentifier($0) })
-        itemTrackIDs = itemTrackIDs.filter { live.contains($0.key) }
-        if previousID != trackID {
+        itemQueueIndices = itemQueueIndices.filter { live.contains($0.key) }
+        if previousIndex != index {
             elapsed = 0
             duration = Double(currentTrack?.durationS ?? 0)
         }
@@ -545,7 +603,8 @@ final class PlaybackEngine {
     /// The file could not be decoded or read. Recorded on the track, shown, and
     /// playback moves on to the next track.
     private func itemFailed(_ item: AVPlayerItem, error: Error?) {
-        guard let trackID = itemTrackIDs[ObjectIdentifier(item)] else { return }
+        guard let failedIndex = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(failedIndex) else { return }
+        let trackID = queue[failedIndex]
         let track = self.track(id: trackID)
         let resume = wantsToPlay
         let title = "Could not play “\(track?.title ?? trackID)”"
@@ -572,10 +631,10 @@ final class PlaybackEngine {
             lastError = APIError(kind: .storage, title: title, url: path, details: details)
         }
 
-        guard let index = queue.firstIndex(of: trackID), let next = nextIndex(after: index) else {
+        guard let next = nextIndex(after: failedIndex) else {
             replacingItems = true
             player.removeAllItems()
-            itemTrackIDs.removeAll()
+            itemQueueIndices.removeAll()
             replacingItems = false
             wantsToPlay = false
             isPlaying = false
@@ -784,6 +843,11 @@ final class PlaybackEngine {
         }
         queue = savedQueue
         albumOrder = defaults.stringArray(forKey: Key.albumOrder) ?? savedQueue
+        queueSources = Self.sources(
+            saved: defaults.array(forKey: Key.queueSources) as? [Int],
+            queue: savedQueue,
+            order: albumOrder
+        )
         shuffle = defaults.bool(forKey: Key.shuffle)
         repeatMode = RepeatMode(rawValue: defaults.string(forKey: Key.repeatMode) ?? "") ?? .off
         let position = defaults.double(forKey: Key.position)
@@ -795,6 +859,28 @@ final class PlaybackEngine {
     }
 
     // MARK: - Helpers
+
+    /// Saved source positions if they are consistent with the queue; otherwise
+    /// rebuilt by matching each queue entry to the next unused occurrence in
+    /// `order` (older saves have none).
+    private static func sources(saved: [Int]?, queue: [String], order: [String]) -> [Int] {
+        if let saved, saved.count == queue.count,
+           saved.allSatisfy({ order.indices.contains($0) }),
+           zip(saved, queue).allSatisfy({ order[$0.0] == $0.1 }) {
+            return saved
+        }
+        var used = Set<Int>()
+        var result: [Int] = []
+        for id in queue {
+            if let match = order.indices.first(where: { !used.contains($0) && order[$0] == id }) {
+                used.insert(match)
+                result.append(match)
+            } else {
+                result.append(0)
+            }
+        }
+        return result
+    }
 
     private var currentPosition: TimeInterval {
         if let pendingSeek { return pendingSeek }

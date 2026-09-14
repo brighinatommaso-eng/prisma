@@ -2,6 +2,35 @@ import Foundation
 import SwiftData
 import SwiftUI
 
+/// Whether the full-screen player is showing. Shared so any screen, including
+/// ones pushed inside a tab, can host the mini player.
+@Observable
+final class PlayerPresenter {
+    var isPresented = false
+}
+
+/// Puts the mini player above the tab bar and shrinks the safe area beneath it,
+/// so the last row of a list scrolls clear. Apply it to a tab's root screen and to
+/// every screen pushed inside a tab, inside the NavigationStack: applied outside,
+/// the inset never reaches the List (build 8).
+struct MiniPlayerInset: ViewModifier {
+    @Environment(PlayerPresenter.self) private var presenter
+
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) {
+            MiniPlayerView {
+                presenter.isPresented = true
+            }
+        }
+    }
+}
+
+extension View {
+    func miniPlayerInset() -> some View {
+        modifier(MiniPlayerInset())
+    }
+}
+
 /// Above the tab bar: artwork, title, artist, play/pause and next. Tapping the
 /// track opens the full player. Also shows a playback error when nothing is loaded,
 /// so a failure is never hidden along with the player.
@@ -30,6 +59,10 @@ struct MiniPlayerView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+
+                    FavouriteButton(track: track, iconHitSize: CGSize(width: 44, height: 50))
+                        .font(.title3)
+                        .buttonStyle(.plain)
 
                     // Each control is its own button with the whole 50 pt square as its
                     // hit area. A plain button otherwise only responds on the drawn
@@ -119,6 +152,8 @@ struct FullPlayerView: View {
                             Text("Track \(index + 1) of \(playback.queue.count) in the queue")
                                 .font(.caption)
                         }
+                        FavouriteButton(track: track)
+                            .buttonStyle(.borderless)
                         if let problem = playback.artworkProblem {
                             Text(problem)
                                 .font(.caption2)

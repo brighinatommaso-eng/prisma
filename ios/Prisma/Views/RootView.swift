@@ -5,7 +5,7 @@ struct RootView: View {
     let model: AppModel
 
     @Environment(\.scenePhase) private var scenePhase
-    @State private var showingPlayer = false
+    @State private var presenter = PlayerPresenter()
 
     var body: some View {
         if let services = model.services {
@@ -24,12 +24,13 @@ struct RootView: View {
                     NavigationStack { tabRoot(DownloadsView()) }
                 }
             }
-            .fullScreenCover(isPresented: $showingPlayer) {
+            .fullScreenCover(isPresented: $presenter.isPresented) {
                 FullPlayerView()
                     .environment(model.settings)
                     .environment(services.downloads)
                     .environment(services.playback)
                     .environment(services.theme)
+                    .environment(services.playlists)
                     .modelContainer(services.container)
                     .preferredColorScheme(colorScheme)
             }
@@ -37,6 +38,8 @@ struct RootView: View {
             .environment(services.sync)
             .environment(services.playback)
             .environment(services.theme)
+            .environment(services.playlists)
+            .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every
             // glass surface through the colour scheme, not through repainted materials.
@@ -75,11 +78,7 @@ struct RootView: View {
     /// is loaded MiniPlayerView renders no view, so the inset is zero.
     private func tabRoot<Content: View>(_ content: Content) -> some View {
         content
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                MiniPlayerView {
-                    showingPlayer = true
-                }
-            }
+            .miniPlayerInset()
             .themedScreenBackground()
     }
 }

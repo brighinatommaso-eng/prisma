@@ -174,9 +174,25 @@ final class StoredTrack {
     /// From a failed or interrupted transfer, so a retry can continue from there.
     @Attribute(.externalStorage) var resumeData: Data?
 
+    /// The favourite flag: set when favourited, nil otherwise. Optional so the
+    /// existing on-device library migrates without a default value. Sync only
+    /// writes catalogue fields, so it never clears this; deleting the track removes
+    /// it with the row.
+    var favouritedAt: Date?
+
+    /// Every playlist entry pointing at this track. Deleting the track (as a sync
+    /// does when the server removes it) deletes these entries with it, so no
+    /// playlist can keep a reference to a track that no longer exists.
+    @Relationship(deleteRule: .cascade, inverse: \PlaylistEntry.track)
+    var playlistEntries: [PlaylistEntry] = []
+
     init(serverID: String) {
         self.serverID = serverID
         self.downloadStateRaw = DownloadState.notDownloaded.rawValue
+    }
+
+    var isFavourite: Bool {
+        favouritedAt != nil
     }
 
     var downloadState: DownloadState {
@@ -200,6 +216,48 @@ final class StoredTrack {
     var failureCause: FailureCause? {
         get { failureCauseRaw.flatMap { FailureCause(rawValue: $0) } }
         set { failureCauseRaw = newValue?.rawValue }
+    }
+}
+
+/// A user playlist, stored only on this iPhone.
+@Model
+final class Playlist {
+    @Attribute(.unique) var id: UUID
+    var name: String
+    var createdAt: Date
+    var updatedAt: Date
+    /// The user's order of playlists, set explicitly when they reorder.
+    var sortPosition: Int
+
+    @Relationship(deleteRule: .cascade, inverse: \PlaylistEntry.playlist)
+    var entries: [PlaylistEntry] = []
+
+    init(name: String, sortPosition: Int) {
+        let now = Date()
+        self.id = UUID()
+        self.name = name
+        self.createdAt = now
+        self.updatedAt = now
+        self.sortPosition = sortPosition
+    }
+}
+
+/// One slot in a playlist. Its own row, so the same track can appear more than
+/// once, and the order is the stored `position`, never insertion time.
+@Model
+final class PlaylistEntry {
+    @Attribute(.unique) var id: UUID
+    var position: Int
+    var addedAt: Date
+    var playlist: Playlist?
+    var track: StoredTrack?
+
+    init(position: Int, playlist: Playlist, track: StoredTrack) {
+        self.id = UUID()
+        self.position = position
+        self.addedAt = Date()
+        self.playlist = playlist
+        self.track = track
     }
 }
 
