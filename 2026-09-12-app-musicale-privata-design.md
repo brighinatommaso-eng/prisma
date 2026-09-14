@@ -200,56 +200,145 @@ Non `Documents` (visibile in File e sincronizzata), non `Caches` (il sistema la 
 
 ## 5. Design system — Prisma
 
+Riferimento visivo: `docs/prisma-prototipo.html`, prototipo interattivo delle cinque
+schermate. In caso di divergenza tra questo testo e il prototipo, vince il prototipo per
+la disposizione e questo testo per i valori.
+
 ### 5.1 Principio
 
-Apple divide ogni interfaccia iOS 26 in due strati e la regola è esplicita: **il Liquid Glass va solo sul functional layer**. Controlli, tab bar, toolbar, overlay transitori. Mai sul content layer — liste di brani, griglie di copertine, testo lungo. Il vetro sul contenuto produce gerarchia confusa e testo illeggibile.
+Apple divide ogni interfaccia iOS 26 in due strati e la regola è esplicita: **il Liquid
+Glass va solo sul functional layer**. Controlli, tab bar, toolbar, overlay transitori.
+Mai sul content layer — liste di brani, griglie di copertine, testo lungo.
 
-In Prisma quindi: aura colorata sul fondo, contenuto su superfici piene sopra, vetro solo su barra di ricerca, chip, mini-player e tab bar.
+In Prisma quindi: aura colorata sul fondo, contenuto su superfici piene sopra, vetro solo
+su tab bar, mini-player, campo di ricerca, chip e pulsante play principale.
 
-### 5.2 Motore dei temi
+### 5.2 Le quattro modalità
 
-Tre modalità, selezionabili nelle impostazioni:
+Selezionabili in Impostazioni → Aspetto.
 
 | Modalità | Comportamento |
 |---|---|
-| **Adattiva** | L'aura usa la palette del brano in riproduzione. Cambia a ogni traccia con una transizione animata. È l'identità dell'app. |
-| **Preset** | Palette fissa scelta da una lista. L'aura resta ferma, l'app è cromaticamente stabile. |
-| **Scuro** | Nessuna aura. Fondo quasi nero, vetro neutro. Massima leggibilità, massima autonomia batteria su OLED. |
+| **Adattivo** | L'aura usa la palette del brano in riproduzione, cioè i quattro colori che il backend calcola al download e consegna nel campo `palette`. Cambia a ogni traccia con una transizione animata. È l'identità dell'app. |
+| **Preset** | Palette fissa scelta tra le dodici della tabella 5.3. L'aura resta ferma. |
+| **Nero** | Nessuna aura. Fondo pieno `#08090A`, neutro. Il vetro resta identico alla modalità scura. Massima leggibilità e minimo consumo su OLED. |
+| **Bianco** | Nessuna aura. Fondo pieno `#EFEFF2`. **Il vetro si inverte** — vedi 5.5. |
 
-Preset proposti — ognuno è una quadrupla di colori, non un colore singolo, perché l'aura ha quattro sorgenti:
+Nelle modalità Nero e Bianco non esiste alcuna sfumatura: nessuna aura, nessuno scrim,
+nessun gradiente di fondo. Sono temi piatti, con il vetro come unico elemento traslucido.
 
-- **Sunfracture** — magenta, ambra, viola, ciano (il default, quello dei mockup)
-- **Abisso** — blu notte, teal, indaco, verde acqua
-- **Brace** — rosso mattone, arancio, oro, bruno
-- **Serra** — verde bosco, lime, salvia, ottanio
-- **Cenere** — grigi neutri con una punta di blu (semi-monocromo)
-- **Aurora** — verde menta, viola, rosa pallido, ciano
+Le copertine degli album restano a colori in tutte e quattro le modalità.
 
-Il `ThemeEngine` è un `@Observable` che espone una singola `AuraPalette`. Chi la produce — il brano corrente, un preset, o il tema scuro — è invisibile al resto dell'app. Cambiare modalità è cambiare la sorgente, non toccare le view.
+### 5.3 Preset
 
-### 5.3 Il problema del contrasto (il rischio principale di Prisma)
+Ogni preset è una quadrupla, perché l'aura ha quattro sorgenti.
 
-Testo bianco su un'aura ambra chiara è illeggibile. Con la modalità adattiva la palette non è nota a priori: arriva dalla copertina e può essere qualsiasi cosa.
+| Nome | c1 | c2 | c3 | c4 |
+|---|---|---|---|---|
+| Prisma (default) | `#1e26b6` | `#e73b86` | `#fba402` | `#00d4c8` |
+| Abisso | `#06283d` | `#1363df` | `#47b5ff` | `#0a9396` |
+| Brace | `#7c2d12` | `#dc2626` | `#f59e0b` | `#fde047` |
+| Serra | `#14532d` | `#4d7c0f` | `#84cc16` | `#0f766e` |
+| Cenere | `#312e40` | `#4b5563` | `#6b7280` | `#94a3b8` |
+| Aurora | `#134e4a` | `#7c3aed` | `#f472b6` | `#22d3ee` |
+| Nebulosa | `#2e1065` | `#6d28d9` | `#a78bfa` | `#ec4899` |
+| Agrume | `#b45309` | `#f97316` | `#facc15` | `#65a30d` |
+| Laguna | `#0c4a6e` | `#0891b2` | `#22d3ee` | `#5eead4` |
+| Vinile | `#451a03` | `#92400e` | `#d97706` | `#fbbf24` |
+| Neon | `#c026d3` | `#22d3ee` | `#a3e635` | `#f43f5e` |
+| Crepuscolo | `#1e1b4b` | `#4338ca` | `#f472b6` | `#fb923c` |
 
-Soluzione a due livelli:
-1. **Scrim adattivo** — sopra l'aura c'è sempre un velo scuro la cui opacità è calcolata dalla luminanza relativa della palette. Palette chiara → velo più denso. L'opacità si muove tra 0.42 e 0.78.
-2. **Clamp sulla saturazione** — i colori estratti dal server vengono limitati in luminosità prima di essere usati, così nessuna copertina può produrre un'aura bianca.
+Il preset **Prisma** è la palette dell'icona dell'app. Icona e schermata in riproduzione
+devono leggersi come la stessa cosa: è il motivo per cui è il default.
 
-Questo va verificato su almeno una dozzina di copertine reali diverse, incluse quelle bianche, nere e fluorescenti. È il punto in cui Prisma fallisce se fatto male.
+### 5.4 Motore dei temi
 
-### 5.4 Accessibilità
+Il `ThemeEngine` è un `@Observable` che espone una singola `AuraPalette` più un
+`SurfaceStyle`. Chi produce la palette — il brano corrente, un preset, o niente nelle
+modalità monocromatiche — è invisibile al resto dell'app. Cambiare modalità significa
+cambiare la sorgente, non toccare le view.
 
-- `accessibilityReduceTransparency` attivo → tutte le superfici passano a `.glassEffect(.identity)` e diventano opache.
-- `accessibilityReduceMotion` attivo → la transizione dell'aura tra un brano e l'altro è un dissolve istantaneo invece di un morph animato.
+La modalità scelta si persiste. All'avvio l'app riapre con l'ultima usata.
 
-Sono due righe di codice e sono quello che separa un'app curata da una che sembra curata.
+### 5.5 Il vetro nelle due polarità
 
-### 5.5 Note di implementazione Liquid Glass
+Questa è la parte che non si può improvvisare in fase di implementazione.
 
-- Il vetro non può campionare altro vetro. Elementi di vetro vicini o sovrapposti vanno racchiusi in un `GlassEffectContainer`, che stabilisce una regione di campionamento condivisa. Non è un'ottimizzazione: senza, il rendering è visibilmente sbagliato.
+Su fondo scuro il vetro è bianco translucido con bordo chiaro: si stacca perché è più
+luminoso di ciò che ha sotto. **Su fondo chiaro la stessa ricetta sparisce** — bianco su
+bianco, bordo invisibile, la tab bar diventa un rettangolo che non si vede.
+
+In modalità Bianco quindi si invertono tre cose:
+
+- il **bordo** passa da chiaro a scuro, `rgba(13,13,16,.11)`
+- il **riflesso interno** diventa bianco quasi pieno, `rgba(255,255,255,.95)`
+- le **etichette** passano a `#0d0d10` e le loro gerarchie secondarie a opacità 60% e 40%
+
+L'ombra esterna si ammorbidisce e si scurisce: `0 8px 26px rgba(13,13,16,.13)`.
+
+In SwiftUI questo corrisponde a usare `.glassEffect(.regular)` con `colorScheme`
+coerente, non a ridipingere i materiali a mano.
+
+### 5.6 Contrasto in modalità adattiva
+
+È il rischio principale di Prisma. Testo bianco su un'aura ambra chiara è illeggibile, e
+con la modalità adattiva la palette non è nota a priori.
+
+Due livelli:
+
+1. **Scrim adattivo** — sopra l'aura c'è sempre un velo scuro la cui opacità è calcolata
+   dalla luminanza relativa della palette. Palette chiara → velo più denso. L'opacità si
+   muove tra 0.42 e 0.78.
+2. **Clamp sulla luminosità** — i colori estratti dal server vengono limitati prima
+   dell'uso, così nessuna copertina può produrre un'aura bianca.
+
+Va verificato su almeno una dozzina di copertine reali, incluse bianche, nere e
+fluorescenti. È il punto in cui Prisma fallisce se fatto male.
+
+Nelle modalità Preset, Nero e Bianco lo scrim non esiste: i fondi sono noti e il
+contrasto è fissato a priori.
+
+### 5.7 Accessibilità
+
+- `accessibilityReduceTransparency` attivo → tutte le superfici passano a
+  `.glassEffect(.identity)` e diventano opache.
+- `accessibilityReduceMotion` attivo → la transizione dell'aura tra un brano e l'altro è
+  un dissolve istantaneo invece di un morph animato.
+
+Sono due righe di codice e separano un'app curata da una che sembra curata.
+
+### 5.8 Struttura delle schermate
+
+Quattro tab più il player a schermo intero.
+
+| Schermata | Vetro | Note |
+|---|---|---|
+| **Libreria** | chip, mini-player, tab bar | Titolo grande, chip di filtro, album con copertina 66pt e righe brano sotto. Stato di download a destra di ogni riga. |
+| **Cerca** | campo di ricerca, chip, mini-player, tab bar | Risultati con miniatura 46pt e pulsante download. |
+| **Download** | card dei job, mini-player, tab bar | Sezioni In corso / In coda / Fallito. Gli errori mostrano codice e URL in monospazio. |
+| **Impostazioni** | campo server, card, segmenti, preset | Server, stato, Aspetto, build. |
+| **Player** | solo il pulsante play | Copertina grande, titolo, slider, trasporto. Quasi senza vetro di proposito: lì il contenuto è la musica, e frapporre pannelli la allontana. |
+
+Il mini-player è presente su tutte e quattro le tab e scompare nel player a schermo
+intero.
+
+### 5.9 Note di implementazione
+
+- Il vetro non può campionare altro vetro. Elementi vicini o sovrapposti vanno racchiusi
+  in un `GlassEffectContainer`, che stabilisce una regione di campionamento condivisa. Non
+  è un'ottimizzazione: senza, il rendering è visibilmente sbagliato.
 - `.glassEffect()` va applicato **dopo** i modificatori di layout e aspetto, mai prima.
-- Per i pulsanti usare `.buttonStyle(.glass)`. La forma custom passata a `.glassEffect(_:in:)` viene ignorata in alcuni casi noti e il pulsante torna a capsula.
+- Per i pulsanti usare `.buttonStyle(.glass)`. La forma custom passata a
+  `.glassEffect(_:in:)` viene ignorata in alcuni casi noti e il pulsante torna a capsula.
 - `.interactive()` solo su elementi realmente toccabili.
+- Il mini-player va spostato sullo slot nativo `tabViewBottomAccessory` di iOS 26.
+  L'implementazione attuale è una barra costruita a mano, scelta deliberatamente durante
+  la fase funzionale per evitare lo stile vetro automatico. Con il design attivo lo slot
+  nativo è preferibile: si integra con la tab bar e il vetro lo gestisce il sistema.
+- L'inset del mini-player va applicato **dentro** ogni `NavigationStack`, non fuori: un
+  safe area inset applicato all'esterno non attraversa il contenitore UIKit e le liste
+  finiscono sotto la barra. Ogni schermata spinta dentro una tab deve applicare lo stesso
+  modificatore.
 
 ---
 
