@@ -14,6 +14,7 @@ final class AppModel {
         let downloads: DownloadManager
         let sync: LibrarySync
         let playback: PlaybackEngine
+        let theme: ThemeEngine
     }
 
     let settings: AppSettings
@@ -32,7 +33,8 @@ final class AppModel {
                 downloads.serverAddressChanged(from: previous, to: new)
             }
             let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback)
+            let theme = ThemeEngine(playback: playback)
+            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme)
             launchError = nil
             downloads.checkTransfers(reason: "app launch")
         } catch {

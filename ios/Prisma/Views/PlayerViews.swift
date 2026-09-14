@@ -66,7 +66,7 @@ struct MiniPlayerView: View {
                     .padding(.bottom, 6)
                 }
             }
-            .background(.background)
+            .glassSurface()
         } else if let error = playback.lastError {
             VStack(spacing: 0) {
                 Divider()
@@ -78,7 +78,7 @@ struct MiniPlayerView: View {
                 .buttonStyle(.plain)
                 .padding()
             }
-            .background(.background)
+            .glassSurface()
         }
     }
 }
@@ -208,6 +208,7 @@ struct FullPlayerView: View {
                     }
                 }
             }
+            .themedScreenBackground()
             .navigationTitle("Now Playing")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

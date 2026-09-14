@@ -9,18 +9,19 @@ struct RootView: View {
 
     var body: some View {
         if let services = model.services {
+            let colorScheme = services.theme.resolved.surface.colorScheme
             TabView {
                 Tab("Settings", systemImage: "gear") {
-                    NavigationStack { withMiniPlayer(SettingsView()) }
+                    NavigationStack { tabRoot(SettingsView()) }
                 }
                 Tab("Search", systemImage: "magnifyingglass") {
-                    NavigationStack { withMiniPlayer(SearchView()) }
+                    NavigationStack { tabRoot(SearchView()) }
                 }
                 Tab("Library", systemImage: "square.stack") {
-                    NavigationStack { withMiniPlayer(LibraryView()) }
+                    NavigationStack { tabRoot(LibraryView()) }
                 }
                 Tab("Downloads", systemImage: "arrow.down.circle") {
-                    NavigationStack { withMiniPlayer(DownloadsView()) }
+                    NavigationStack { tabRoot(DownloadsView()) }
                 }
             }
             .fullScreenCover(isPresented: $showingPlayer) {
@@ -28,12 +29,18 @@ struct RootView: View {
                     .environment(model.settings)
                     .environment(services.downloads)
                     .environment(services.playback)
+                    .environment(services.theme)
                     .modelContainer(services.container)
+                    .preferredColorScheme(colorScheme)
             }
             .environment(services.downloads)
             .environment(services.sync)
             .environment(services.playback)
+            .environment(services.theme)
             .modelContainer(services.container)
+            // Spec 5.5: the theme's polarity reaches the system tab bar and every
+            // glass surface through the colour scheme, not through repainted materials.
+            .preferredColorScheme(colorScheme)
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
@@ -58,18 +65,21 @@ struct RootView: View {
         }
     }
 
-    /// The mini-player sits above the tab bar, on every tab, and shrinks the safe
-    /// area of the screen beneath it so the last row of a list scrolls clear of it.
+    /// A tab's root screen: the theme background behind it, and the mini-player
+    /// above the tab bar.
     ///
-    /// Applied to each tab's root screen, inside its NavigationStack. Applied
-    /// outside, the inset stops at the navigation stack (a UIKit container) and
-    /// never reaches the List, which is how build 8 drew the bar over the last row.
-    /// When nothing is loaded MiniPlayerView renders no view, so the inset is zero.
-    private func withMiniPlayer<Content: View>(_ content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) {
-            MiniPlayerView {
-                showingPlayer = true
+    /// The mini-player shrinks the safe area of the screen beneath it so the last row
+    /// of a list scrolls clear of it. Applied inside each NavigationStack: outside,
+    /// the inset stops at the navigation stack (a UIKit container) and never reaches
+    /// the List, which is how build 8 drew the bar over the last row. When nothing
+    /// is loaded MiniPlayerView renders no view, so the inset is zero.
+    private func tabRoot<Content: View>(_ content: Content) -> some View {
+        content
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                MiniPlayerView {
+                    showingPlayer = true
+                }
             }
-        }
+            .themedScreenBackground()
     }
 }

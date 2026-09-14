@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    @Environment(ThemeEngine.self) private var theme
 
     @State private var draft = ""
     @State private var draftLoaded = false
@@ -61,6 +62,34 @@ struct SettingsView: View {
                 } header: {
                     Text("Raw /health response").textCase(nil)
                 }
+            }
+
+            Section {
+                Picker("Mode", selection: Binding(
+                    get: { theme.mode },
+                    set: { theme.setMode($0) }
+                )) {
+                    ForEach(ThemeMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                if theme.mode == .preset {
+                    Picker("Preset", selection: Binding(
+                        get: { theme.presetID },
+                        set: { theme.setPreset(id: $0) }
+                    )) {
+                        ForEach(ThemeCatalog.presets) { preset in
+                            Text(preset.name).tag(preset.id)
+                        }
+                    }
+                }
+                NavigationLink("Theme inspector (development tool)") {
+                    ThemeInspectorView()
+                }
+            } header: {
+                Text("Appearance").textCase(nil)
+            } footer: {
+                Text("Adaptive follows the colours of the playing album and uses the Prisma preset when nothing is playing.")
             }
 
             Section {
