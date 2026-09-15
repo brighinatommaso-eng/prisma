@@ -317,7 +317,7 @@ Quattro tab più il player a schermo intero, e la pagina playlist spinta dentro 
 | **Libreria** | chip, mini-player, tab bar | Titolo grande, chip Album / Playlist / Preferiti, album con copertina 62pt e righe brano sotto. Stato di download come icona a destra di ogni riga: spunta nel colore d'accento se scaricato, freccia attenuata se no, anello di avanzamento durante il download, equalizzatore animato sul brano in riproduzione. |
 | **Playlist** | pulsante Casuale, mini-player, tab bar | Mosaico 2×2 dalle prime quattro copertine di album distinte, nome, "N brani · N min", poi **Riproduci** pieno e **Casuale** in vetro affiancati, poi i brani e infine "Scarica N brani mancanti" quando serve. Casuale avvia la riproduzione già in ordine casuale. |
 | **Cerca** | campo di ricerca, mini-player, tab bar | Risultati con miniatura 46pt e stato di download come icona. |
-| **Download** | mini-player, tab bar | Sezioni In corso / Non riuscito / Annullati / Scaricati, con anello di avanzamento sulla copertina. Gli errori si leggono in linguaggio semplice ("Impossibile raggiungere il server"); codice, URL e pulsante di copia restano a un tocco, dietro "Mostra dettagli tecnici". |
+| **Download** | mini-player, tab bar | Sezioni In corso / Non riuscito / Annullati / Scaricati, con anello di avanzamento sulla copertina. Un brano cercato e acquisito compare in In corso dal tocco in Cerca fino al download sul telefono, con la fase scritta (sul server, sincronizzazione, sul telefono). Ogni errore è una frase completa in linguaggio semplice che dice cosa non è riuscito e cosa controllare ("Impossibile raggiungere il server: controlla l'indirizzo in Impostazioni…"), con Riprova accanto. In fondo, gli avvisi del gestore dei download e "Controlla i trasferimenti". |
 | **Impostazioni** | campo server, card, segmenti, preset | Server, stato, Aspetto, info. |
 | **Player** | solo il pulsante play | Riga di contesto in alto ("In riproduzione da" e la sorgente) con chiusura a sinistra e menu a destra; copertina grande con ombra profonda; titolo e artista con il cuore a destra; barra di avanzamento; trasporto; in basso coda e AirPlay. Quasi senza vetro di proposito: lì il contenuto è la musica, e frapporre pannelli la allontana. |
 
@@ -329,7 +329,7 @@ separazione è solo un filo sottile, e l'aura si vede di continuo dietro l'inter
 non soltanto negli spazi tra le sezioni. Vale per Libreria, Cerca, Download, playlist e
 preferiti. Nell'interfaccia principale non compaiono dati diagnostici — dimensioni in
 byte, tempi in millisecondi, id, codici d'errore grezzi: le durate sostituiscono le
-dimensioni, e i dettagli tecnici restano raggiungibili dietro "Mostra dettagli tecnici".
+dimensioni, e ogni messaggio d'errore porta con sé la causa probabile e cosa controllare.
 
 ### 5.9 Note di implementazione
 

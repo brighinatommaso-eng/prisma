@@ -3,6 +3,13 @@
 <plist version="1.0">
 <dict>
 	<!--
+	The interface is Italian. With no .lproj folders this is the language iOS uses
+	for the labels it supplies itself (edit buttons, swipe-to-delete, dialog Cancel),
+	so any system control reads in Italian too.
+	-->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>it</string>
+	<!--
 	App Transport Security: allow plain http:// to any host.
 
 	The Prisma backend serves plain HTTP on a private network, reached either by a
