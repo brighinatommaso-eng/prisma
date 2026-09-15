@@ -40,24 +40,25 @@ enum PlainLanguage {
 
     /// A transport failure, by URLError code.
     private static func transport(_ code: Int?) -> String {
-        switch code {
-        case -1009?:
+        // Unwrapped first: a negative literal cannot be written as an optional pattern.
+        switch code ?? 0 {
+        case -1009:
             return "Il telefono non ha una rete utilizzabile: controlla che la modalità aereo sia spenta e, se il server è in rete locale, che Prisma abbia l'accesso alla rete locale in Impostazioni di iOS."
-        case -1003?, -1006?:
+        case -1003, -1006:
             return "Il nome del server non è stato trovato: controlla l'indirizzo in Impostazioni e, se usi Tailscale, che sia connesso su questo telefono."
-        case -1004?:
+        case -1004:
             return "Il server non accetta connessioni su quella porta: controlla il numero di porta in Impostazioni e che il backend sia in esecuzione."
-        case -1001?:
+        case -1001:
             return "Il server non ha risposto in tempo: controlla che sia acceso e raggiungibile, con Tailscale connesso e l'indirizzo giusto."
-        case -1005?:
+        case -1005:
             return "La connessione con il server si è interrotta a metà: riprova; se succede ancora, il server potrebbe essere in riavvio."
-        case -1020?:
+        case -1020:
             return "I dati cellulari sono disattivati per Prisma: attivali in Impostazioni di iOS, alla voce Prisma."
-        case -1022?:
+        case -1022:
             return "iOS ha bloccato la connessione HTTP al server: questa versione dell'app non ha l'eccezione necessaria, serve una nuova build."
-        case -1200?, -1202?:
+        case -1200, -1202:
             return "La connessione sicura non è riuscita: il server usa HTTP, quindi l'indirizzo deve iniziare con http:// e non con https://."
-        case -1011?, -1017?:
+        case -1011, -1017:
             return "All'indirizzo ha risposto qualcosa che non è il server Prisma: controlla che l'indirizzo in Impostazioni punti al backend."
         default:
             return "Impossibile raggiungere il server: controlla l'indirizzo in Impostazioni, che il server sia acceso e che Tailscale sia connesso."

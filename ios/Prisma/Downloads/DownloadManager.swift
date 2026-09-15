@@ -906,7 +906,7 @@ final class DownloadManager {
             progress[token] = nil
             finish(trackID: trackID, token: token, result: result)
 
-        case .unmatched(let taskIdentifier, let error):
+        case .unmatched:
             notice("Un trasferimento in background non corrispondeva a nessun brano ed è stato ignorato: non serve fare nulla.")
 
         case .allEventsDelivered:
