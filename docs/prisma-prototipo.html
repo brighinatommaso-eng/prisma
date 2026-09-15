@@ -2,606 +2,509 @@
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prisma — prototipo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prisma — prototipo v3</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-
 :root{
-  /* palette icona */
-  --c1:#1e26b6;   /* blu    */
-  --c2:#e73b86;   /* rosa   */
-  --c3:#fba402;   /* ambra  */
-  --c4:#00d4c8;   /* ciano  */
-  --bg:#0B0710;
+  --c1:#1e26b6;--c2:#e73b86;--c3:#fba402;--c4:#00d4c8;
+  --bg:#0B0710;--ink:#fff;
   --glass:linear-gradient(158deg,rgba(255,255,255,.15),rgba(255,255,255,.045) 46%,rgba(255,255,255,.10));
   --glass-clear:linear-gradient(158deg,rgba(255,255,255,.12),rgba(255,255,255,.028));
-  --glass-bd:rgba(255,255,255,.20);
-  --glass-bd2:rgba(255,255,255,.25);
-  --glass-hi:rgba(255,255,255,.42);
-  --glass-sh:0 10px 32px rgba(0,0,0,.42);
-  --glass-spec:rgba(255,255,255,.28);
-  --glass-br:1.09;
-  --ink:#ffffff;
+  --glass-bd:rgba(255,255,255,.20);--glass-bd2:rgba(255,255,255,.25);
+  --glass-hi:rgba(255,255,255,.42);--glass-sh:0 10px 32px rgba(0,0,0,.42);
+  --glass-spec:rgba(255,255,255,.28);--glass-br:1.09;
 }
-
-body{
-  background:#141218;
-  font-family:'Inter',system-ui,sans-serif;
-  color:#e9e7ee;
-  min-height:100vh;
-  display:flex;flex-direction:column;align-items:center;
-  padding:40px 20px 80px;
-  gap:26px;
-}
-
-.head{max-width:760px;text-align:center}
+body{background:#141218;font-family:'Inter',system-ui,sans-serif;color:#e9e7ee;min-height:100vh;
+  display:flex;flex-direction:column;align-items:center;padding:40px 20px 80px;gap:24px}
+.head{max-width:800px;text-align:center}
 .head h1{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:30px;letter-spacing:-.03em}
-.head p{margin-top:10px;font-size:14px;line-height:1.6;color:rgba(233,231,238,.5)}
-.head kbd{
-  font-family:ui-monospace,monospace;font-size:12px;background:rgba(255,255,255,.08);
-  border:.5px solid rgba(255,255,255,.16);border-radius:5px;padding:2px 6px;
-}
+.head p{margin-top:10px;font-size:14px;line-height:1.6;color:rgba(233,231,238,.52)}
 
-/* ===================== TELAIO ===================== */
-.phone{
-  width:390px;height:844px;border-radius:54px;position:relative;overflow:hidden;
-  box-shadow:0 0 0 11px #1b1b1e,0 0 0 12.5px #46464c,0 40px 90px -20px rgba(0,0,0,.9);
-  flex:0 0 auto;
-}
-.screen{position:absolute;inset:0;background:var(--bg);overflow:hidden}
-
-.dyn{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:118px;height:34px;background:#000;border-radius:20px;z-index:60}
-.sbar{
-  position:absolute;top:0;left:0;right:0;height:56px;z-index:55;color:#fff;
-  display:flex;align-items:center;justify-content:space-between;
-  padding:16px 30px 0;font-size:14.5px;font-weight:600;
-}
-.sbar .r{display:flex;gap:6px;font-size:11px;align-items:center}
-
-/* ===================== AURA ===================== */
-.aura{position:absolute;inset:-32%;filter:blur(74px);transition:opacity .6s}
-.aura i{position:absolute;border-radius:50%;display:block;transition:background .9s ease}
-.aura .b1{width:64%;height:44%;left:-8%;top:0%;  background:var(--c1)}
-.aura .b2{width:58%;height:40%;right:-10%;top:15%;background:var(--c2)}
-.aura .b3{width:70%;height:46%;left:0%;top:38%;  background:var(--c3)}
-.aura .b4{width:62%;height:42%;right:-6%;bottom:0%;background:var(--c4)}
-.scrim{position:absolute;inset:0;transition:background .5s}
-
-/* ===================== VETRO ===================== */
-.g{
-  position:relative;
-  backdrop-filter:blur(26px) saturate(200%);
-  -webkit-backdrop-filter:blur(26px) saturate(200%);
-  background:var(--glass);
-  border:.5px solid var(--glass-bd);
-  box-shadow:inset 0 .5px 0 var(--glass-hi),inset 0 -.5px 0 rgba(255,255,255,.08),var(--glass-sh);
-  overflow:hidden;
-}
-.g::after{content:'';position:absolute;inset:0;pointer-events:none;
-  background:radial-gradient(130% 82% at 10% -22%,var(--glass-spec),transparent 56%)}
-.g.clear{
-  backdrop-filter:blur(13px) saturate(250%) brightness(var(--glass-br));
-  -webkit-backdrop-filter:blur(13px) saturate(250%) brightness(var(--glass-br));
-  background:var(--glass-clear);
-  border-color:var(--glass-bd2);
-}
-
-/* ===== MONOCROMO ===== */
+.phone{width:390px;height:844px;border-radius:54px;position:relative;overflow:hidden;
+  box-shadow:0 0 0 11px #1b1b1e,0 0 0 12.5px #46464c,0 40px 90px -20px rgba(0,0,0,.9);flex:0 0 auto}
+.screen{position:absolute;inset:0;background:var(--bg);overflow:hidden;color:var(--ink)}
 .screen[data-t="mono-dark"]{--bg:#08090A}
-.screen[data-t="mono-light"]{
-  --bg:#EFEFF2;
-  --ink:#0d0d10;
+.screen[data-t="mono-light"]{--bg:#EFEFF2;--ink:#0d0d10;
   --glass:linear-gradient(158deg,rgba(255,255,255,.74),rgba(255,255,255,.46) 46%,rgba(255,255,255,.64));
   --glass-clear:linear-gradient(158deg,rgba(255,255,255,.60),rgba(255,255,255,.34));
-  --glass-bd:rgba(13,13,16,.11);
-  --glass-bd2:rgba(13,13,16,.09);
-  --glass-hi:rgba(255,255,255,.95);
-  --glass-sh:0 8px 26px rgba(13,13,16,.13);
-  --glass-spec:rgba(255,255,255,.80);
-  --glass-br:1.02;
-}
-.screen[data-t="mono-light"] .page,
-.screen[data-t="mono-light"] .sbar{color:#0d0d10}
-.screen[data-t="mono-light"] .sub,
-.screen[data-t="mono-light"] .ameta,
-.screen[data-t="mono-light"] .ms,
-.screen[data-t="mono-light"] .jm,
-.screen[data-t="mono-light"] .val,
-.screen[data-t="mono-light"] .pa,
-.screen[data-t="mono-light"] .stime{color:rgba(13,13,16,.60)}
-.screen[data-t="mono-light"] .sect,
-.screen[data-t="mono-light"] .tno,
-.screen[data-t="mono-light"] .tm,
-.screen[data-t="mono-light"] .dl{color:rgba(13,13,16,.40)}
-.screen[data-t="mono-light"] .trk,
-.screen[data-t="mono-light"] .res,
-.screen[data-t="mono-light"] .row{border-color:rgba(13,13,16,.10)}
-.screen[data-t="mono-light"] .chip,
-.screen[data-t="mono-light"] .seg div,
-.screen[data-t="mono-light"] .pname{color:#0d0d10}
-.screen[data-t="mono-light"] .chip.on,
-.screen[data-t="mono-light"] .seg div.on{background:#0d0d10;color:#fff}
-.screen[data-t="mono-light"] .ok,
-.screen[data-t="mono-light"] .playing .tt{color:#0d0d10}
-.screen[data-t="mono-light"] .mbtns svg,
-.screen[data-t="mono-light"] .tab svg,
-.screen[data-t="mono-light"] .trans svg{fill:#0d0d10}
-.screen[data-t="mono-light"] .tab{color:#0d0d10}
-.screen[data-t="mono-light"] .bar,
-.screen[data-t="mono-light"] .strack,
-.screen[data-t="mono-light"] .mprog{background:rgba(13,13,16,.14)}
-.screen[data-t="mono-light"] .bar i,
-.screen[data-t="mono-light"] .sfill,
-.screen[data-t="mono-light"] .sknob,
-.screen[data-t="mono-light"] .mprog i{background:#0d0d10}
-.screen[data-t="mono-light"] .pgrab{background:rgba(13,13,16,.28)}
-.screen[data-t="mono-light"] .pre.on{outline-color:#0d0d10}
+  --glass-bd:rgba(13,13,16,.11);--glass-bd2:rgba(13,13,16,.09);
+  --glass-hi:rgba(255,255,255,.95);--glass-sh:0 8px 26px rgba(13,13,16,.13);
+  --glass-spec:rgba(255,255,255,.80);--glass-br:1.02}
+.screen[data-t="mono-light"] .hair{background:rgba(13,13,16,.10)}
+.screen[data-t="mono-light"] .dim{color:rgba(13,13,16,.55)}
+.screen[data-t="mono-light"] .dim2{color:rgba(13,13,16,.38)}
+.screen[data-t="mono-light"] .fill{background:#0d0d10;color:#fff}
+.screen[data-t="mono-light"] svg{fill:#0d0d10}
+.screen[data-t="mono-light"] .fill svg{fill:#fff}
 
-/* ===================== PAGINE ===================== */
-.page{position:absolute;inset:0;padding:62px 0 0;overflow-y:auto;overflow-x:hidden;display:none;z-index:10}
+.dyn{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:118px;height:34px;background:#000;border-radius:20px;z-index:60}
+.sbar{position:absolute;top:0;left:0;right:0;height:56px;z-index:55;display:flex;align-items:center;
+  justify-content:space-between;padding:16px 30px 0;font-size:14.5px;font-weight:600;color:var(--ink)}
+
+.aura{position:absolute;inset:-32%;filter:blur(46px);transition:opacity .5s}
+.aura i{position:absolute;border-radius:50%;display:block;transition:background .9s}
+.aura .b1{width:64%;height:44%;left:-8%;top:0}
+.aura .b2{width:58%;height:40%;right:-10%;top:15%}
+.aura .b3{width:70%;height:46%;left:0;top:38%}
+.aura .b4{width:62%;height:42%;right:-6%;bottom:0}
+.scrim{position:absolute;inset:0;transition:background .45s;
+  background:linear-gradient(180deg,rgba(11,7,16,.34),rgba(11,7,16,.54))}
+
+.g{position:relative;backdrop-filter:blur(26px) saturate(200%);-webkit-backdrop-filter:blur(26px) saturate(200%);
+  background:var(--glass);border:.5px solid var(--glass-bd);
+  box-shadow:inset 0 .5px 0 var(--glass-hi),var(--glass-sh);overflow:hidden}
+.g::after{content:'';position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(130% 82% at 10% -22%,var(--glass-spec),transparent 56%)}
+.g.clear{backdrop-filter:blur(13px) saturate(250%) brightness(var(--glass-br));
+  -webkit-backdrop-filter:blur(13px) saturate(250%) brightness(var(--glass-br));
+  background:var(--glass-clear);border-color:var(--glass-bd2)}
+
+.page{position:absolute;inset:0;padding:62px 0 0;overflow-y:auto;display:none;z-index:10}
 .page.on{display:block}
 .page::-webkit-scrollbar{display:none}
 .pad{padding:0 20px}
-.spacer{height:170px}
+.spacer{height:172px}
+.hair{height:.5px;background:rgba(255,255,255,.085)}
+.dim{color:rgba(255,255,255,.58)}
+.dim2{color:rgba(255,255,255,.38)}
 
-h2.big{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:34px;letter-spacing:-.035em;line-height:1;margin-top:14px}
-.sub{font-size:12.5px;color:rgba(255,255,255,.58);margin-top:6px}
-.sect{font-size:10.5px;font-weight:700;letter-spacing:.11em;text-transform:uppercase;color:rgba(255,255,255,.46);margin:26px 0 12px}
+h2.big{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:34px;letter-spacing:-.035em;line-height:1;margin-top:12px}
 
-/* chips */
-.chips{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
-.chip{height:33px;border-radius:17px;padding:0 15px;display:flex;align-items:center;font-size:12.5px;font-weight:600;letter-spacing:-.01em;cursor:pointer}
-.chip.on{background:rgba(255,255,255,.94);color:#12071d;border-color:transparent;box-shadow:0 4px 13px rgba(0,0,0,.34)}
+.seg{display:flex;gap:6px;margin-top:18px}
+.seg div{flex:1;height:34px;border-radius:12px;display:grid;place-items:center;font-size:12.5px;font-weight:600;cursor:pointer;color:var(--ink)}
+.seg div.fill{background:rgba(255,255,255,.94);color:#12071d;border:0}
 
-/* album */
-.album{margin-top:20px}
-.ahead{display:flex;gap:13px;align-items:center}
-.cover{width:66px;height:66px;border-radius:15px;flex:0 0 auto;box-shadow:0 8px 22px -6px rgba(0,0,0,.72)}
-.atitle{font-family:'Bricolage Grotesque',sans-serif;font-weight:600;font-size:17px;letter-spacing:-.02em;line-height:1.2}
-.ameta{font-size:11.5px;color:rgba(255,255,255,.58);margin-top:3px}
+.ahead{display:flex;gap:13px;align-items:center;margin:22px 0 4px}
+.cover{width:62px;height:62px;border-radius:14px;flex:0 0 auto;box-shadow:0 8px 22px -6px rgba(0,0,0,.6)}
+.atitle{font-family:'Bricolage Grotesque',sans-serif;font-weight:600;font-size:17px;letter-spacing:-.02em}
+.ameta{font-size:11.5px;margin-top:3px}
 
-.trk{display:flex;align-items:center;gap:12px;padding:10px 0 10px 8px;border-bottom:.5px solid rgba(255,255,255,.075)}
-.trk:last-child{border-bottom:0}
-.tno{font-size:11px;color:rgba(255,255,255,.36);width:15px;flex:0 0 auto;font-variant-numeric:tabular-nums}
+.trk{display:flex;align-items:center;gap:13px;height:50px;padding-left:6px;cursor:pointer}
+.tno{font-size:11.5px;width:16px;flex:0 0 auto;font-variant-numeric:tabular-nums}
 .tinfo{flex:1;min-width:0}
 .tt{font-size:14.5px;font-weight:500;letter-spacing:-.012em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tm{font-size:11px;color:rgba(255,255,255,.46);margin-top:2px;font-variant-numeric:tabular-nums}
-.tbtn{width:28px;height:28px;flex:0 0 auto;display:grid;place-items:center;cursor:pointer}
-.tbtn svg{width:17px;height:17px;fill:currentColor}
-.ok{color:var(--c4)}
-.dl{color:rgba(255,255,255,.5)}
-.playing .tt{color:var(--c4)}
+.tdur{font-size:11.5px;font-variant-numeric:tabular-nums}
+.ico{width:18px;height:18px;flex:0 0 auto;fill:currentColor}
+.state{width:44px;height:44px;display:grid;place-items:center;flex:0 0 auto;margin-right:-10px}
+.eq{display:flex;gap:2px;align-items:flex-end;height:13px}
+.eq b{width:2.5px;background:var(--c4);border-radius:1px;display:block;animation:eq 1s infinite ease-in-out}
+.eq b:nth-child(1){height:60%;animation-delay:-.4s}
+.eq b:nth-child(2){height:100%}
+.eq b:nth-child(3){height:40%;animation-delay:-.7s}
+@keyframes eq{0%,100%{transform:scaleY(.4)}50%{transform:scaleY(1)}}
+
+/* playlist */
+.mosaic{width:160px;height:160px;border-radius:20px;overflow:hidden;display:grid;
+  grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;margin:20px auto 0;
+  box-shadow:0 22px 46px -14px rgba(0,0,0,.72)}
+.mosaic b{display:block}
+.pl-name{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:27px;letter-spacing:-.03em;text-align:center;margin-top:18px}
+.pl-meta{font-size:12.5px;text-align:center;margin-top:5px}
+.acts{display:flex;gap:10px;margin-top:20px}
+.act{flex:1;height:48px;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:8px;
+  font-size:14.5px;font-weight:600;letter-spacing:-.01em;cursor:pointer;color:var(--ink)}
+.act svg{width:18px;height:18px;fill:currentColor}
+.act.fill{background:rgba(255,255,255,.95);color:#12071d;border:0}
+.act.fill svg{fill:#12071d}
 
 /* search */
-.sfield{height:45px;border-radius:23px;display:flex;align-items:center;gap:10px;padding:0 16px;font-size:13.5px;color:rgba(255,255,255,.62);margin-top:16px}
-.sfield svg{width:16px;height:16px;fill:currentColor;opacity:.7}
-
-.res{display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:.5px solid rgba(255,255,255,.07)}
+.sfield{height:46px;border-radius:23px;display:flex;align-items:center;gap:10px;padding:0 16px;font-size:14px;margin-top:16px}
+.sfield svg{width:17px;height:17px;fill:currentColor;opacity:.65}
 .rthumb{width:46px;height:46px;border-radius:10px;flex:0 0 auto}
 
 /* downloads */
-.job{border-radius:18px;padding:13px 14px;margin-bottom:10px}
-.jtop{display:flex;gap:11px;align-items:center}
-.jthumb{width:40px;height:40px;border-radius:9px;flex:0 0 auto}
-.jt{font-size:14px;font-weight:600;letter-spacing:-.012em}
-.jm{font-size:11px;color:rgba(255,255,255,.56);margin-top:2px;font-variant-numeric:tabular-nums}
-.bar{height:4px;border-radius:2px;background:rgba(255,255,255,.17);margin-top:11px;overflow:hidden}
-.bar i{display:block;height:100%;border-radius:2px;background:#fff}
-.jerr{font-size:11px;color:#ff9c9c;margin-top:8px;line-height:1.5;font-family:ui-monospace,monospace}
+.job{display:flex;align-items:center;gap:12px;height:62px}
+.jthumb{width:44px;height:44px;border-radius:10px;flex:0 0 auto;position:relative;overflow:hidden}
+.jthumb .ov{position:absolute;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center}
+.ring{width:22px;height:22px;transform:rotate(-90deg)}
+.ring circle{fill:none;stroke-width:2.4}
+.sect{font-size:10.5px;font-weight:700;letter-spacing:.11em;text-transform:uppercase;margin:24px 0 6px}
+.link{font-size:12px;font-weight:600;color:var(--c4);cursor:pointer}
 
 /* settings */
-.row{display:flex;align-items:center;justify-content:space-between;padding:13px 15px;border-bottom:.5px solid rgba(255,255,255,.085);font-size:14px}
-.row:last-child{border-bottom:0}
-.card{border-radius:20px;margin-top:14px;overflow:hidden}
-.val{font-size:13px;color:rgba(255,255,255,.56);font-variant-numeric:tabular-nums}
-.seg{display:flex;gap:6px;margin-top:14px}
-.seg div{flex:1;height:36px;border-radius:12px;display:grid;place-items:center;font-size:12.5px;font-weight:600;cursor:pointer}
-.seg div.on{background:rgba(255,255,255,.94);color:#12071d;border-color:transparent}
-.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px}
-.pre{border-radius:15px;padding:10px;cursor:pointer}
-.swatch{height:34px;border-radius:9px;display:flex;overflow:hidden}
-.swatch b{flex:1;display:block}
-.pname{font-size:11px;font-weight:600;margin-top:7px;text-align:center;letter-spacing:-.01em}
-.pre.on{outline:2px solid rgba(255,255,255,.85);outline-offset:1px}
+.card{border-radius:20px;margin-top:12px;overflow:hidden}
+.row{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;font-size:14.5px}
+.presets{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}
+.pre{border-radius:14px;padding:8px;cursor:pointer}
+.swatch{height:28px;border-radius:8px;display:flex;overflow:hidden}
+.swatch b{flex:1}
+.pname{font-size:10.5px;font-weight:600;margin-top:6px;text-align:center;color:var(--ink)}
+.pre.on{outline:2px solid var(--ink);outline-offset:1px}
 
-/* ===================== PLAYER ===================== */
-#player{padding-top:0}
-.pwrap{position:absolute;inset:0;padding:74px 26px 34px;display:flex;flex-direction:column}
-.pgrab{width:38px;height:5px;border-radius:3px;background:rgba(255,255,255,.3);margin:0 auto 26px}
-.part{width:100%;aspect-ratio:1;border-radius:26px;box-shadow:0 30px 60px -18px rgba(0,0,0,.8)}
-.pmeta{margin-top:30px}
-.pt{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:26px;letter-spacing:-.03em;line-height:1.1}
-.pa{font-size:14.5px;color:rgba(255,255,255,.66);margin-top:5px}
-.seek{margin-top:26px}
-.strack{height:5px;border-radius:3px;background:rgba(255,255,255,.22);position:relative}
-.sfill{height:100%;width:41%;border-radius:3px;background:#fff}
-.sknob{position:absolute;left:41%;top:50%;width:13px;height:13px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);box-shadow:0 2px 6px rgba(0,0,0,.5)}
-.stime{display:flex;justify-content:space-between;font-size:11px;color:rgba(255,255,255,.6);margin-top:9px;font-variant-numeric:tabular-nums}
-.trans{display:flex;align-items:center;justify-content:space-between;margin-top:26px}
-.trans svg{fill:#fff}
-.tsm{width:20px;height:20px;opacity:.62;cursor:pointer}
-.tmd{width:32px;height:32px;cursor:pointer}
-.tbig{width:72px;height:72px;border-radius:50%;display:grid;place-items:center;cursor:pointer}
-.tbig svg{width:29px;height:29px}
+/* player */
+.pw{position:absolute;inset:0;padding:60px 26px 30px;display:flex;flex-direction:column;z-index:20}
+.ptop{display:flex;align-items:center;justify-content:space-between;height:34px}
+.ptop svg{width:20px;height:20px;fill:currentColor;cursor:pointer}
+.pfrom{text-align:center;line-height:1.3}
+.pfrom span{font-size:9.5px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;display:block}
+.pfrom b{font-size:12.5px;font-weight:600;letter-spacing:-.01em}
+.part{width:100%;aspect-ratio:1;border-radius:24px;margin-top:22px;box-shadow:0 34px 64px -20px rgba(0,0,0,.85)}
+.prow{display:flex;align-items:flex-end;gap:14px;margin-top:28px}
+.pt{font-family:'Bricolage Grotesque',sans-serif;font-weight:800;font-size:25px;letter-spacing:-.03em;line-height:1.08}
+.pa{font-size:14px;margin-top:4px}
+.heart{width:44px;height:44px;display:grid;place-items:center;flex:0 0 auto;cursor:pointer;margin-bottom:-6px}
+.heart svg{width:23px;height:23px;fill:var(--c2)}
+.seek{margin-top:22px}
+.strack{height:5px;border-radius:3px;background:rgba(255,255,255,.2);position:relative}
+.sfill{height:100%;width:41%;border-radius:3px;background:var(--ink)}
+.sknob{position:absolute;left:41%;top:50%;width:12px;height:12px;border-radius:50%;background:var(--ink);transform:translate(-50%,-50%)}
+.stime{display:flex;justify-content:space-between;font-size:11px;margin-top:8px;font-variant-numeric:tabular-nums}
+.trans{display:flex;align-items:center;justify-content:space-between;margin-top:20px}
+.tb{width:46px;height:46px;display:grid;place-items:center;cursor:pointer}
+.tb svg{fill:currentColor}
+.tsm{width:19px;height:19px;opacity:.6}
+.tmd{width:31px;height:31px}
+.tbig{width:74px;height:74px;border-radius:50%;display:grid;place-items:center;cursor:pointer}
+.tbig svg{width:30px;height:30px;fill:currentColor}
+.pbot{display:flex;justify-content:space-between;margin-top:auto;padding:0 4px}
+.pbot svg{width:19px;height:19px;fill:currentColor;opacity:.6;cursor:pointer}
 
-/* ===================== MINI + TABBAR ===================== */
-.mini{
-  position:absolute;left:13px;right:13px;bottom:94px;height:64px;border-radius:23px;
-  display:flex;align-items:center;gap:11px;padding:0 13px;z-index:30;cursor:pointer;
-}
-.mart{width:42px;height:42px;border-radius:10px;flex:0 0 auto;box-shadow:0 3px 10px rgba(0,0,0,.5)}
-.mmeta{flex:1;min-width:0}
+/* mini + tabbar */
+.mini{position:absolute;left:13px;right:13px;bottom:94px;height:62px;border-radius:22px;
+  display:flex;align-items:center;gap:11px;padding:0 8px 0 11px;z-index:30}
+.mart{width:42px;height:42px;border-radius:10px;flex:0 0 auto}
+.mmeta{flex:1;min-width:0;cursor:pointer}
 .mt{font-size:13.5px;font-weight:600;letter-spacing:-.012em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ms{font-size:11px;color:rgba(255,255,255,.6);margin-top:1px}
-.mbtns{display:flex;gap:15px;padding-right:3px}
-.mbtns svg{width:19px;height:19px;fill:#fff}
-.mprog{position:absolute;left:13px;right:13px;bottom:0;height:2px;background:rgba(255,255,255,.16)}
-.mprog i{display:block;height:100%;width:41%;background:rgba(255,255,255,.85)}
+.ms{font-size:11px;margin-top:1px}
+.mb{width:46px;height:46px;display:grid;place-items:center;cursor:pointer;flex:0 0 auto}
+.mb svg{width:19px;height:19px;fill:currentColor}
+.mprog{position:absolute;left:11px;right:11px;bottom:0;height:2px;background:rgba(255,255,255,.14)}
+.mprog i{display:block;height:100%;width:41%;background:currentColor;opacity:.8}
 
-.tabbar{position:absolute;left:13px;right:13px;bottom:26px;height:62px;border-radius:25px;display:flex;align-items:center;z-index:30}
-.tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;opacity:.48;cursor:pointer;transition:opacity .2s}
+.tabbar{position:absolute;left:13px;right:13px;bottom:26px;height:62px;border-radius:24px;display:flex;align-items:center;z-index:30}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;opacity:.45;cursor:pointer;color:var(--ink)}
 .tab.on{opacity:1}
-.tab svg{width:19px;height:19px;fill:#fff}
-.tab span{font-size:9px;font-weight:600;letter-spacing:.005em}
-.hidden{display:none!important}
+.tab svg{width:19px;height:19px;fill:currentColor}
+.tab span{font-size:9px;font-weight:600}
+.hide{display:none!important}
 </style>
 </head>
 <body>
 
 <div class="head">
-  <h1>Prisma — prototipo interattivo</h1>
-  <p>Clicca la tab bar per navigare, il mini-player per aprire il player a schermo intero, e in Impostazioni prova i temi: l'aura cambia davvero. La palette è quella dell'icona. Il vetro sta solo su tab bar, mini-player, campo di ricerca e chip — mai sul contenuto, come impongono le HIG.</p>
+  <h1>Prisma — prototipo v3</h1>
+  <p>Via tutte le scritte diagnostiche, righe trasparenti così l'aura si vede davvero, player ricomposto e pagina playlist con Riproduci e Casuale affiancati. Naviga dalla tab bar; in Libreria prova il segmento <b>Playlist</b>.</p>
 </div>
 
 <div class="phone">
-  <div class="screen" id="screen" data-t="aura">
-
-    <div class="aura" id="aura"><i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i></div>
-    <div class="scrim" id="scrim" style="background:linear-gradient(180deg,rgba(11,7,16,.50),rgba(11,7,16,.80))"></div>
-
-    <!-- ============ LIBRERIA ============ -->
-    <div class="page on" id="p-lib">
-      <div class="pad">
-        <h2 class="big">Libreria</h2>
-        <div class="sub">5 album · 6 brani · 23,3 MB</div>
-        <div class="chips">
-          <div class="chip on">Tutto</div>
-          <div class="chip g clear">Scaricati</div>
-          <div class="chip g clear">Album</div>
-          <div class="chip g clear">Artisti</div>
-        </div>
-
-        <div class="album">
-          <div class="ahead">
-            <div class="cover" style="background:linear-gradient(150deg,#2b2f78,#8d9bd6 60%,#c8d2f0)"></div>
-            <div>
-              <div class="atitle">Discovery</div>
-              <div class="ameta">Daft Punk · 2001 · 1 brano</div>
-            </div>
-          </div>
-          <div class="trk">
-            <div class="tno">9</div>
-            <div class="tinfo"><div class="tt">Something About Us</div><div class="tm">3:53 · 3,8 MB</div></div>
-            <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-          </div>
-        </div>
-
-        <div class="album">
-          <div class="ahead">
-            <div class="cover" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
-            <div>
-              <div class="atitle">Homework</div>
-              <div class="ameta">Daft Punk · 1996 · 2 brani</div>
-            </div>
-          </div>
-          <div class="trk playing">
-            <div class="tno">7</div>
-            <div class="tinfo"><div class="tt">Around the World</div><div class="tm">7:10 · 7,1 MB · in riproduzione</div></div>
-            <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-          </div>
-          <div class="trk">
-            <div class="tno">—</div>
-            <div class="tinfo"><div class="tt">Around the World (Radio Edit)</div><div class="tm">4:02 · 4,0 MB</div></div>
-            <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div>
-          </div>
-        </div>
-
-        <div class="album">
-          <div class="ahead">
-            <div class="cover" style="background:linear-gradient(150deg,#3a2436,#e73b86 60%,#fba402)"></div>
-            <div>
-              <div class="atitle">Californication</div>
-              <div class="ameta">Red Hot Chili Peppers · 1999 · 1 brano</div>
-            </div>
-          </div>
-          <div class="trk">
-            <div class="tno">7</div>
-            <div class="tinfo"><div class="tt">Around The World</div><div class="tm">3:59 · 3,9 MB</div></div>
-            <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-          </div>
-        </div>
-
-        <div class="album">
-          <div class="ahead">
-            <div class="cover" style="background:linear-gradient(150deg,#23303b,#00d4c8 70%,#9be8e2)"></div>
-            <div>
-              <div class="atitle">Singles</div>
-              <div class="ameta">jawed · anno sconosciuto · 1 brano</div>
-            </div>
-          </div>
-          <div class="trk">
-            <div class="tno">—</div>
-            <div class="tinfo"><div class="tt">Me at the zoo</div><div class="tm">0:19 · 327 KB</div></div>
-            <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div>
-          </div>
-        </div>
-        <div class="spacer"></div>
-      </div>
-    </div>
-
-    <!-- ============ RICERCA ============ -->
-    <div class="page" id="p-search">
-      <div class="pad">
-        <h2 class="big">Cerca</h2>
-        <div class="sub">YouTube Music</div>
-        <div class="sfield g clear">
-          <svg viewBox="0 0 24 24"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.41-1.41-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg>
-          daft punk around the world
-        </div>
-        <div class="chips">
-          <div class="chip on">Brani</div>
-          <div class="chip g clear">Album</div>
-          <div class="chip g clear">Artisti</div>
-        </div>
-
-        <div class="sect">5 risultati · 740 ms</div>
-
-        <div class="res">
-          <div class="rthumb" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
-          <div class="tinfo"><div class="tt">Around the World</div><div class="tm">Daft Punk · Homework · 7:10</div></div>
-          <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-        </div>
-        <div class="res">
-          <div class="rthumb" style="background:linear-gradient(150deg,#2b2f78,#6f7fd0)"></div>
-          <div class="tinfo"><div class="tt">Around the World (Radio Edit)</div><div class="tm">Daft Punk · Around the World · 4:02</div></div>
-          <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div>
-        </div>
-        <div class="res">
-          <div class="rthumb" style="background:linear-gradient(150deg,#3a2436,#e73b86)"></div>
-          <div class="tinfo"><div class="tt">Around The World</div><div class="tm">Red Hot Chili Peppers · Californication · 3:59</div></div>
-          <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-        </div>
-        <div class="res">
-          <div class="rthumb" style="background:linear-gradient(150deg,#1e26b6,#00d4c8)"></div>
-          <div class="tinfo"><div class="tt">Something About Us</div><div class="tm">Daft Punk · Discovery · 3:53</div></div>
-          <div class="tbtn ok"><svg viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
-        </div>
-        <div class="res">
-          <div class="rthumb" style="background:linear-gradient(150deg,#fba402,#e73b86)"></div>
-          <div class="tinfo"><div class="tt">Around the World (La La La)</div><div class="tm">A Touch of Class · Planet Pop · 3:35</div></div>
-          <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div>
-        </div>
-        <div class="spacer"></div>
-      </div>
-    </div>
-
-    <!-- ============ DOWNLOAD ============ -->
-    <div class="page" id="p-dl">
-      <div class="pad">
-        <h2 class="big">Download</h2>
-        <div class="sub">1 in corso · 2 in coda · 1 fallito</div>
-
-        <div class="sect">In corso</div>
-        <div class="job g clear">
-          <div class="jtop">
-            <div class="jthumb" style="background:linear-gradient(150deg,#2b2f78,#6f7fd0)"></div>
-            <div class="tinfo"><div class="jt">Around the World (Radio Edit)</div><div class="jm">Daft Punk · 2,7 di 4,0 MB · 1,4 MB/s</div></div>
-          </div>
-          <div class="bar"><i style="width:68%"></i></div>
-        </div>
-
-        <div class="sect">In coda</div>
-        <div class="job g clear">
-          <div class="jtop">
-            <div class="jthumb" style="background:linear-gradient(150deg,#23303b,#00d4c8)"></div>
-            <div class="tinfo"><div class="jt">Me at the zoo</div><div class="jm">jawed · in attesa da 12 s</div></div>
-            <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg></div>
-          </div>
-        </div>
-        <div class="job g clear">
-          <div class="jtop">
-            <div class="jthumb" style="background:linear-gradient(150deg,#fba402,#e73b86)"></div>
-            <div class="tinfo"><div class="jt">Around the World (La La La)</div><div class="jm">A Touch of Class · in attesa da 12 s</div></div>
-            <div class="tbtn dl"><svg viewBox="0 0 24 24"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg></div>
-          </div>
-        </div>
-
-        <div class="sect">Fallito</div>
-        <div class="job g clear">
-          <div class="jtop">
-            <div class="jthumb" style="background:linear-gradient(150deg,#3a2436,#7d4a6b)"></div>
-            <div class="tinfo"><div class="jt">Harder, Better, Faster</div><div class="jm">Daft Punk · non riprovato automaticamente</div></div>
-          </div>
-          <div class="jerr">-1004 cannotConnectToHost<br>http://your-server:8001/tracks/12/file</div>
-        </div>
-        <div class="spacer"></div>
-      </div>
-    </div>
-
-    <!-- ============ IMPOSTAZIONI ============ -->
-    <div class="page" id="p-set">
-      <div class="pad">
-        <h2 class="big">Impostazioni</h2>
-
-        <div class="sect">Server</div>
-        <div class="sfield g clear" style="margin-top:0">http://your-server:8000</div>
-        <div class="card g clear">
-          <div class="row"><span>Stato</span><span class="val" style="color:var(--c4)">Connesso · 12 ms</span></div>
-          <div class="row"><span>Brani</span><span class="val">6</span></div>
-          <div class="row"><span>Spazio libero</span><span class="val">290,0 GB</span></div>
-        </div>
-
-        <div class="sect">Aspetto</div>
-        <div class="seg">
-          <div class="on" onclick="mode('adapt',this)">Adattivo</div>
-          <div class="g clear" onclick="mode('preset',this)">Preset</div>
-          <div class="g clear" onclick="mode('mdark',this)">Nero</div>
-          <div class="g clear" onclick="mode('mlight',this)">Bianco</div>
-        </div>
-        <div class="presets" id="presets">
-          <div class="pre g clear on" onclick="setPal(this,'#1e26b6','#e73b86','#fba402','#00d4c8')">
-            <div class="swatch"><b style="background:#1e26b6"></b><b style="background:#e73b86"></b><b style="background:#fba402"></b><b style="background:#00d4c8"></b></div>
-            <div class="pname">Prisma</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#06283d','#1363df','#47b5ff','#0a9396')">
-            <div class="swatch"><b style="background:#06283d"></b><b style="background:#1363df"></b><b style="background:#47b5ff"></b><b style="background:#0a9396"></b></div>
-            <div class="pname">Abisso</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#7c2d12','#dc2626','#f59e0b','#fde047')">
-            <div class="swatch"><b style="background:#7c2d12"></b><b style="background:#dc2626"></b><b style="background:#f59e0b"></b><b style="background:#fde047"></b></div>
-            <div class="pname">Brace</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#14532d','#4d7c0f','#84cc16','#0f766e')">
-            <div class="swatch"><b style="background:#14532d"></b><b style="background:#4d7c0f"></b><b style="background:#84cc16"></b><b style="background:#0f766e"></b></div>
-            <div class="pname">Serra</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#312e40','#4b5563','#6b7280','#94a3b8')">
-            <div class="swatch"><b style="background:#312e40"></b><b style="background:#4b5563"></b><b style="background:#6b7280"></b><b style="background:#94a3b8"></b></div>
-            <div class="pname">Cenere</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#134e4a','#7c3aed','#f472b6','#22d3ee')">
-            <div class="swatch"><b style="background:#134e4a"></b><b style="background:#7c3aed"></b><b style="background:#f472b6"></b><b style="background:#22d3ee"></b></div>
-            <div class="pname">Aurora</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#2e1065','#6d28d9','#a78bfa','#ec4899')">
-            <div class="swatch"><b style="background:#2e1065"></b><b style="background:#6d28d9"></b><b style="background:#a78bfa"></b><b style="background:#ec4899"></b></div>
-            <div class="pname">Nebulosa</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#b45309','#f97316','#facc15','#65a30d')">
-            <div class="swatch"><b style="background:#b45309"></b><b style="background:#f97316"></b><b style="background:#facc15"></b><b style="background:#65a30d"></b></div>
-            <div class="pname">Agrume</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#0c4a6e','#0891b2','#22d3ee','#5eead4')">
-            <div class="swatch"><b style="background:#0c4a6e"></b><b style="background:#0891b2"></b><b style="background:#22d3ee"></b><b style="background:#5eead4"></b></div>
-            <div class="pname">Laguna</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#451a03','#92400e','#d97706','#fbbf24')">
-            <div class="swatch"><b style="background:#451a03"></b><b style="background:#92400e"></b><b style="background:#d97706"></b><b style="background:#fbbf24"></b></div>
-            <div class="pname">Vinile</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#c026d3','#22d3ee','#a3e635','#f43f5e')">
-            <div class="swatch"><b style="background:#c026d3"></b><b style="background:#22d3ee"></b><b style="background:#a3e635"></b><b style="background:#f43f5e"></b></div>
-            <div class="pname">Neon</div>
-          </div>
-          <div class="pre g clear" onclick="setPal(this,'#1e1b4b','#4338ca','#f472b6','#fb923c')">
-            <div class="swatch"><b style="background:#1e1b4b"></b><b style="background:#4338ca"></b><b style="background:#f472b6"></b><b style="background:#fb923c"></b></div>
-            <div class="pname">Crepuscolo</div>
-          </div>
-        </div>
-
-        <div class="sect">Questa build</div>
-        <div class="card g clear">
-          <div class="row"><span>Versione</span><span class="val">0.1.0 (9)</span></div>
-          <div class="row"><span>Commit</span><span class="val">a380b97</span></div>
-        </div>
-        <div class="spacer"></div>
-      </div>
-    </div>
-
-    <!-- ============ PLAYER ============ -->
-    <div class="page" id="p-player">
-      <div class="pwrap">
-        <div class="pgrab" onclick="closePlayer()"></div>
-        <div class="part" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
-        <div class="pmeta">
-          <div class="pt">Around the World</div>
-          <div class="pa">Daft Punk · Homework</div>
-        </div>
-        <div class="seek">
-          <div class="strack"><div class="sfill"></div><div class="sknob"></div></div>
-          <div class="stime"><span>2:56</span><span>-4:14</span></div>
-        </div>
-        <div class="trans">
-          <svg class="tsm" viewBox="0 0 24 24"><path d="M17 3l4 4-4 4V8h-2.2l-1.6 2.2-1.2-1.7L14 6h3V3zM3 6h4.5l6 8.4H17V11l4 4-4 4v-3h-4.5l-6-8.4H3V6zm0 10h4l1.4-2 1.2 1.7L7.8 18H3v-2z"/></svg>
-          <svg class="tmd" viewBox="0 0 24 24"><path d="M6 6h2v12H6zM20 6v12l-9-6z"/></svg>
-          <div class="tbig g"><svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg></div>
-          <svg class="tmd" viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg>
-          <svg class="tsm" viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
-        </div>
-      </div>
-    </div>
-
-    <!-- ============ MINI + TABBAR ============ -->
-    <div class="mini g" id="mini" onclick="openPlayer()">
-      <div class="mart" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
-      <div class="mmeta"><div class="mt">Around the World</div><div class="ms">Daft Punk</div></div>
-      <div class="mbtns">
-        <svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
-        <svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg>
-      </div>
-      <div class="mprog"><i></i></div>
-    </div>
-
-    <div class="tabbar g" id="tabbar">
-      <div class="tab on" onclick="go('lib',this)"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h3v16h-3zM15.6 4.4l3.9 15.5-2.9.7L12.7 5.1z"/></svg><span>Libreria</span></div>
-      <div class="tab" onclick="go('search',this)"><svg viewBox="0 0 24 24"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.41-1.41-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg><span>Cerca</span></div>
-      <div class="tab" onclick="go('dl',this)"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg><span>Download</span></div>
-      <div class="tab" onclick="go('set',this)"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm9 4 2 1.6-1.6 2.8-2.4-.8a7.6 7.6 0 01-1.7 1l-.4 2.5h-3.2l-.4-2.5a7.6 7.6 0 01-1.7-1l-2.4.8L5.9 13.6 7.9 12l-2-1.6 1.6-2.8 2.4.8c.5-.4 1.1-.7 1.7-1l.4-2.5h3.2l.4 2.5c.6.3 1.2.6 1.7 1l2.4-.8 1.6 2.8L21 12z"/></svg><span>Impost.</span></div>
-    </div>
-
-    <div class="dyn"></div>
-    <div class="sbar"><span>9:41</span><span class="r">▮▮▮ &nbsp;◍&nbsp; ▰</span></div>
+<div class="screen" id="screen" data-t="aura">
+  <div class="aura" id="aura">
+    <i class="b1" style="background:var(--c1)"></i><i class="b2" style="background:var(--c2)"></i>
+    <i class="b3" style="background:var(--c3)"></i><i class="b4" style="background:var(--c4)"></i>
   </div>
+  <div class="scrim" id="scrim"></div>
+
+  <!-- ===== LIBRERIA ===== -->
+  <div class="page on" id="p-lib">
+    <div class="pad">
+      <h2 class="big">Libreria</h2>
+      <div class="seg">
+        <div class="fill" onclick="lib('alb',this)">Album</div>
+        <div class="g clear" onclick="lib('pl',this)">Playlist</div>
+        <div class="g clear" onclick="lib('fav',this)">Preferiti</div>
+      </div>
+
+      <div id="lib-alb">
+        <div class="ahead">
+          <div class="cover" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
+          <div><div class="atitle">Homework</div><div class="ameta dim">Daft Punk · 1996</div></div>
+        </div>
+        <div class="hair"></div>
+        <div class="trk" onclick="openPlayer()">
+          <div class="tno dim2">7</div>
+          <div class="tinfo"><div class="tt">Around the World</div></div>
+          <div class="tdur dim2">7:10</div>
+          <div class="state"><div class="eq"><b></b><b></b><b></b></div></div>
+        </div>
+        <div class="hair"></div>
+        <div class="trk">
+          <div class="tno dim2">—</div>
+          <div class="tinfo"><div class="tt">Around the World (Radio Edit)</div></div>
+          <div class="tdur dim2">4:02</div>
+          <div class="state dim2"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div>
+        </div>
+
+        <div class="ahead">
+          <div class="cover" style="background:linear-gradient(150deg,#2b2f78,#8d9bd6 60%,#c8d2f0)"></div>
+          <div><div class="atitle">Discovery</div><div class="ameta dim">Daft Punk · 2001</div></div>
+        </div>
+        <div class="hair"></div>
+        <div class="trk">
+          <div class="tno dim2">9</div>
+          <div class="tinfo"><div class="tt">Something About Us</div></div>
+          <div class="tdur dim2">3:53</div>
+          <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
+        </div>
+
+        <div class="ahead">
+          <div class="cover" style="background:linear-gradient(150deg,#3a2436,#e73b86 60%,#fba402)"></div>
+          <div><div class="atitle">Californication</div><div class="ameta dim">Red Hot Chili Peppers · 1999</div></div>
+        </div>
+        <div class="hair"></div>
+        <div class="trk">
+          <div class="tno dim2">7</div>
+          <div class="tinfo"><div class="tt">Around The World</div></div>
+          <div class="tdur dim2">3:59</div>
+          <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div>
+        </div>
+      </div>
+
+      <div id="lib-pl" style="display:none">
+        <div style="margin-top:22px" onclick="go('pl')">
+          <div style="display:flex;gap:13px;align-items:center;cursor:pointer">
+            <div class="cover" style="display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;overflow:hidden;border-radius:14px">
+              <b style="background:linear-gradient(140deg,#1a1a1f,#c0392b)"></b><b style="background:linear-gradient(140deg,#2b2f78,#8d9bd6)"></b>
+              <b style="background:linear-gradient(140deg,#3a2436,#e73b86)"></b><b style="background:linear-gradient(140deg,#23303b,#00d4c8)"></b>
+            </div>
+            <div><div class="atitle">Guida notturna</div><div class="ameta dim">12 brani · 48 min</div></div>
+          </div>
+        </div>
+        <div style="margin-top:20px;display:flex;gap:13px;align-items:center">
+          <div class="cover" style="display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;overflow:hidden;border-radius:14px">
+            <b style="background:linear-gradient(140deg,#451a03,#d97706)"></b><b style="background:linear-gradient(140deg,#0c4a6e,#22d3ee)"></b>
+            <b style="background:linear-gradient(140deg,#2e1065,#a78bfa)"></b><b style="background:linear-gradient(140deg,#14532d,#84cc16)"></b>
+          </div>
+          <div><div class="atitle">Studio</div><div class="ameta dim">7 brani · 31 min</div></div>
+        </div>
+      </div>
+
+      <div id="lib-fav" style="display:none">
+        <div class="hair" style="margin-top:22px"></div>
+        <div class="trk">
+          <div class="state" style="color:var(--c2);margin-left:-6px"><svg class="ico" viewBox="0 0 24 24"><path d="M12 21 3 12.5A5.4 5.4 0 0 1 12 6a5.4 5.4 0 0 1 9 6.5z"/></svg></div>
+          <div class="tinfo"><div class="tt">Around the World</div><div class="ms dim2">Daft Punk</div></div>
+          <div class="tdur dim2">7:10</div>
+        </div>
+        <div class="hair"></div>
+        <div class="trk">
+          <div class="state" style="color:var(--c2);margin-left:-6px"><svg class="ico" viewBox="0 0 24 24"><path d="M12 21 3 12.5A5.4 5.4 0 0 1 12 6a5.4 5.4 0 0 1 9 6.5z"/></svg></div>
+          <div class="tinfo"><div class="tt">Something About Us</div><div class="ms dim2">Daft Punk</div></div>
+          <div class="tdur dim2">3:53</div>
+        </div>
+      </div>
+      <div class="spacer"></div>
+    </div>
+  </div>
+
+  <!-- ===== PLAYLIST ===== -->
+  <div class="page" id="p-pl">
+    <div class="pad">
+      <div style="display:flex;align-items:center;height:34px;margin-top:6px" onclick="go('lib')">
+        <svg style="width:20px;height:20px;fill:currentColor;cursor:pointer" viewBox="0 0 24 24"><path d="M15.4 5.4 14 4l-8 8 8 8 1.4-1.4L8.8 12z"/></svg>
+      </div>
+      <div class="mosaic">
+        <b style="background:linear-gradient(140deg,#1a1a1f,#c0392b)"></b><b style="background:linear-gradient(140deg,#2b2f78,#8d9bd6)"></b>
+        <b style="background:linear-gradient(140deg,#3a2436,#e73b86)"></b><b style="background:linear-gradient(140deg,#23303b,#00d4c8)"></b>
+      </div>
+      <div class="pl-name">Guida notturna</div>
+      <div class="pl-meta dim">12 brani · 48 min</div>
+
+      <div class="acts">
+        <div class="act fill" onclick="openPlayer()">
+          <svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg> Riproduci
+        </div>
+        <div class="act g" onclick="openPlayer()">
+          <svg viewBox="0 0 24 24"><path d="M17 3l4 4-4 4V8h-2.2l-1.6 2.2-1.2-1.7L14 6h3V3zM3 6h4.5l6 8.4H17V11l4 4-4 4v-3h-4.5l-6-8.4H3V6zm0 10h4l1.4-2 1.2 1.7L7.8 18H3v-2z"/></svg> Casuale
+        </div>
+      </div>
+
+      <div class="hair" style="margin-top:22px"></div>
+      <div class="trk"><div class="tno dim2">1</div><div class="tinfo"><div class="tt">Around the World</div><div class="ms dim2">Daft Punk</div></div><div class="tdur dim2">7:10</div>
+        <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div></div>
+      <div class="hair"></div>
+      <div class="trk"><div class="tno dim2">2</div><div class="tinfo"><div class="tt">Something About Us</div><div class="ms dim2">Daft Punk</div></div><div class="tdur dim2">3:53</div>
+        <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div></div>
+      <div class="hair"></div>
+      <div class="trk"><div class="tno dim2">3</div><div class="tinfo"><div class="tt">Around The World</div><div class="ms dim2">Red Hot Chili Peppers</div></div><div class="tdur dim2">3:59</div>
+        <div class="state dim2"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div></div>
+      <div class="hair"></div>
+      <div style="padding:14px 6px"><span class="link">Scarica 4 brani mancanti</span></div>
+      <div class="spacer"></div>
+    </div>
+  </div>
+
+  <!-- ===== CERCA ===== -->
+  <div class="page" id="p-search">
+    <div class="pad">
+      <h2 class="big">Cerca</h2>
+      <div class="sfield g clear">
+        <svg viewBox="0 0 24 24"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.41-1.41-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg>
+        daft punk around the world
+      </div>
+      <div class="hair" style="margin-top:18px"></div>
+      <div class="trk"><div class="rthumb" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
+        <div class="tinfo"><div class="tt">Around the World</div><div class="ms dim2">Daft Punk · Homework</div></div>
+        <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div></div>
+      <div class="hair"></div>
+      <div class="trk"><div class="rthumb" style="background:linear-gradient(150deg,#2b2f78,#6f7fd0)"></div>
+        <div class="tinfo"><div class="tt">Around the World (Radio Edit)</div><div class="ms dim2">Daft Punk · Around the World</div></div>
+        <div class="state dim2"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div></div>
+      <div class="hair"></div>
+      <div class="trk"><div class="rthumb" style="background:linear-gradient(150deg,#3a2436,#e73b86)"></div>
+        <div class="tinfo"><div class="tt">Around The World</div><div class="ms dim2">Red Hot Chili Peppers · Californication</div></div>
+        <div class="state" style="color:var(--c4)"><svg class="ico" viewBox="0 0 24 24"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg></div></div>
+      <div class="hair"></div>
+      <div class="trk"><div class="rthumb" style="background:linear-gradient(150deg,#fba402,#e73b86)"></div>
+        <div class="tinfo"><div class="tt">Around the World (La La La)</div><div class="ms dim2">A Touch of Class · Planet Pop</div></div>
+        <div class="state dim2"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg></div></div>
+      <div class="spacer"></div>
+    </div>
+  </div>
+
+  <!-- ===== DOWNLOAD ===== -->
+  <div class="page" id="p-dl">
+    <div class="pad">
+      <h2 class="big">Download</h2>
+      <div class="sect dim2">In corso</div>
+      <div class="hair"></div>
+      <div class="job">
+        <div class="jthumb" style="background:linear-gradient(150deg,#2b2f78,#6f7fd0)">
+          <div class="ov"><svg class="ring" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9.5" stroke="rgba(255,255,255,.25)"/>
+            <circle cx="12" cy="12" r="9.5" stroke="#fff" stroke-dasharray="59.7" stroke-dashoffset="19" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="tinfo"><div class="tt">Around the World (Radio Edit)</div><div class="ms dim2">Daft Punk</div></div>
+        <div class="tdur dim2">68%</div>
+      </div>
+      <div class="hair"></div>
+      <div class="job">
+        <div class="jthumb" style="background:linear-gradient(150deg,#23303b,#00d4c8)"><div class="ov dim"><svg class="ico" viewBox="0 0 24 24" style="fill:rgba(255,255,255,.8)"><path d="M12 6v6l4 2"/><circle cx="12" cy="12" r="9" fill="none" stroke="rgba(255,255,255,.8)" stroke-width="2"/></svg></div></div>
+        <div class="tinfo"><div class="tt">Me at the zoo</div><div class="ms dim2">jawed</div></div>
+        <div class="state dim2"><svg class="ico" viewBox="0 0 24 24"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg></div>
+      </div>
+
+      <div class="sect dim2">Non riuscito</div>
+      <div class="hair"></div>
+      <div class="job">
+        <div class="jthumb" style="background:linear-gradient(150deg,#3a2436,#7d4a6b)"></div>
+        <div class="tinfo"><div class="tt">Harder, Better, Faster</div><div class="ms dim2">Impossibile raggiungere il server</div></div>
+        <div class="tdur"><span class="link">Riprova</span></div>
+      </div>
+      <div class="hair"></div>
+      <div style="padding:13px 6px"><span class="link dim2" style="color:inherit">Mostra dettagli tecnici</span></div>
+      <div class="spacer"></div>
+    </div>
+  </div>
+
+  <!-- ===== IMPOSTAZIONI ===== -->
+  <div class="page" id="p-set">
+    <div class="pad">
+      <h2 class="big">Impostazioni</h2>
+      <div class="sect dim2">Server</div>
+      <div class="card g clear" style="margin-top:0">
+        <div class="row"><span>Indirizzo</span><span class="dim">your-server:8000</span></div>
+        <div class="hair"></div>
+        <div class="row"><span>Stato</span><span style="color:var(--c4)">Connesso</span></div>
+      </div>
+
+      <div class="sect dim2">Aspetto</div>
+      <div class="seg" style="margin-top:0">
+        <div class="fill" onclick="mode('adapt',this)">Adattivo</div>
+        <div class="g clear" onclick="mode('preset',this)">Preset</div>
+        <div class="g clear" onclick="mode('mdark',this)">Nero</div>
+        <div class="g clear" onclick="mode('mlight',this)">Bianco</div>
+      </div>
+      <div class="presets" id="presets" style="display:none">
+        <div class="pre g clear on" onclick="pal(this,'#1e26b6','#e73b86','#fba402','#00d4c8')"><div class="swatch"><b style="background:#1e26b6"></b><b style="background:#e73b86"></b><b style="background:#fba402"></b><b style="background:#00d4c8"></b></div><div class="pname">Prisma</div></div>
+        <div class="pre g clear" onclick="pal(this,'#06283d','#1363df','#47b5ff','#0a9396')"><div class="swatch"><b style="background:#06283d"></b><b style="background:#1363df"></b><b style="background:#47b5ff"></b><b style="background:#0a9396"></b></div><div class="pname">Abisso</div></div>
+        <div class="pre g clear" onclick="pal(this,'#7c2d12','#dc2626','#f59e0b','#fde047')"><div class="swatch"><b style="background:#7c2d12"></b><b style="background:#dc2626"></b><b style="background:#f59e0b"></b><b style="background:#fde047"></b></div><div class="pname">Brace</div></div>
+        <div class="pre g clear" onclick="pal(this,'#14532d','#4d7c0f','#84cc16','#0f766e')"><div class="swatch"><b style="background:#14532d"></b><b style="background:#4d7c0f"></b><b style="background:#84cc16"></b><b style="background:#0f766e"></b></div><div class="pname">Serra</div></div>
+        <div class="pre g clear" onclick="pal(this,'#312e40','#4b5563','#6b7280','#94a3b8')"><div class="swatch"><b style="background:#312e40"></b><b style="background:#4b5563"></b><b style="background:#6b7280"></b><b style="background:#94a3b8"></b></div><div class="pname">Cenere</div></div>
+        <div class="pre g clear" onclick="pal(this,'#134e4a','#7c3aed','#f472b6','#22d3ee')"><div class="swatch"><b style="background:#134e4a"></b><b style="background:#7c3aed"></b><b style="background:#f472b6"></b><b style="background:#22d3ee"></b></div><div class="pname">Aurora</div></div>
+        <div class="pre g clear" onclick="pal(this,'#2e1065','#6d28d9','#a78bfa','#ec4899')"><div class="swatch"><b style="background:#2e1065"></b><b style="background:#6d28d9"></b><b style="background:#a78bfa"></b><b style="background:#ec4899"></b></div><div class="pname">Nebulosa</div></div>
+        <div class="pre g clear" onclick="pal(this,'#b45309','#f97316','#facc15','#65a30d')"><div class="swatch"><b style="background:#b45309"></b><b style="background:#f97316"></b><b style="background:#facc15"></b><b style="background:#65a30d"></b></div><div class="pname">Agrume</div></div>
+        <div class="pre g clear" onclick="pal(this,'#0c4a6e','#0891b2','#22d3ee','#5eead4')"><div class="swatch"><b style="background:#0c4a6e"></b><b style="background:#0891b2"></b><b style="background:#22d3ee"></b><b style="background:#5eead4"></b></div><div class="pname">Laguna</div></div>
+        <div class="pre g clear" onclick="pal(this,'#451a03','#92400e','#d97706','#fbbf24')"><div class="swatch"><b style="background:#451a03"></b><b style="background:#92400e"></b><b style="background:#d97706"></b><b style="background:#fbbf24"></b></div><div class="pname">Vinile</div></div>
+        <div class="pre g clear" onclick="pal(this,'#c026d3','#22d3ee','#a3e635','#f43f5e')"><div class="swatch"><b style="background:#c026d3"></b><b style="background:#22d3ee"></b><b style="background:#a3e635"></b><b style="background:#f43f5e"></b></div><div class="pname">Neon</div></div>
+        <div class="pre g clear" onclick="pal(this,'#1e1b4b','#4338ca','#f472b6','#fb923c')"><div class="swatch"><b style="background:#1e1b4b"></b><b style="background:#4338ca"></b><b style="background:#f472b6"></b><b style="background:#fb923c"></b></div><div class="pname">Crepuscolo</div></div>
+      </div>
+
+      <div class="sect dim2">Info</div>
+      <div class="card g clear" style="margin-top:0">
+        <div class="row"><span>Versione</span><span class="dim">0.1.0</span></div>
+      </div>
+      <div class="spacer"></div>
+    </div>
+  </div>
+
+  <!-- ===== PLAYER ===== -->
+  <div class="page" id="p-player">
+    <div class="pw">
+      <div class="ptop">
+        <svg onclick="closePlayer()" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg>
+        <div class="pfrom"><span class="dim2">In riproduzione da</span><b>Homework</b></div>
+        <svg viewBox="0 0 24 24"><path d="M12 8a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4zm0 6a2 2 0 110-4 2 2 0 010 4z"/></svg>
+      </div>
+      <div class="part" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
+      <div class="prow">
+        <div style="flex:1;min-width:0">
+          <div class="pt">Around the World</div>
+          <div class="pa dim">Daft Punk</div>
+        </div>
+        <div class="heart"><svg viewBox="0 0 24 24"><path d="M12 21 3 12.5A5.4 5.4 0 0 1 12 6a5.4 5.4 0 0 1 9 6.5z"/></svg></div>
+      </div>
+      <div class="seek">
+        <div class="strack"><div class="sfill"></div><div class="sknob"></div></div>
+        <div class="stime dim2"><span>2:56</span><span>-4:14</span></div>
+      </div>
+      <div class="trans">
+        <div class="tb"><svg class="tsm" viewBox="0 0 24 24"><path d="M17 3l4 4-4 4V8h-2.2l-1.6 2.2-1.2-1.7L14 6h3V3zM3 6h4.5l6 8.4H17V11l4 4-4 4v-3h-4.5l-6-8.4H3V6zm0 10h4l1.4-2 1.2 1.7L7.8 18H3v-2z"/></svg></div>
+        <div class="tb"><svg class="tmd" viewBox="0 0 24 24"><path d="M6 6h2v12H6zM20 6v12l-9-6z"/></svg></div>
+        <div class="tbig g"><svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg></div>
+        <div class="tb"><svg class="tmd" viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg></div>
+        <div class="tb"><svg class="tsm" viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg></div>
+      </div>
+      <div class="pbot">
+        <svg viewBox="0 0 24 24"><path d="M4 6h10v2H4zm0 5h10v2H4zm0 5h7v2H4zm12-8 5 4-5 4z"/></svg>
+        <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 019 9h-2a7 7 0 00-7-7zm0 4a5 5 0 015 5h-2a3 3 0 00-3-3zm0 4a1 1 0 110 2 1 1 0 010-2zM3 20l9-11 9 11z" opacity=".9"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MINI + TABBAR ===== -->
+  <div class="mini g" id="mini">
+    <div class="mart" style="background:linear-gradient(150deg,#1a1a1f,#c0392b 55%,#e8b04b)"></div>
+    <div class="mmeta" onclick="openPlayer()"><div class="mt">Around the World</div><div class="ms dim">Daft Punk</div></div>
+    <div class="mb"><svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg></div>
+    <div class="mb"><svg viewBox="0 0 24 24"><path d="M16 6h2v12h-2zM4 6l9 6-9 6z"/></svg></div>
+    <div class="mprog"><i></i></div>
+  </div>
+
+  <div class="tabbar g" id="tabbar">
+    <div class="tab on" onclick="go('lib',this)"><svg viewBox="0 0 24 24"><path d="M4 4h4v16H4zM10 4h3v16h-3zM15.6 4.4l3.9 15.5-2.9.7L12.7 5.1z"/></svg><span>Libreria</span></div>
+    <div class="tab" onclick="go('search',this)"><svg viewBox="0 0 24 24"><path d="M10 4a6 6 0 104.47 10.03l4.25 4.25 1.41-1.41-4.25-4.25A6 6 0 0010 4zm0 2a4 4 0 110 8 4 4 0 010-8z"/></svg><span>Cerca</span></div>
+    <div class="tab" onclick="go('dl',this)"><svg viewBox="0 0 24 24"><path d="M12 3v10.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4L10 13.2V3h2zM5 19h14v2H5z"/></svg><span>Download</span></div>
+    <div class="tab" onclick="go('set',this)"><svg viewBox="0 0 24 24"><path d="M12 8a4 4 0 100 8 4 4 0 000-8zm9 4 2 1.6-1.6 2.8-2.4-.8a7.6 7.6 0 01-1.7 1l-.4 2.5h-3.2l-.4-2.5a7.6 7.6 0 01-1.7-1l-2.4.8L5.9 13.6 7.9 12l-2-1.6 1.6-2.8 2.4.8c.5-.4 1.1-.7 1.7-1l.4-2.5h3.2l.4 2.5c.6.3 1.2.6 1.7 1l2.4-.8 1.6 2.8L21 12z"/></svg><span>Impost.</span></div>
+  </div>
+
+  <div class="dyn"></div>
+  <div class="sbar"><span>9:41</span><span style="font-size:11px">▮▮▮ ◍ ▰</span></div>
+</div>
 </div>
 
 <script>
-const pages=['lib','search','dl','set','player'];
-function go(id,el){
-  pages.forEach(p=>document.getElementById('p-'+p).classList.remove('on'));
-  document.getElementById('p-'+id).classList.add('on');
-  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));
-  if(el) el.classList.add('on');
-  document.getElementById('mini').classList.remove('hidden');
-  document.getElementById('tabbar').classList.remove('hidden');
-}
-function openPlayer(){
-  pages.forEach(p=>document.getElementById('p-'+p).classList.remove('on'));
-  document.getElementById('p-player').classList.add('on');
-  document.getElementById('mini').classList.add('hidden');
-  document.getElementById('tabbar').classList.add('hidden');
-}
-function closePlayer(){
-  document.getElementById('p-player').classList.remove('on');
-  document.getElementById('p-lib').classList.add('on');
-  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',i===0));
-  document.getElementById('mini').classList.remove('hidden');
-  document.getElementById('tabbar').classList.remove('hidden');
-}
-function setPal(el,a,b,c,d){
-  document.querySelectorAll('.pre').forEach(p=>p.classList.remove('on'));
-  el.classList.add('on');
-  const r=document.documentElement.style;
-  r.setProperty('--c1',a);r.setProperty('--c2',b);r.setProperty('--c3',c);r.setProperty('--c4',d);
-  document.getElementById('aura').style.opacity=1;
-}
-function mode(m,el){
-  document.querySelectorAll('.seg div').forEach(d=>{d.classList.remove('on');d.classList.add('g','clear')});
-  el.classList.add('on');el.classList.remove('g','clear');
-  const aura=document.getElementById('aura'), scrim=document.getElementById('scrim'), scr=document.getElementById('screen');
-  document.getElementById('presets').style.display = (m==='preset')?'grid':'none';
-  if(m==='mdark'||m==='mlight'){
-    scr.dataset.t = (m==='mdark') ? 'mono-dark' : 'mono-light';
-    aura.style.opacity=0; scrim.style.background='transparent';
-  }else{
-    scr.dataset.t='aura';
-    aura.style.opacity=1;
-    scrim.style.background='linear-gradient(180deg,rgba(11,7,16,.50),rgba(11,7,16,.80))';
-  }
-}
+const P=['lib','pl','search','dl','set','player'];
+function show(id){P.forEach(p=>document.getElementById('p-'+p).classList.remove('on'));document.getElementById('p-'+id).classList.add('on')}
+function go(id,el){show(id);
+  if(el){document.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));el.classList.add('on')}
+  document.getElementById('mini').classList.remove('hide');document.getElementById('tabbar').classList.remove('hide')}
+function openPlayer(){show('player');document.getElementById('mini').classList.add('hide');document.getElementById('tabbar').classList.add('hide')}
+function closePlayer(){go('lib');document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('on',i===0))}
+function lib(w,el){document.querySelectorAll('#p-lib .seg div').forEach(d=>{d.classList.remove('fill');d.classList.add('g','clear')});
+  el.classList.add('fill');el.classList.remove('g','clear');
+  ['alb','pl','fav'].forEach(k=>document.getElementById('lib-'+k).style.display=(k===w)?'block':'none')}
+function pal(el,a,b,c,d){document.querySelectorAll('.pre').forEach(p=>p.classList.remove('on'));el.classList.add('on');
+  const r=document.documentElement.style;r.setProperty('--c1',a);r.setProperty('--c2',b);r.setProperty('--c3',c);r.setProperty('--c4',d)}
+function mode(m,el){document.querySelectorAll('#p-set .seg div').forEach(d=>{d.classList.remove('fill');d.classList.add('g','clear')});
+  el.classList.add('fill');el.classList.remove('g','clear');
+  document.getElementById('presets').style.display=(m==='preset')?'grid':'none';
+  const s=document.getElementById('screen'),a=document.getElementById('aura'),sc=document.getElementById('scrim');
+  if(m==='mdark'||m==='mlight'){s.dataset.t=(m==='mdark')?'mono-dark':'mono-light';a.style.opacity=0;sc.style.background='transparent'}
+  else{s.dataset.t='aura';a.style.opacity=1;sc.style.background='linear-gradient(180deg,rgba(11,7,16,.34),rgba(11,7,16,.54))'}}
 </script>
 </body>
 </html>

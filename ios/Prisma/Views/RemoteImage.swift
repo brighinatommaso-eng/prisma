@@ -28,19 +28,20 @@ struct RemoteImage: View {
     var body: some View {
         ZStack {
             Rectangle()
-                .fill(.quaternary)
+                .fill(Color.gray.opacity(0.35))
             switch phase {
             case .loading:
                 ProgressView()
             case .noReference:
-                Text("no art")
-                    .font(.caption2)
+                Image(systemName: "music.note")
+                    .foregroundStyle(Color.white.opacity(0.7))
             case .loaded(let image):
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
             case .failed:
                 Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(Color.white.opacity(0.8))
             }
         }
         .frame(width: side, height: side)

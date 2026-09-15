@@ -13,52 +13,79 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .albums: return "Albums"
-        case .playlists: return "Playlists"
-        case .favourites: return "Favourites"
+        case .albums: return "Album"
+        case .playlists: return "Playlist"
+        case .favourites: return "Preferiti"
         }
     }
 }
 
-/// A heart that toggles the track's favourite flag.
+/// A heart that toggles the track's favourite flag, with the whole `hitSize` area
+/// tappable (a plain button otherwise responds only on the drawn glyph).
 struct FavouriteButton: View {
     let track: StoredTrack
-    /// Icon only, with this whole area tappable (a plain button otherwise responds
-    /// only on the drawn glyph). nil shows the heart with a text label.
-    var iconHitSize: CGSize?
+    var hitSize = CGSize(width: 44, height: 44)
+    var glyphSize: CGFloat = 19
 
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
         Button {
             store.toggleFavourite(track)
         } label: {
-            if let iconHitSize {
-                Image(systemName: track.isFavourite ? "heart.fill" : "heart")
-                    .frame(width: iconHitSize.width, height: iconHitSize.height)
-                    .contentShape(Rectangle())
-            } else {
-                Label(track.isFavourite ? "Favourite" : "Add to favourites",
-                      systemImage: track.isFavourite ? "heart.fill" : "heart")
-            }
+            Image(systemName: track.isFavourite ? "heart.fill" : "heart")
+                .font(.system(size: glyphSize, weight: .medium))
+                .foregroundStyle(track.isFavourite ? ink.favourite : ink.secondary)
+                .frame(width: hitSize.width, height: hitSize.height)
+                .contentShape(Rectangle())
         }
-        .accessibilityLabel(track.isFavourite ? "Remove from favourites" : "Add to favourites")
+        .buttonStyle(.plain)
+        .accessibilityLabel(track.isFavourite ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti")
     }
 }
 
 /// Errors and notices from playlist actions, with a way to dismiss them.
 struct PlaylistStoreMessages: View {
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
         if let error = store.lastError {
-            ErrorReport(error: error)
-            Button("Dismiss error") { store.clearError() }
+            VStack(alignment: .leading, spacing: 0) {
+                ProblemBlock(error: error)
+                DismissLink { store.clearError() }
+            }
+            .prismaRow()
         }
         if let notice = store.notice {
-            Text(notice)
-            Button("Dismiss") { store.clearNotice() }
+            VStack(alignment: .leading, spacing: 0) {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.top, 8)
+                DismissLink { store.clearNotice() }
+            }
+            .prismaRow()
         }
+    }
+}
+
+/// A small "Chiudi" link, 44 pt tall.
+struct DismissLink: View {
+    let action: () -> Void
+
+    @Environment(\.prismaInk) private var ink
+
+    var body: some View {
+        Button(action: action) {
+            Text("Chiudi")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(ink.accentText)
+                .frame(minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
     }
 }
 
@@ -66,6 +93,7 @@ struct PlaylistStoreMessages: View {
 
 struct PlaylistsContent: View {
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
 
     @State private var creating = false
@@ -74,61 +102,70 @@ struct PlaylistsContent: View {
     @State private var renameText = ""
 
     var body: some View {
-        Section {
-            Button("New playlist…") {
-                newName = ""
-                creating = true
-            }
-            PlaylistStoreMessages()
+        Button {
+            newName = ""
+            creating = true
+        } label: {
+            Label("Nuova playlist", systemImage: "plus")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(ink.accentText)
+                .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                .contentShape(Rectangle())
         }
-        .alert("New playlist", isPresented: $creating) {
-            TextField("Name", text: $newName)
-            Button("Create") { store.createPlaylist(named: newName) }
-            Button("Cancel", role: .cancel) {}
+        .buttonStyle(.plain)
+        .padding(.top, 8)
+        .prismaRow()
+        .listRowSeparator(.hidden, edges: .top)
+        .alert("Nuova playlist", isPresented: $creating) {
+            TextField("Nome", text: $newName)
+            Button("Crea") { store.createPlaylist(named: newName) }
+            Button("Annulla", role: .cancel) {}
         }
-
-        Section {
-            if playlists.isEmpty {
-                Text("No playlists yet.")
-            }
-            ForEach(playlists) { playlist in
-                NavigationLink {
-                    PlaylistDetailView(playlist: playlist)
-                } label: {
-                    PlaylistSummaryRow(playlist: playlist)
-                }
-                .swipeActions(edge: .trailing) {
-                    Button("Delete", role: .destructive) {
-                        store.delete([playlist])
-                    }
-                    Button("Rename") {
-                        renameText = playlist.name
-                        renaming = playlist
-                    }
-                }
-            }
-            .onDelete { offsets in
-                store.delete(offsets.map { playlists[$0] })
-            }
-            .onMove { source, destination in
-                store.movePlaylists(playlists, from: source, to: destination)
-            }
-        } header: {
-            Text("Playlists").textCase(nil)
-        } footer: {
-            Text("Swipe a playlist to rename or delete it. Tap Edit to reorder.")
-        }
-        .alert("Rename playlist", isPresented: Binding(
+        .alert("Rinomina playlist", isPresented: Binding(
             get: { renaming != nil },
             set: { if !$0 { renaming = nil } }
         )) {
-            TextField("Name", text: $renameText)
-            Button("Rename") {
+            TextField("Nome", text: $renameText)
+            Button("Rinomina") {
                 if let renaming {
                     store.rename(renaming, to: renameText)
                 }
             }
-            Button("Cancel", role: .cancel) {}
+            Button("Annulla", role: .cancel) {}
+        }
+
+        PlaylistStoreMessages()
+
+        if playlists.isEmpty {
+            Text("Nessuna playlist. Tocca Nuova playlist per crearne una.")
+                .font(.subheadline)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 12)
+                .prismaRow()
+        }
+
+        ForEach(playlists) { playlist in
+            NavigationLink {
+                PlaylistDetailView(playlist: playlist)
+            } label: {
+                PlaylistSummaryRow(playlist: playlist)
+            }
+            .swipeActions(edge: .trailing) {
+                Button("Elimina", role: .destructive) {
+                    store.delete([playlist])
+                }
+                Button("Rinomina") {
+                    renameText = playlist.name
+                    renaming = playlist
+                }
+            }
+            .prismaRow()
+        }
+        .onDelete { offsets in
+            store.delete(offsets.map { playlists[$0] })
+        }
+        .onMove { source, destination in
+            store.movePlaylists(playlists, from: source, to: destination)
         }
     }
 }
@@ -136,15 +173,25 @@ struct PlaylistsContent: View {
 private struct PlaylistSummaryRow: View {
     let playlist: Playlist
 
+    @Environment(\.prismaInk) private var ink
+
     var body: some View {
-        let entries = PlaylistStore.orderedEntries(of: playlist)
-        let missing = entries.filter { $0.track?.downloadState != .downloaded }.count
-        VStack(alignment: .leading, spacing: 2) {
-            Text(playlist.name)
-            Text("\(entries.count) track\(entries.count == 1 ? "" : "s")"
-                 + (missing > 0 ? ", \(missing) not downloaded" : ""))
-                .font(.caption)
+        let tracks = PlaylistStore.orderedEntries(of: playlist).compactMap(\.track)
+        HStack(spacing: 13) {
+            PlaylistMosaic(playlist: playlist, side: 62, cornerRadius: 14)
+                .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(playlist.name)
+                    .font(.headline)
+                    .foregroundStyle(ink.primary)
+                    .lineLimit(2)
+                Text(Formatting.trackSummary(tracks))
+                    .font(.caption)
+                    .foregroundStyle(ink.secondary)
+            }
+            Spacer(minLength: 0)
         }
+        .padding(.vertical, 10)
     }
 }
 
@@ -154,112 +201,191 @@ struct PlaylistDetailView: View {
     let playlist: Playlist
 
     @Environment(PlaylistStore.self) private var store
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlayerPresenter.self) private var presenter
+    @Environment(\.prismaInk) private var ink
 
     @State private var renaming = false
     @State private var renameText = ""
 
     var body: some View {
         let entries = PlaylistStore.orderedEntries(of: playlist)
-        let missingTracks = Set(entries.compactMap { entry -> String? in
+        let missingCount = Set(entries.compactMap { entry -> String? in
             guard let track = entry.track, track.downloadState != .downloaded else { return nil }
             return track.serverID
-        })
-        let firstPlayable = entries.firstIndex { $0.track?.downloadState == .downloaded }
+        }).count
+        let playable = entries.indices.filter { entries[$0].track?.downloadState == .downloaded }
 
         List {
-            Section {
-                Text("\(entries.count) track\(entries.count == 1 ? "" : "s")"
-                     + (missingTracks.isEmpty ? ", all downloaded" : ", \(missingTracks.count) not downloaded"))
-                if let firstPlayable {
-                    Button("Play") { store.play(playlist, fromEntryAt: firstPlayable) }
-                }
-                if !missingTracks.isEmpty {
-                    Button("Download \(missingTracks.count) missing track\(missingTracks.count == 1 ? "" : "s")") {
-                        store.downloadMissing(in: playlist)
-                    }
-                }
-                Button("Rename…") {
-                    renameText = playlist.name
-                    renaming = true
-                }
-                PlaylistStoreMessages()
+            header(entries: entries, playable: playable)
+                .prismaRow()
+                .listRowSeparator(.hidden, edges: .top)
+
+            PlaylistStoreMessages()
+
+            if entries.isEmpty {
+                Text("Questa playlist è vuota. Aggiungi brani da Libreria o Cerca tenendo premuto su un brano.")
+                    .font(.subheadline)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.vertical, 12)
+                    .prismaRow()
             }
 
-            Section {
-                if entries.isEmpty {
-                    Text("This playlist is empty. Add tracks from Library or Search.")
+            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                Group {
+                    if let track = entry.track {
+                        TrackRow(track: track, subtitle: track.album?.artist, onPlay: {
+                            presenter.sourceName = playlist.name
+                            store.play(playlist, fromEntryAt: index)
+                        }) {
+                            Text("\(index + 1)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(ink.secondary)
+                                .frame(width: 18, alignment: .leading)
+                        }
+                    } else {
+                        MissingEntryRow(playlist: playlist, entry: entry)
+                    }
                 }
-                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                    PlaylistEntryRow(playlist: playlist, entry: entry, index: index)
+                .prismaRow()
+            }
+            .onDelete { offsets in
+                store.remove(offsets.map { entries[$0] }, from: playlist)
+            }
+            .onMove { source, destination in
+                store.moveEntries(in: playlist, ordered: entries, from: source, to: destination)
+            }
+
+            if missingCount > 0 {
+                Button {
+                    store.downloadMissing(in: playlist)
+                } label: {
+                    Text(missingCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(missingCount) brani mancanti")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(ink.accentText)
+                        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
-                .onDelete { offsets in
-                    store.remove(offsets.map { entries[$0] }, from: playlist)
-                }
-                .onMove { source, destination in
-                    store.moveEntries(in: playlist, ordered: entries, from: source, to: destination)
-                }
-            } header: {
-                Text("Tracks").textCase(nil)
-            } footer: {
-                Text("Swipe a track to remove it. Tap Edit to reorder.")
+                .buttonStyle(.plain)
+                .prismaRow()
             }
         }
+        .prismaList()
         .navigationTitle(playlist.name)
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            EditButton()
+            ToolbarItem(placement: .topBarTrailing) {
+                EditButton()
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        renameText = playlist.name
+                        renaming = true
+                    } label: {
+                        Label("Rinomina…", systemImage: "pencil")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                }
+                .accessibilityLabel("Altre azioni")
+            }
         }
-        .alert("Rename playlist", isPresented: $renaming) {
-            TextField("Name", text: $renameText)
-            Button("Rename") { store.rename(playlist, to: renameText) }
-            Button("Cancel", role: .cancel) {}
+        .alert("Rinomina playlist", isPresented: $renaming) {
+            TextField("Nome", text: $renameText)
+            Button("Rinomina") { store.rename(playlist, to: renameText) }
+            Button("Annulla", role: .cancel) {}
         }
         // Pushed inside a tab, so it needs the mini player inset itself.
         .miniPlayerInset()
+        .themedScreenBackground()
+    }
+
+    /// Mosaic, name, "N brani · N min", then Riproduci and Casuale side by side.
+    private func header(entries: [PlaylistEntry], playable: [Int]) -> some View {
+        VStack(spacing: 0) {
+            PlaylistMosaic(playlist: playlist, side: 160, cornerRadius: 20)
+                .shadow(color: .black.opacity(0.6), radius: 23, y: 18)
+                .padding(.top, 20)
+            Text(playlist.name)
+                .font(.title.weight(.heavy))
+                .foregroundStyle(ink.primary)
+                .multilineTextAlignment(.center)
+                .padding(.top, 18)
+            Text(Formatting.trackSummary(entries.compactMap(\.track)))
+                .font(.footnote)
+                .foregroundStyle(ink.secondary)
+                .padding(.top, 5)
+
+            HStack(spacing: 10) {
+                Button {
+                    guard let first = playable.first else { return }
+                    // Riproduci plays in playlist order, even if shuffle was left on.
+                    playback.setShuffle(false)
+                    presenter.sourceName = playlist.name
+                    store.play(playlist, fromEntryAt: first)
+                } label: {
+                    Label("Riproduci", systemImage: "play.fill")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(ink.fillForeground)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(ink.fillBackground, in: RoundedRectangle(cornerRadius: 16))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    // Starts shuffled: shuffle on first, so the new queue is built
+                    // shuffled from a random downloaded entry.
+                    guard let start = playable.randomElement() else { return }
+                    playback.setShuffle(true)
+                    presenter.sourceName = playlist.name
+                    store.play(playlist, fromEntryAt: start)
+                } label: {
+                    Label("Casuale", systemImage: "shuffle")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(ink.primary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .prismaGlass(RoundedRectangle(cornerRadius: 16))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .disabled(playable.isEmpty)
+            .opacity(playable.isEmpty ? 0.45 : 1)
+            .padding(.top, 20)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.bottom, 22)
     }
 }
 
-private struct PlaylistEntryRow: View {
+/// An entry whose track has left the library.
+private struct MissingEntryRow: View {
     let playlist: Playlist
     let entry: PlaylistEntry
-    let index: Int
 
     @Environment(PlaylistStore.self) private var store
-    @Environment(PlaybackEngine.self) private var playback
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text("\(index + 1)")
-                .font(.body.monospacedDigit())
-                .frame(minWidth: 24, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
-                if let track = entry.track {
-                    if track.downloadState == .downloaded {
-                        Button {
-                            store.play(playlist, fromEntryAt: index)
-                        } label: {
-                            Label(track.title ?? "(no title)", systemImage: "play.fill")
-                        }
-                        .buttonStyle(.borderless)
-                    } else {
-                        Text(track.title ?? "(no title)")
-                        Text("Not downloaded. Download to play.")
-                            .font(.caption)
-                    }
-                    Text([track.album?.artist, track.album?.title].compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption)
-                    Text(Formatting.duration(track.durationS))
-                        .font(.caption)
-                    FavouriteButton(track: track)
-                        .buttonStyle(.borderless)
-                    TrackDownloadStatus(track: track)
-                } else {
-                    Text("This track is no longer in the library.")
-                    Button("Remove from playlist") {
-                        store.remove([entry], from: playlist)
-                    }
-                    .buttonStyle(.borderless)
-                }
+        HStack {
+            Text("Brano non più in libreria")
+                .font(.subheadline)
+                .foregroundStyle(ink.secondary)
+            Spacer(minLength: 0)
+            Button {
+                store.remove([entry], from: playlist)
+            } label: {
+                Text("Rimuovi")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(ink.accentText)
+                    .frame(minWidth: 44, minHeight: 50)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.borderless)
         }
     }
 }
@@ -280,28 +406,29 @@ struct AddToPlaylistSheet: View {
         NavigationStack {
             List {
                 Section {
-                    Text(track.title ?? track.serverID)
+                    Text(track.title ?? "Senza titolo")
                     if let album = track.album {
                         Text("\(album.artist) · \(album.title)")
                             .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
                 Section {
-                    TextField("Playlist name", text: $newName)
-                    Button("Create and add") {
+                    TextField("Nome della playlist", text: $newName)
+                    Button("Crea e aggiungi") {
                         if let playlist = store.createPlaylist(named: newName) {
                             store.add(track, to: playlist)
                             dismiss()
                         }
                     }
                 } header: {
-                    Text("New playlist").textCase(nil)
+                    Text("Nuova playlist").textCase(nil)
                 }
 
                 Section {
                     if playlists.isEmpty {
-                        Text("No playlists yet.")
+                        Text("Nessuna playlist.")
                     }
                     ForEach(playlists) { playlist in
                         Button {
@@ -312,27 +439,29 @@ struct AddToPlaylistSheet: View {
                             let contains = entries.contains { $0.track === track }
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(playlist.name)
-                                Text("\(entries.count) track\(entries.count == 1 ? "" : "s")"
-                                     + (contains ? ". Already contains this track; it will be added again." : ""))
+                                Text(Formatting.trackCount(entries.count)
+                                     + (contains ? " · contiene già questo brano, verrà aggiunto di nuovo" : ""))
                                     .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
                 } header: {
-                    Text("Add to").textCase(nil)
+                    Text("Aggiungi a").textCase(nil)
                 }
 
-                if store.lastError != nil {
+                if let error = store.lastError {
                     Section {
-                        PlaylistStoreMessages()
+                        ProblemBlock(error: error)
+                        Button("Chiudi") { store.clearError() }
                     }
                 }
             }
-            .navigationTitle("Add to playlist")
+            .navigationTitle("Aggiungi a playlist")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Annulla") { dismiss() }
                 }
             }
         }
@@ -342,56 +471,37 @@ struct AddToPlaylistSheet: View {
 // MARK: - Favourites filter
 
 struct FavouritesContent: View {
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlayerPresenter.self) private var presenter
+    @Environment(\.prismaInk) private var ink
     @Query private var tracks: [StoredTrack]
 
     var body: some View {
         let favourites = tracks
             .filter { $0.favouritedAt != nil }
             .sorted { ($0.favouritedAt ?? .distantPast) > ($1.favouritedAt ?? .distantPast) }
-        Section {
-            if favourites.isEmpty {
-                Text("No favourites yet. Tap the heart on any track.")
-            }
-            ForEach(favourites) { track in
-                FavouriteTrackRow(track: track)
-            }
-        } header: {
-            Text("Favourites, most recent first").textCase(nil)
+
+        if favourites.isEmpty {
+            Text("Nessun preferito. Scorri verso destra su un brano, oppure tienilo premuto, per aggiungerlo.")
+                .font(.subheadline)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 16)
+                .prismaRow()
+                .listRowSeparator(.hidden)
         }
-    }
-}
 
-private struct FavouriteTrackRow: View {
-    let track: StoredTrack
-
-    @Environment(PlaybackEngine.self) private var playback
-    @State private var addingToPlaylist = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            if track.downloadState == .downloaded {
-                Button {
-                    playback.play(track: track)
-                } label: {
-                    Label(track.title ?? "(no title)", systemImage: "play.fill")
-                }
-                .buttonStyle(.borderless)
-            } else {
-                Text(track.title ?? "(no title)")
-                Text("Download to play.")
-                    .font(.caption)
+        ForEach(favourites) { track in
+            TrackRow(track: track, subtitle: track.album?.artist, onPlay: {
+                presenter.sourceName = nil
+                playback.play(track: track)
+            }) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(ink.favourite)
+                    .frame(width: 18)
+                    .accessibilityLabel("Preferito")
             }
-            Text([track.album?.artist, track.album?.title].compactMap { $0 }.joined(separator: " · "))
-                .font(.caption)
-            HStack(spacing: 20) {
-                FavouriteButton(track: track)
-                Button("Add to playlist…") { addingToPlaylist = true }
-            }
-            .buttonStyle(.borderless)
-            TrackDownloadStatus(track: track)
-        }
-        .sheet(isPresented: $addingToPlaylist) {
-            AddToPlaylistSheet(track: track)
+            .prismaRow()
         }
     }
 }

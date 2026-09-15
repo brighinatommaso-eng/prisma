@@ -1,12 +1,18 @@
+import AVKit
 import Foundation
 import SwiftData
 import SwiftUI
+import UIKit
 
-/// Whether the full-screen player is showing. Shared so any screen, including
-/// ones pushed inside a tab, can host the mini player.
+/// Whether the full-screen player is showing, and where playback was started from.
+/// Shared so any screen, including ones pushed inside a tab, can host the mini player.
 @Observable
 final class PlayerPresenter {
     var isPresented = false
+    /// The playlist playback was started from, for "In riproduzione da". nil means
+    /// the album of the playing track. Kept in memory only: after a relaunch the
+    /// restored queue shows its album.
+    var sourceName: String?
 }
 
 /// Puts the mini player above the tab bar and shrinks the safe area beneath it,
@@ -31,256 +37,556 @@ extension View {
     }
 }
 
-/// Above the tab bar: artwork, title, artist, play/pause and next. Tapping the
-/// track opens the full player. Also shows a playback error when nothing is loaded,
-/// so a failure is never hidden along with the player.
+// MARK: - Mini player
+
+/// Prototype `.mini`: a floating glass bar with artwork, title, artist, the heart,
+/// play/pause and next, and a thin progress line. Tapping the track opens the full
+/// player. A playback error shows even when nothing is loaded, so a failure is never
+/// hidden along with the player.
 struct MiniPlayerView: View {
     let openPlayer: () -> Void
 
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
         if let track = playback.currentTrack {
             VStack(spacing: 0) {
-                Divider()
-                HStack(spacing: 12) {
+                HStack(spacing: 4) {
                     Button(action: openPlayer) {
-                        HStack(spacing: 12) {
-                            PlayerArtwork(album: track.album, side: 44)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(track.title ?? "(no title)")
+                        HStack(spacing: 11) {
+                            CoverArt(album: track.album, side: 42, cornerRadius: 10)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(track.title ?? "Senza titolo")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(ink.primary)
                                     .lineLimit(1)
                                 Text(track.album?.artist ?? "")
-                                    .font(.caption)
+                                    .font(.caption2)
+                                    .foregroundStyle(ink.secondary)
                                     .lineLimit(1)
                             }
                             Spacer(minLength: 0)
                         }
+                        .frame(minHeight: 62)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityHint("Apre il player")
 
-                    FavouriteButton(track: track, iconHitSize: CGSize(width: 44, height: 50))
-                        .font(.title3)
-                        .buttonStyle(.plain)
+                    FavouriteButton(track: track, hitSize: CGSize(width: 44, height: 46), glyphSize: 17)
 
-                    // Each control is its own button with the whole 50 pt square as its
-                    // hit area. A plain button otherwise only responds on the drawn
-                    // glyph, so taps on the empty part of the frame did nothing.
+                    // Each control is its own button with the whole square as its hit
+                    // area; a plain button otherwise only responds on the glyph.
                     Button {
                         playback.togglePlayPause()
                     } label: {
                         Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.title2)
-                            .frame(width: 50, height: 50)
+                            .font(.system(size: 19))
+                            .foregroundStyle(ink.primary)
+                            .frame(width: 46, height: 46)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(playback.isPlaying ? "Pause" : "Play")
+                    .accessibilityLabel(playback.isPlaying ? "Pausa" : "Riproduci")
 
                     Button {
                         playback.next()
                     } label: {
                         Image(systemName: "forward.fill")
-                            .font(.title2)
-                            .frame(width: 50, height: 50)
+                            .font(.system(size: 19))
+                            .foregroundStyle(ink.primary)
+                            .frame(width: 46, height: 46)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .disabled(!playback.hasNext)
-                    .accessibilityLabel("Next track")
+                    .opacity(playback.hasNext ? 1 : 0.45)
+                    .accessibilityLabel("Brano successivo")
                 }
-                .padding(.leading)
-                .padding(.trailing, 8)
-                .padding(.vertical, 3)
+                .padding(.leading, 11)
+                .padding(.trailing, 4)
 
-                if let error = playback.lastError {
-                    Button(action: openPlayer) {
-                        Text("Playback error: \(error.title). Tap for details.")
-                            .font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal)
-                    .padding(.bottom, 6)
+                if playback.lastError != nil {
+                    errorLine
                 }
             }
-            .glassSurface()
-        } else if let error = playback.lastError {
-            VStack(spacing: 0) {
-                Divider()
-                Button(action: openPlayer) {
-                    Text("Playback error: \(error.title). Tap for details.")
-                        .font(.caption)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding()
+            .overlay(alignment: .bottom) {
+                progressLine
             }
-            .glassSurface()
+            .prismaGlass(RoundedRectangle(cornerRadius: 22))
+            .padding(.horizontal, 13)
+            .padding(.bottom, 6)
+        } else if playback.lastError != nil {
+            errorLine
+                .padding(.vertical, 6)
+                .prismaGlass(RoundedRectangle(cornerRadius: 22))
+                .padding(.horizontal, 13)
+                .padding(.bottom, 6)
         }
+    }
+
+    private var errorLine: some View {
+        Button(action: openPlayer) {
+            Label("Errore di riproduzione · tocca per i dettagli", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(ink.primary)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+    }
+
+    /// Prototype `.mprog`.
+    private var progressLine: some View {
+        let fraction = playback.duration > 0 ? min(1, max(0, playback.elapsed / playback.duration)) : 0
+        return GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(ink.primary.opacity(0.14))
+                Rectangle()
+                    .fill(ink.primary.opacity(0.8))
+                    .frame(width: proxy.size.width * fraction)
+            }
+        }
+        .frame(height: 2)
+        .padding(.horizontal, 11)
+        .accessibilityHidden(true)
     }
 }
 
-/// Full-screen player: seek slider, elapsed and remaining time, previous, play
-/// and next, shuffle and repeat, and every message and error from playback.
+// MARK: - Full player
+
+/// Prototype player: context line with close and overflow, large artwork, title and
+/// artist with the heart, seek bar, transport, and queue and AirPlay at the bottom.
+/// The large play button is the only glass on this screen (spec 5.8).
 struct FullPlayerView: View {
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlayerPresenter.self) private var presenter
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.prismaInk) private var ink
 
-    @State private var scrubbing = false
-    @State private var scrubPosition: Double = 0
+    @State private var showingQueue = false
+    @State private var addingToPlaylist = false
+    @State private var showingDetails = false
 
     var body: some View {
-        NavigationStack {
-            List {
-                if let track = playback.currentTrack {
-                    Section {
-                        HStack {
-                            Spacer()
-                            PlayerArtwork(album: track.album, side: 260)
-                            Spacer()
-                        }
-                        Text(track.title ?? "(no title)")
-                            .font(.title2)
-                        Text(track.album?.artist ?? "Unknown artist")
-                        Text(track.album?.title ?? "No album")
+        GeometryReader { proxy in
+            ScrollView {
+                VStack(spacing: 0) {
+                    if let track = playback.currentTrack {
+                        topBar(source: presenter.sourceName ?? track.album?.title ?? "Libreria")
+                        nowPlaying(track, width: proxy.size.width - 52, height: proxy.size.height)
+                    } else {
+                        topBar(source: nil)
+                        Text("Non c'è niente in riproduzione. Tocca un brano scaricato in Libreria.")
                             .font(.subheadline)
-                        if let index = playback.currentIndex {
-                            Text("Track \(index + 1) of \(playback.queue.count) in the queue")
-                                .font(.caption)
-                        }
-                        FavouriteButton(track: track)
-                            .buttonStyle(.borderless)
-                        if let problem = playback.artworkProblem {
-                            Text(problem)
-                                .font(.caption2)
-                        }
+                            .foregroundStyle(ink.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.top, 60)
                     }
 
-                    Section {
-                        Slider(
-                            value: Binding(
-                                get: { scrubbing ? scrubPosition : playback.elapsed },
-                                set: { scrubPosition = $0 }
-                            ),
-                            in: 0...max(playback.duration, 1),
-                            onEditingChanged: { editing in
-                                if editing {
-                                    scrubPosition = playback.elapsed
-                                    scrubbing = true
-                                } else {
-                                    playback.seek(to: scrubPosition)
-                                    scrubbing = false
-                                }
-                            }
-                        )
-                        let shown = scrubbing ? scrubPosition : playback.elapsed
-                        HStack {
-                            Text(Formatting.clock(shown))
-                            Spacer()
-                            Text("-" + Formatting.clock(max(0, playback.duration - shown)))
-                        }
-                        .font(.caption.monospacedDigit())
+                    messages
+                        .padding(.top, 16)
 
-                        HStack(spacing: 44) {
-                            Spacer()
-                            Button {
-                                playback.previous()
-                            } label: {
-                                Image(systemName: "backward.fill")
-                            }
-                            .accessibilityLabel("Previous track")
-                            Button {
-                                playback.togglePlayPause()
-                            } label: {
-                                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                            }
-                            .accessibilityLabel(playback.isPlaying ? "Pause" : "Play")
-                            Button {
-                                playback.next()
-                            } label: {
-                                Image(systemName: "forward.fill")
-                            }
-                            .disabled(!playback.hasNext)
-                            .accessibilityLabel("Next track")
-                            Spacer()
-                        }
-                        .font(.largeTitle)
-                        .buttonStyle(.borderless)
-                        .padding(.vertical, 8)
-                    }
+                    Spacer(minLength: 16)
 
-                    Section {
-                        Toggle("Shuffle", isOn: Binding(
-                            get: { playback.shuffle },
-                            set: { playback.setShuffle($0) }
-                        ))
-                        Picker("Repeat", selection: Binding(
-                            get: { playback.repeatMode },
-                            set: { playback.setRepeat($0) }
-                        )) {
-                            ForEach(PlaybackEngine.RepeatMode.allCases) { mode in
-                                Text(mode.label).tag(mode)
-                            }
-                        }
-                    }
-                } else {
-                    Section {
-                        Text("Nothing is playing. Tap a downloaded track in the Library tab.")
-                    }
+                    bottomRow
                 }
+                .padding(.horizontal, 26)
+                .padding(.top, 8)
+                .padding(.bottom, 12)
+                .frame(minHeight: proxy.size.height, alignment: .top)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .themedScreenBackground()
+        .sheet(isPresented: $showingQueue) {
+            QueueSheet()
+        }
+        .sheet(isPresented: $addingToPlaylist) {
+            if let track = playback.currentTrack {
+                AddToPlaylistSheet(track: track)
+            }
+        }
+    }
 
-                if let message = playback.message {
-                    Section {
-                        Text(message)
-                        Button("Dismiss") { playback.clearMessage() }
-                    } header: {
-                        Text("Playback").textCase(nil)
-                    }
+    /// Prototype `.ptop`.
+    private func topBar(source: String?) -> some View {
+        HStack(spacing: 0) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ink.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Chiudi il player")
+
+            Spacer(minLength: 8)
+
+            if let source {
+                VStack(spacing: 2) {
+                    Text("In riproduzione da")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(1.3)
+                        .textCase(.uppercase)
+                        .foregroundStyle(ink.secondary)
+                    Text(source)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(ink.primary)
+                        .lineLimit(1)
                 }
+                .accessibilityElement(children: .combine)
+            }
 
-                if let error = playback.lastError {
-                    Section {
-                        ErrorReport(error: error)
-                        Button("Dismiss error") { playback.clearError() }
-                    } header: {
-                        Text("Playback error").textCase(nil)
-                    }
+            Spacer(minLength: 8)
+
+            Menu {
+                Button {
+                    addingToPlaylist = true
+                } label: {
+                    Label("Aggiungi a playlist…", systemImage: "text.badge.plus")
+                }
+                .disabled(playback.currentTrack == nil)
+                Button {
+                    showingQueue = true
+                } label: {
+                    Label("Coda", systemImage: "list.bullet")
+                }
+                Button {
+                    showingDetails.toggle()
+                } label: {
+                    Label(showingDetails ? "Nascondi dettagli tecnici" : "Mostra dettagli tecnici", systemImage: "info.circle")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ink.primary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("Altre azioni")
+        }
+    }
+
+    @ViewBuilder
+    private func nowPlaying(_ track: StoredTrack, width: CGFloat, height: CGFloat) -> some View {
+        let side = max(120, min(width, height * 0.45))
+
+        // Prototype `.part`: large, radius 24, deep shadow.
+        CoverArt(album: track.album, side: side, cornerRadius: 24)
+            .shadow(color: .black.opacity(0.7), radius: 32, y: 24)
+            .padding(.top, 22)
+
+        // Prototype `.prow`.
+        HStack(alignment: .bottom, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(track.title ?? "Senza titolo")
+                    .font(.title2.weight(.heavy))
+                    .foregroundStyle(ink.primary)
+                    .lineLimit(2)
+                Text(track.album?.artist ?? "Artista sconosciuto")
+                    .font(.subheadline)
+                    .foregroundStyle(ink.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            FavouriteButton(track: track, glyphSize: 23)
+                .padding(.bottom, -6)
+        }
+        .padding(.top, 28)
+
+        SeekBar(elapsed: playback.elapsed, duration: playback.duration) { seconds in
+            playback.seek(to: seconds)
+        }
+        .padding(.top, 14)
+
+        transport
+            .padding(.top, 12)
+
+        if showingDetails {
+            VStack(alignment: .leading, spacing: 6) {
+                if let index = playback.currentIndex {
+                    Text("Track \(index + 1) of \(playback.queue.count) in the queue")
+                }
+                Text("Album: \(track.album?.title ?? "none")")
+                Text("Shuffle \(playback.shuffle ? "on" : "off"), repeat \(playback.repeatMode.label.lowercased())")
+                if let problem = playback.artworkProblem {
+                    Text(problem)
                 }
             }
-            .themedScreenBackground()
-            .navigationTitle("Now Playing")
+            .font(.caption2.monospaced())
+            .foregroundStyle(ink.primary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 16)
+        }
+    }
+
+    /// Prototype `.trans`: shuffle, previous, play, next, repeat.
+    private var transport: some View {
+        HStack(spacing: 0) {
+            smallControl(
+                "shuffle",
+                active: playback.shuffle,
+                label: playback.shuffle ? "Casuale attivo" : "Casuale disattivo"
+            ) {
+                playback.setShuffle(!playback.shuffle)
+            }
+            Spacer(minLength: 0)
+            Button {
+                playback.previous()
+            } label: {
+                Image(systemName: "backward.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(ink.primary)
+                    .frame(width: 46, height: 46)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Brano precedente")
+            Spacer(minLength: 0)
+            Button {
+                playback.togglePlayPause()
+            } label: {
+                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(ink.primary)
+                    .frame(width: 58, height: 58)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.circle)
+            .accessibilityLabel(playback.isPlaying ? "Pausa" : "Riproduci")
+            Spacer(minLength: 0)
+            Button {
+                playback.next()
+            } label: {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(ink.primary)
+                    .frame(width: 46, height: 46)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!playback.hasNext)
+            .opacity(playback.hasNext ? 1 : 0.45)
+            .accessibilityLabel("Brano successivo")
+            Spacer(minLength: 0)
+            smallControl(
+                playback.repeatMode == .one ? "repeat.1" : "repeat",
+                active: playback.repeatMode != .off,
+                label: repeatLabel
+            ) {
+                playback.setRepeat(nextRepeatMode)
+            }
+        }
+    }
+
+    private var repeatLabel: String {
+        switch playback.repeatMode {
+        case .off: return "Ripeti disattivo"
+        case .all: return "Ripeti la coda"
+        case .one: return "Ripeti il brano"
+        }
+    }
+
+    private var nextRepeatMode: PlaybackEngine.RepeatMode {
+        switch playback.repeatMode {
+        case .off: return .all
+        case .all: return .one
+        case .one: return .off
+        }
+    }
+
+    private func smallControl(_ systemName: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(active ? ink.accent : ink.secondary)
+                .frame(width: 46, height: 46)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    /// What the engine did on its own, and playback errors.
+    @ViewBuilder
+    private var messages: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let message = playback.message {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
+                DismissLink { playback.clearMessage() }
+            }
+            if let error = playback.lastError {
+                ProblemBlock(summary: "Errore di riproduzione: " + PlainLanguage.summary(for: error).lowercasedFirst,
+                             details: .error(error))
+                DismissLink { playback.clearError() }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Prototype `.pbot`: queue and AirPlay.
+    private var bottomRow: some View {
+        HStack {
+            Button {
+                showingQueue = true
+            } label: {
+                Image(systemName: "list.bullet")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(ink.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Coda")
+            Spacer()
+            AirPlayButton(tint: UIColor(red: ink.secondaryRGB.red, green: ink.secondaryRGB.green, blue: ink.secondaryRGB.blue, alpha: 1))
+                .frame(width: 44, height: 44)
+                .accessibilityLabel("AirPlay")
+        }
+    }
+}
+
+/// Prototype `.seek`: a 5 pt track with a knob, over a 44 pt touch area, and the
+/// elapsed and remaining times. Adjustable with VoiceOver in 10 s steps.
+private struct SeekBar: View {
+    let elapsed: TimeInterval
+    let duration: TimeInterval
+    let onSeek: (TimeInterval) -> Void
+
+    @Environment(\.prismaInk) private var ink
+    @State private var dragFraction: Double?
+
+    var body: some View {
+        let shown = dragFraction.map { $0 * duration } ?? elapsed
+        let fraction = duration > 0 ? min(1, max(0, shown / duration)) : 0
+        VStack(spacing: 2) {
+            GeometryReader { proxy in
+                let width = max(1, proxy.size.width)
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(ink.primary.opacity(0.2))
+                        .frame(height: 5)
+                    Capsule()
+                        .fill(ink.primary)
+                        .frame(width: width * fraction, height: 5)
+                    Circle()
+                        .fill(ink.primary)
+                        .frame(width: 12, height: 12)
+                        .offset(x: width * fraction - 6)
+                }
+                .frame(width: width, height: proxy.size.height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            dragFraction = min(1, max(0, value.location.x / width))
+                        }
+                        .onEnded { value in
+                            let released = min(1, max(0, value.location.x / width))
+                            dragFraction = nil
+                            if duration > 0 {
+                                onSeek(released * duration)
+                            }
+                        }
+                )
+            }
+            .frame(height: 44)
+
+            HStack {
+                Text(Formatting.clock(shown))
+                Spacer()
+                Text("-" + Formatting.clock(max(0, duration - shown)))
+            }
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(ink.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Posizione nel brano")
+        .accessibilityValue("\(Formatting.clock(shown)) di \(Formatting.clock(duration))")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment:
+                onSeek(min(duration, elapsed + 10))
+            case .decrement:
+                onSeek(max(0, elapsed - 10))
+            @unknown default:
+                break
+            }
+        }
+    }
+}
+
+/// The play queue in order, the current track marked by the equaliser.
+private struct QueueSheet: View {
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(\.dismiss) private var dismiss
+    @Query private var tracks: [StoredTrack]
+
+    var body: some View {
+        let byID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+        NavigationStack {
+            List {
+                if playback.queue.isEmpty {
+                    Text("La coda è vuota.")
+                }
+                ForEach(Array(playback.queue.enumerated()), id: \.offset) { index, id in
+                    HStack(spacing: 12) {
+                        Text("\(index + 1)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 24, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(byID[id]?.title ?? "Brano non più in libreria")
+                                .lineLimit(1)
+                            Text(byID[id]?.album?.artist ?? "")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        if index == playback.currentIndex {
+                            EqualizerBars(isAnimating: playback.isPlaying)
+                        }
+                    }
+                    .frame(minHeight: 44)
+                }
+            }
+            .navigationTitle("Coda")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") { dismiss() }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Fine") { dismiss() }
                 }
             }
         }
     }
 }
 
-/// An album cover from local storage, or a plain placeholder.
-private struct PlayerArtwork: View {
-    let album: StoredAlbum?
-    let side: CGFloat
+/// The system AirPlay route picker.
+private struct AirPlayButton: UIViewRepresentable {
+    let tint: UIColor
 
-    @State private var problem: String?
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.prioritizesVideoDevices = false
+        view.tintColor = tint
+        view.activeTintColor = tint
+        return view
+    }
 
-    var body: some View {
-        if let album {
-            LocalCoverImage(album: album, side: side, problem: $problem)
-        } else {
-            ZStack {
-                Rectangle()
-                    .fill(.quaternary)
-                Text("no album")
-                    .font(.caption2)
-            }
-            .frame(width: side, height: side)
-        }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {
+        uiView.tintColor = tint
+        uiView.activeTintColor = tint
     }
 }

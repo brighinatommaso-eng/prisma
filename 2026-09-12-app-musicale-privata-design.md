@@ -309,18 +309,26 @@ Sono due righe di codice e separano un'app curata da una che sembra curata.
 
 ### 5.8 Struttura delle schermate
 
-Quattro tab più il player a schermo intero.
+Quattro tab più il player a schermo intero, e la pagina playlist spinta dentro Libreria.
 
 | Schermata | Vetro | Note |
 |---|---|---|
-| **Libreria** | chip, mini-player, tab bar | Titolo grande, chip di filtro, album con copertina 66pt e righe brano sotto. Stato di download a destra di ogni riga. |
-| **Cerca** | campo di ricerca, chip, mini-player, tab bar | Risultati con miniatura 46pt e pulsante download. |
-| **Download** | card dei job, mini-player, tab bar | Sezioni In corso / In coda / Fallito. Gli errori mostrano codice e URL in monospazio. |
-| **Impostazioni** | campo server, card, segmenti, preset | Server, stato, Aspetto, build. |
-| **Player** | solo il pulsante play | Copertina grande, titolo, slider, trasporto. Quasi senza vetro di proposito: lì il contenuto è la musica, e frapporre pannelli la allontana. |
+| **Libreria** | chip, mini-player, tab bar | Titolo grande, chip Album / Playlist / Preferiti, album con copertina 62pt e righe brano sotto. Stato di download come icona a destra di ogni riga: spunta nel colore d'accento se scaricato, freccia attenuata se no, anello di avanzamento durante il download, equalizzatore animato sul brano in riproduzione. |
+| **Playlist** | pulsante Casuale, mini-player, tab bar | Mosaico 2×2 dalle prime quattro copertine di album distinte, nome, "N brani · N min", poi **Riproduci** pieno e **Casuale** in vetro affiancati, poi i brani e infine "Scarica N brani mancanti" quando serve. Casuale avvia la riproduzione già in ordine casuale. |
+| **Cerca** | campo di ricerca, mini-player, tab bar | Risultati con miniatura 46pt e stato di download come icona. |
+| **Download** | mini-player, tab bar | Sezioni In corso / Non riuscito / Annullati / Scaricati, con anello di avanzamento sulla copertina. Gli errori si leggono in linguaggio semplice ("Impossibile raggiungere il server"); codice, URL e pulsante di copia restano a un tocco, dietro "Mostra dettagli tecnici". |
+| **Impostazioni** | campo server, card, segmenti, preset | Server, stato, Aspetto, info. |
+| **Player** | solo il pulsante play | Riga di contesto in alto ("In riproduzione da" e la sorgente) con chiusura a sinistra e menu a destra; copertina grande con ombra profonda; titolo e artista con il cuore a destra; barra di avanzamento; trasporto; in basso coda e AirPlay. Quasi senza vetro di proposito: lì il contenuto è la musica, e frapporre pannelli la allontana. |
 
-Il mini-player è presente su tutte e quattro le tab e scompare nel player a schermo
-intero.
+Il mini-player è presente su tutte e quattro le tab, e su ogni schermata spinta dentro
+una tab, e scompare nel player a schermo intero.
+
+**Le righe di contenuto sono trasparenti.** Una riga non ha sfondo proprio: la
+separazione è solo un filo sottile, e l'aura si vede di continuo dietro l'intera lista,
+non soltanto negli spazi tra le sezioni. Vale per Libreria, Cerca, Download, playlist e
+preferiti. Nell'interfaccia principale non compaiono dati diagnostici — dimensioni in
+byte, tempi in millisecondi, id, codici d'errore grezzi: le durate sostituiscono le
+dimensioni, e i dettagli tecnici restano raggiungibili dietro "Mostra dettagli tecnici".
 
 ### 5.9 Note di implementazione
 

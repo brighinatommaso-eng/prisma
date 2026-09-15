@@ -2,19 +2,19 @@ import Foundation
 import SwiftUI
 import UIKit
 
-/// A track's download state, progress, errors and the actions available in that
-/// state. Used by both the Library and Downloads tabs.
-struct TrackDownloadStatus: View {
+/// Everything the download machinery knows about a track: sizes, the pre-flight
+/// check, how long it has waited, what iOS last reported, progress in bytes and the
+/// last automatic action. Developer information, shown behind
+/// "Mostra dettagli tecnici"; failures and refusals are shown by `TrackProblems`.
+struct TrackTechnicalDetails: View {
     let track: StoredTrack
-    /// Downloads tab: also show when the track first entered the queue.
-    var showTiming = false
 
     @Environment(DownloadManager.self) private var downloads
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(stateLine)
-                .font(.caption)
+                .textSelection(.enabled)
 
             if let since = downloads.preflights[track.serverID] {
                 LoadingRow(
@@ -22,7 +22,6 @@ struct TrackDownloadStatus: View {
                     since: since,
                     timeout: APIClient.Timeout.probe
                 )
-                .font(.caption)
             } else if track.downloadState == .queued {
                 queuedView
             } else if track.downloadState == .downloading {
@@ -31,22 +30,14 @@ struct TrackDownloadStatus: View {
 
             if let note = track.note {
                 Text(note)
-                    .font(.caption2)
             }
 
-            if track.downloadState == .failed, let errorText = track.errorText {
-                ErrorReport(storedText: errorText)
-            }
-
-            if let refusal = downloads.refusals[track.serverID] {
-                ErrorReport(error: refusal)
-            }
-
-            // No actions while a pre-flight runs: its result decides the state.
-            if downloads.preflights[track.serverID] == nil {
-                actions
+            if let target = track.targetAddress {
+                Text("Server address for this attempt: \(target)")
+                    .textSelection(.enabled)
             }
         }
+        .font(.caption2.monospaced())
     }
 
     private var stateLine: String {
@@ -56,69 +47,45 @@ struct TrackDownloadStatus: View {
         case .notDownloaded:
             return "Not downloaded, \(Formatting.bytes(track.fileBytes))"
         default:
-            return track.downloadState.label
+            return "\(track.downloadState.label), \(Formatting.bytes(track.fileBytes))"
         }
     }
 
     /// Queued: how long this attempt has waited, what iOS last said, and when it
-    /// will give up, so waiting is never silent.
+    /// will give up.
     @ViewBuilder
     private var queuedView: some View {
         if let started = track.attemptStartedAt {
             TimelineView(.periodic(from: started, by: 1)) { context in
                 let waited = Int(context.date.timeIntervalSince(started))
                 Text("Waiting \(Formatting.elapsed(waited)) for iOS to start the transfer. If no data arrives within \(Int(DownloadManager.startDeadline / 60)) min it fails as never started.")
-                    .font(.caption2.monospacedDigit())
             }
         } else {
             Text("Queued, but no start time was recorded for this attempt.")
-                .font(.caption2)
         }
         Text("Last problem reported by iOS: \(track.lastSessionError ?? "none so far")")
-            .font(.caption2)
         if let summary = track.preflightSummary {
             Text(summary)
-                .font(.caption2)
                 .textSelection(.enabled)
         }
-        if showTiming, let queuedAt = track.queuedAt {
+        if let queuedAt = track.queuedAt {
             Text("In the queue since \(Formatting.time(queuedAt)).")
-                .font(.caption2)
         }
     }
 
     @ViewBuilder
     private var progressView: some View {
         if let token = track.downloadToken, let progress = downloads.progress[token], progress.expected > 0 {
-            ProgressView(value: min(1, Double(progress.received) / Double(progress.expected)))
             Text("\(Int((Double(progress.received) / Double(progress.expected) * 100).rounded()))%: \(Formatting.bytes(Int(progress.received))) of \(Formatting.bytes(Int(progress.expected)))")
-                .font(.caption2.monospacedDigit())
         } else {
             Text("No progress reported since the app opened; the transfer is running in the background.")
-                .font(.caption2)
         }
-    }
-
-    @ViewBuilder
-    private var actions: some View {
-        HStack(spacing: 20) {
-            switch track.downloadState {
-            case .notDownloaded:
-                Button("Download") { downloads.download(track) }
-            case .queued, .downloading:
-                Button("Cancel") { downloads.cancel(track) }
-            case .downloaded:
-                Button("Remove from device") { downloads.removeFile(track) }
-            case .failed, .cancelled:
-                Button("Retry") { downloads.download(track) }
-                Button("Dismiss") { downloads.dismiss(track) }
-            }
-        }
-        .buttonStyle(.borderless)
     }
 }
 
 /// An album cover read from Application Support/Artwork. Never touches the network.
+/// Without a file it draws a neutral tile with a note glyph; an unreadable file is
+/// reported through `problem`.
 struct LocalCoverImage: View {
     let album: StoredAlbum
     let side: CGFloat
@@ -128,17 +95,11 @@ struct LocalCoverImage: View {
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.quaternary)
+            CoverPlaceholder(palette: album.palette, side: side)
             if let image {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if album.coverFileName == nil {
-                Text(album.coverURL == nil ? "no cover" : "not saved")
-                    .font(.caption2)
-            } else {
-                Image(systemName: "exclamationmark.triangle")
             }
         }
         .frame(width: side, height: side)
@@ -146,6 +107,7 @@ struct LocalCoverImage: View {
         .task(id: loadKey) {
             load()
         }
+        .accessibilityHidden(true)
     }
 
     /// Changes whenever a new cover file is saved, so the image reloads.
@@ -167,5 +129,98 @@ struct LocalCoverImage: View {
         } catch {
             problem = APIError.from(error).fullText
         }
+    }
+}
+
+/// A cover-sized tile: the album's palette as a gradient when it has one, a
+/// neutral fill otherwise, with a note glyph.
+struct CoverPlaceholder: View {
+    let palette: [String]?
+    let side: CGFloat
+
+    var body: some View {
+        let colors = (palette ?? []).compactMap { RGBColor(hex: $0) }
+            .map { Color(red: $0.red, green: $0.green, blue: $0.blue) }
+        ZStack {
+            if colors.count >= 2 {
+                LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+            } else {
+                Rectangle().fill(Color.gray.opacity(0.35))
+            }
+            Image(systemName: "music.note")
+                .font(.system(size: max(10, side * 0.3), weight: .medium))
+                .foregroundStyle(Color.white.opacity(0.7))
+        }
+        .frame(width: side, height: side)
+    }
+}
+
+/// A local cover, or the placeholder for a track without an album, with rounded
+/// corners.
+struct CoverArt: View {
+    let album: StoredAlbum?
+    let side: CGFloat
+    let cornerRadius: CGFloat
+
+    @State private var problem: String?
+
+    var body: some View {
+        Group {
+            if let album {
+                LocalCoverImage(album: album, side: side, problem: $problem)
+            } else {
+                CoverPlaceholder(palette: nil, side: side)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+    }
+}
+
+/// The 2×2 cover of a playlist, from the first four distinct albums in playlist
+/// order. With fewer albums the covers repeat across the grid.
+struct PlaylistMosaic: View {
+    let playlist: Playlist
+    let side: CGFloat
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let albums = Self.distinctAlbums(in: playlist)
+        let cell = side / 2
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                tile(albums, 0, cell)
+                tile(albums, 1, cell)
+            }
+            HStack(spacing: 0) {
+                tile(albums, 2, cell)
+                tile(albums, 3, cell)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func tile(_ albums: [StoredAlbum], _ index: Int, _ cell: CGFloat) -> some View {
+        if albums.isEmpty {
+            CoverPlaceholder(palette: nil, side: cell)
+        } else {
+            // Two albums sit on the diagonal; three repeat the first in the corner.
+            let order: [Int] = albums.count == 2 ? [0, 1, 1, 0] : [0, 1, 2, 0]
+            let pick = albums.count >= 4 ? index : order[index] % albums.count
+            CoverArt(album: albums[pick], side: cell, cornerRadius: 0)
+        }
+    }
+
+    static func distinctAlbums(in playlist: Playlist) -> [StoredAlbum] {
+        var seen = Set<Int>()
+        var result: [StoredAlbum] = []
+        for entry in PlaylistStore.orderedEntries(of: playlist) {
+            guard let album = entry.track?.album, !album.isDeleted, seen.insert(album.serverID).inserted else { continue }
+            result.append(album)
+            if result.count == 4 { break }
+        }
+        return result
     }
 }

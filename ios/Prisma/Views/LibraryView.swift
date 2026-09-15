@@ -7,6 +7,9 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(LibrarySync.self) private var sync
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlayerPresenter.self) private var presenter
+    @Environment(\.prismaInk) private var ink
 
     @Query private var albums: [StoredAlbum]
     @Query private var tracks: [StoredTrack]
@@ -17,14 +20,10 @@ struct LibraryView: View {
 
     var body: some View {
         List {
-            Section {
-                Picker("Show", selection: $filter) {
-                    ForEach(LibraryFilter.allCases) { option in
-                        Text(option.label).tag(option)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
+            FilterChips(options: LibraryFilter.allCases, selection: $filter) { $0.label }
+                .padding(.top, 4)
+                .prismaRow()
+                .listRowSeparator(.hidden)
 
             switch filter {
             case .albums:
@@ -35,107 +34,167 @@ struct LibraryView: View {
                 FavouritesContent()
             }
         }
-        .navigationTitle("Library")
+        .prismaList()
+        .navigationTitle("Libreria")
         .toolbar {
             if filter == .playlists {
-                EditButton()
+                ToolbarItem(placement: .topBarTrailing) {
+                    EditButton()
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        sync.syncNow(full: false)
+                    } label: {
+                        Label("Sincronizza modifiche", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .disabled(sync.isSyncing)
+                    Button {
+                        confirmingFullResync = true
+                    } label: {
+                        Label("Risincronizza tutto…", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(sync.isSyncing)
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                }
+                .accessibilityLabel("Sincronizzazione")
             }
         }
         .refreshable { [sync] in
             await sync.refresh()
         }
-        .confirmationDialog("Full resync", isPresented: $confirmingFullResync, titleVisibility: .visible) {
-            Button("Resync everything", role: .destructive) {
+        .confirmationDialog("Risincronizza tutto", isPresented: $confirmingFullResync, titleVisibility: .visible) {
+            Button("Risincronizza tutto", role: .destructive) {
                 sync.syncNow(full: true)
             }
         } message: {
-            Text("Downloads the whole catalogue again. Albums and tracks the server no longer lists are removed from this iPhone, together with their downloaded files.")
+            Text("Scarica di nuovo l'intero catalogo. Album e brani che il server non elenca più vengono rimossi da questo iPhone, insieme ai file scaricati.")
         }
     }
 
-    /// The albums view, unchanged from before filters existed.
+    // MARK: - Albums
+
     @ViewBuilder
     private var albumsContent: some View {
-            Section {
-                syncStatus
-                Button("Sync changes") { sync.syncNow(full: false) }
-                    .disabled(sync.isSyncing)
-                Button("Full resync…") { confirmingFullResync = true }
-                    .disabled(sync.isSyncing)
-            } header: {
-                Text("Sync").textCase(nil)
-            } footer: {
-                Text(Formatting.serverLine(settings.savedAddress) + ". Pull down to sync changes.")
-            }
+        syncStatus
 
-            Section {
-                Text("\(albums.count) albums, \(tracks.count) tracks stored on this iPhone. \(downloadedCount) downloaded.")
-            }
+        if albums.isEmpty && tracks.isEmpty {
+            Text(settings.savedAddress.isEmpty
+                 ? "La libreria è vuota. Imposta l'indirizzo del server in Impostazioni, poi trascina verso il basso per sincronizzare."
+                 : "La libreria è vuota. Trascina verso il basso per sincronizzare.")
+                .font(.subheadline)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 16)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
 
-            if albums.isEmpty && tracks.isEmpty {
-                Section {
-                    Text("Nothing stored yet. Tap Sync changes to fetch the catalogue from the server.")
+        ForEach(sortedAlbums) { album in
+            AlbumHeaderRow(album: album)
+                .prismaRow()
+                .listRowSeparator(.hidden, edges: .top)
+            ForEach(StoredTrack.albumOrder(album.tracks)) { track in
+                TrackRow(track: track, onPlay: { play(track) }) {
+                    TrackNumber(track: track)
                 }
+                .prismaRow()
             }
+        }
 
-            ForEach(sortedAlbums) { album in
-                Section {
-                    LocalAlbumRow(album: album)
-                    let albumTracks = sortedTracks(album.tracks)
-                    if albumTracks.isEmpty {
-                        Text("No tracks in this album.")
-                    }
-                    ForEach(albumTracks) { track in
-                        LocalTrackRow(track: track)
-                    }
+        let unlisted = StoredTrack.albumOrder(tracks.filter { $0.album == nil })
+        if !unlisted.isEmpty {
+            SectionLabel("Brani senza album")
+                .prismaRow()
+                .listRowSeparator(.hidden, edges: .top)
+            ForEach(unlisted) { track in
+                TrackRow(track: track, onPlay: { play(track) }) {
+                    TrackNumber(track: track)
                 }
+                .prismaRow()
             }
+        }
 
-            let unlisted = sortedTracks(tracks.filter { $0.album == nil })
-            if !unlisted.isEmpty {
-                Section {
-                    ForEach(unlisted) { track in
-                        LocalTrackRow(track: track)
-                    }
-                } header: {
-                    Text("Tracks without an album").textCase(nil)
-                }
-            }
+        TechnicalDetailsSection {
+            libraryDetails
+        }
+        .padding(.top, 12)
+        .prismaRow()
+        .listRowSeparator(.hidden)
     }
 
+    private func play(_ track: StoredTrack) {
+        presenter.sourceName = nil
+        playback.play(track: track)
+    }
+
+    /// Only what needs attention: a sync running or failed. The rest is in the
+    /// technical details.
     @ViewBuilder
     private var syncStatus: some View {
         switch sync.status {
-        case .idle:
+        case .idle, .succeeded:
             EmptyView()
-        case .syncing(let started, let since):
-            LoadingRow(
-                message: since.map { "Syncing changes since \($0)…" } ?? "Syncing the full catalogue…",
-                since: started,
-                timeout: APIClient.Timeout.library
-            )
-        case .succeeded(let date):
-            Text("Sync succeeded at \(Formatting.time(date)).")
-        case .failed(let error):
-            ErrorReport(error: error)
-            Text("Sync failed. Everything below is what was already stored on this iPhone.")
-                .font(.caption)
-        }
-
-        if let record = records.first, let lastSyncAt = record.lastSyncAt {
-            FieldRow(label: "Last successful sync", value: Formatting.dateTime(lastSyncAt))
-            if let summary = record.lastSummary {
-                Text(summary)
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
+        case .syncing:
+            HStack(spacing: 10) {
+                ProgressView()
+                    .tint(ink.secondary)
+                Text("Sincronizzazione in corso…")
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
             }
-        } else {
-            Text("Never synced.")
+            .frame(minHeight: 44)
+            .prismaRow()
+            .listRowSeparator(.hidden)
+        case .failed(let error):
+            VStack(alignment: .leading, spacing: 0) {
+                ProblemBlock(summary: "Sincronizzazione non riuscita: " + PlainLanguage.summary(for: error).lowercasedFirst,
+                             details: .error(error))
+                Text("La libreria qui sotto è quella già salvata sul telefono.")
+                    .font(.caption)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.bottom, 8)
+            }
+            .prismaRow()
+            .listRowSeparator(.hidden)
         }
     }
 
-    private var downloadedCount: Int {
-        tracks.filter { $0.downloadState == .downloaded }.count
+    @ViewBuilder
+    private var libraryDetails: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(Formatting.serverLine(settings.savedAddress))
+                .textSelection(.enabled)
+            Text("\(albums.count) albums, \(tracks.count) tracks stored on this iPhone. \(tracks.filter { $0.downloadState == .downloaded }.count) downloaded.")
+            if case .syncing(let started, let since) = sync.status {
+                LoadingRow(
+                    message: since.map { "Syncing changes since \($0)…" } ?? "Syncing the full catalogue…",
+                    since: started,
+                    timeout: APIClient.Timeout.library
+                )
+            }
+            if case .succeeded(let date) = sync.status {
+                Text("Sync succeeded at \(Formatting.time(date)).")
+            }
+            if let record = records.first, let lastSyncAt = record.lastSyncAt {
+                FieldRow(label: "Last successful sync", value: Formatting.dateTime(lastSyncAt))
+                if let summary = record.lastSummary {
+                    Text(summary)
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+            } else {
+                Text("Never synced.")
+            }
+            ForEach(sortedAlbums.filter { $0.coverError != nil }) { album in
+                if let coverError = album.coverError {
+                    Text("Cover of “\(album.title)” (album id \(album.serverID)) failed:\n\(coverError)")
+                        .font(.caption2.monospaced())
+                        .textSelection(.enabled)
+                }
+            }
+        }
     }
 
     private var sortedAlbums: [StoredAlbum] {
@@ -145,85 +204,80 @@ struct LibraryView: View {
             return $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
     }
+}
 
-    private func sortedTracks(_ list: [StoredTrack]) -> [StoredTrack] {
-        StoredTrack.albumOrder(list)
+extension String {
+    /// "Impossibile…" → "impossibile…", to follow a colon.
+    var lowercasedFirst: String {
+        guard let first else { return self }
+        return first.lowercased() + String(dropFirst())
     }
 }
 
-private struct LocalAlbumRow: View {
-    let album: StoredAlbum
-
-    @State private var coverProblem: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 12) {
-                LocalCoverImage(album: album, side: 100, problem: $coverProblem)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(album.title)
-                        .font(.headline)
-                    Text(album.artist)
-                    Text(album.year.map { String($0) } ?? "year unknown")
-                        .font(.subheadline)
-                    Text("\(album.tracks.count) tracks, album id \(album.serverID)")
-                        .font(.caption)
-                }
-            }
-            if let coverError = album.coverError {
-                Text("Cover download failed:\n\(coverError)")
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-            }
-            if let coverProblem {
-                Text(coverProblem)
-                    .font(.caption2)
-            }
-        }
-    }
-}
-
-private struct LocalTrackRow: View {
+/// Prototype `.tno`.
+struct TrackNumber: View {
     let track: StoredTrack
 
-    @Environment(PlaybackEngine.self) private var playback
-    @State private var addingToPlaylist = false
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(track.trackNo.map { String($0) } ?? "–")
-                .font(.body.monospacedDigit())
-                .frame(minWidth: 24, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
-                if track.downloadState == .downloaded {
-                    // Plays this track and queues the rest of its album.
+        Text(track.trackNo.map { String($0) } ?? "—")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(ink.secondary)
+            .frame(width: 18, alignment: .leading)
+    }
+}
+
+/// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
+/// download or cannot be read shows a warning that reveals the error.
+private struct AlbumHeaderRow: View {
+    let album: StoredAlbum
+
+    @Environment(\.prismaInk) private var ink
+    @State private var coverProblem: String?
+    @State private var showingCoverProblem = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 13) {
+                LocalCoverImage(album: album, side: 62, problem: $coverProblem)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(album.title)
+                        .font(.headline)
+                        .foregroundStyle(ink.primary)
+                        .lineLimit(2)
+                    Text([album.artist, album.year.map { String($0) }].compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(ink.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if problemText != nil {
                     Button {
-                        playback.play(track: track)
+                        showingCoverProblem.toggle()
                     } label: {
-                        Label(track.title ?? "(no title)", systemImage: "play.fill")
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(ink.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
-                } else {
-                    Text(track.title ?? "(no title)")
-                    Text("Download to play.")
-                        .font(.caption)
+                    .accessibilityLabel(showingCoverProblem ? "Nascondi dettagli tecnici della copertina" : "Copertina non disponibile. Mostra dettagli tecnici")
                 }
-                if playback.currentTrackID == track.serverID {
-                    Text(playback.isPlaying ? "Now playing" : "Current track, paused")
-                        .font(.caption)
-                }
-                Text(Formatting.duration(track.durationS))
-                    .font(.caption)
-                HStack(spacing: 20) {
-                    FavouriteButton(track: track)
-                    Button("Add to playlist…") { addingToPlaylist = true }
-                }
-                .buttonStyle(.borderless)
-                TrackDownloadStatus(track: track)
+            }
+            if showingCoverProblem, let problemText {
+                ErrorReport(storedText: "Copertina non disponibile\n" + problemText)
+                    .foregroundStyle(ink.primary)
             }
         }
-        .sheet(isPresented: $addingToPlaylist) {
-            AddToPlaylistSheet(track: track)
-        }
+        .padding(.top, 22)
+        .padding(.bottom, 4)
+    }
+
+    private var problemText: String? {
+        let parts = [album.coverError.map { "Cover download failed:\n\($0)" }, coverProblem].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 }

@@ -122,6 +122,8 @@ struct ThemeInspectorView: View {
             }
         }
         .navigationTitle("Theme inspector")
+        // Pushed inside a tab, so it needs the mini player inset itself.
+        .miniPlayerInset()
         .themedScreenBackground()
     }
 }
