@@ -127,13 +127,14 @@ private struct SongRow: View {
     var body: some View {
         let subtitle = [song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
         if let localTrack {
-            // Tapping a search result acquires, never plays: a downloaded track does
-            // nothing here, one not yet on the phone starts its device download.
-            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkProblem, onPlay: {}) {
+            // In the library: the shared track row, so a result already on the phone
+            // plays on tap and one that is not starts its device download.
+            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkProblem) {
                 thumbnail
             }
         } else {
-            // Not in the library: tapping acquires it through the server.
+            // Not in the library: tapping acquires it through the server, and never
+            // plays. No long-press menu: every item acts on a library track.
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
                     Button {

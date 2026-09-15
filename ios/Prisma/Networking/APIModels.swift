@@ -123,6 +123,30 @@ nonisolated struct ExistingServerTrack: Decodable, Sendable {
     let id: String
 }
 
+/// Reply to DELETE /tracks/{id}. Only `status` is read; the rest is decoded so the
+/// raw response stays inspectable, and optional so a detail the backend drops later
+/// cannot fail a deletion that succeeded.
+nonisolated struct TrackDeletionResult: Decodable, Sendable {
+    let trackID: String?
+    /// "deleted" or "already_deleted".
+    let status: String
+    let bytesFreed: Int?
+    let albumID: Int?
+    let albumRemoved: Bool?
+    let albumFolderRemoved: Bool?
+    let unexpectedFiles: [String]?
+
+    nonisolated enum CodingKeys: String, CodingKey {
+        case trackID = "track_id"
+        case status
+        case bytesFreed = "bytes_freed"
+        case albumID = "album_id"
+        case albumRemoved = "album_removed"
+        case albumFolderRemoved = "album_folder_removed"
+        case unexpectedFiles = "unexpected_files"
+    }
+}
+
 /// One row of GET /downloads.
 nonisolated struct ServerJob: Decodable, Sendable {
     let id: Int

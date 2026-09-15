@@ -7,8 +7,6 @@ import SwiftUI
 struct LibraryView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(LibrarySync.self) private var sync
-    @Environment(PlaybackEngine.self) private var playback
-    @Environment(PlayerPresenter.self) private var presenter
     @Environment(\.prismaInk) private var ink
 
     @Query private var albums: [StoredAlbum]
@@ -116,7 +114,7 @@ struct LibraryView: View {
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(StoredTrack.albumOrder(album.tracks)) { track in
-                TrackRow(track: track, onPlay: { play(track) }) {
+                TrackRow(track: track) {
                     EmptyView()
                 }
                 .prismaRow()
@@ -129,7 +127,7 @@ struct LibraryView: View {
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(unlisted) { track in
-                TrackRow(track: track, onPlay: { play(track) }) {
+                TrackRow(track: track) {
                     EmptyView()
                 }
                 .prismaRow()
@@ -143,11 +141,6 @@ struct LibraryView: View {
             .padding(.bottom, 12)
             .prismaRow()
             .listRowSeparator(.hidden)
-    }
-
-    private func play(_ track: StoredTrack) {
-        presenter.sourceName = nil
-        playback.play(track: track)
     }
 
     /// Only what needs attention: a sync running or failed.
@@ -221,7 +214,8 @@ struct EditModeButton: View {
 }
 
 /// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
-/// download or cannot be read says so under the header.
+/// download or cannot be read says so under the header. Long press offers the
+/// album-wide actions of `CollectionMenu`.
 private struct AlbumHeaderRow: View {
     let album: StoredAlbum
 
@@ -250,6 +244,7 @@ private struct AlbumHeaderRow: View {
                 ProblemBlock(problem)
             }
         }
+        .modifier(CollectionMenu(tracks: album.tracks, name: album.title, problemKey: "album-\(album.serverID)"))
         .padding(.top, 22)
         .padding(.bottom, 4)
     }

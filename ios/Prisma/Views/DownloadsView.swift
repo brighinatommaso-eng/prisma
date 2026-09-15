@@ -120,64 +120,21 @@ struct DownloadsView: View {
 }
 
 /// Prototype `.job`: artwork with the state drawn over it, title and artist, and on
-/// the right the percentage, a cancel button or Riprova. A failure reads in full,
-/// in plain language, under the row.
+/// the right the percentage, a cancel button or Riprova. The shared track row, so
+/// tap, long press, swipes and problems are the same as on every other screen.
 private struct DownloadRow: View {
     let track: StoredTrack
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.prismaInk) private var ink
 
-    @State private var addingToPlaylist = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                HStack(spacing: 12) {
-                    artwork
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(track.title ?? "Senza titolo")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(ink.primary)
-                            .lineLimit(1)
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(ink.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .frame(minHeight: 62)
-                .accessibilityElement(children: .combine)
-
-                trailing
-            }
-
-            if let refusal = downloads.refusals[track.serverID] {
-                ProblemBlock(error: refusal)
-            }
-
-            if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
-                ProblemBlock(PlainLanguage.message(for: track.failureCause))
-            }
-        }
-        .contextMenu {
-            TrackMenuItems(track: track, addingToPlaylist: $addingToPlaylist)
-        }
-        .swipeActions(edge: .trailing) {
-            switch track.downloadState {
-            case .queued, .downloading:
-                Button("Annulla", role: .destructive) { downloads.cancel(track) }
-            case .failed, .cancelled:
-                Button("Ignora") { downloads.dismiss(track) }
-            case .downloaded:
-                Button("Rimuovi", role: .destructive) { downloads.removeFile(track) }
-            case .notDownloaded:
-                EmptyView()
-            }
-        }
-        .sheet(isPresented: $addingToPlaylist) {
-            AddToPlaylistSheet(track: track)
+        TrackRow(track: track, subtitle: subtitle, subtitleLineLimit: 2, showsDuration: false) {
+            // 44 pt artwork in the job row's 62 pt height.
+            artwork
+                .padding(.vertical, 9)
+        } trailing: {
+            trailing
         }
     }
 

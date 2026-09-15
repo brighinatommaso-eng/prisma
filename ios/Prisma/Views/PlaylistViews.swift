@@ -233,10 +233,15 @@ struct PlaylistDetailView: View {
             ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                 Group {
                     if let track = entry.track {
-                        TrackRow(track: track, subtitle: track.album?.artist, onPlay: {
-                            presenter.sourceName = playlist.name
-                            store.play(playlist, fromEntryAt: index)
-                        }) {
+                        TrackRow(
+                            track: track,
+                            subtitle: track.album?.artist,
+                            placement: PlaylistPlacement(playlist: playlist, entry: entry),
+                            play: {
+                                presenter.sourceName = playlist.name
+                                store.play(playlist, fromEntryAt: index)
+                            }
+                        ) {
                             Text("\(index + 1)")
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(ink.secondary)
@@ -244,11 +249,6 @@ struct PlaylistDetailView: View {
                         }
                     } else {
                         MissingEntryRow(playlist: playlist, entry: entry)
-                    }
-                }
-                .swipeActions(edge: .trailing) {
-                    Button("Rimuovi", role: .destructive) {
-                        store.remove([entry], from: playlist)
                     }
                 }
                 .prismaRow()
@@ -304,20 +304,26 @@ struct PlaylistDetailView: View {
     }
 
     /// Mosaic, name, "N brani · N min", then Riproduci and Casuale side by side.
+    /// Long press on the mosaic and name offers the playlist-wide actions of
+    /// `CollectionMenu`; the buttons keep their own press.
     private func header(entries: [PlaylistEntry], playable: [Int]) -> some View {
         VStack(spacing: 0) {
-            PlaylistMosaic(playlist: playlist, side: 160, cornerRadius: 20)
-                .shadow(color: .black.opacity(0.6), radius: 23, y: 18)
-                .padding(.top, 20)
-            Text(playlist.name)
-                .font(.title.weight(.heavy))
-                .foregroundStyle(ink.primary)
-                .multilineTextAlignment(.center)
-                .padding(.top, 18)
-            Text(Formatting.trackSummary(entries.compactMap(\.track)))
-                .font(.footnote)
-                .foregroundStyle(ink.secondary)
-                .padding(.top, 5)
+            VStack(spacing: 0) {
+                PlaylistMosaic(playlist: playlist, side: 160, cornerRadius: 20)
+                    .shadow(color: .black.opacity(0.6), radius: 23, y: 18)
+                    .padding(.top, 20)
+                Text(playlist.name)
+                    .font(.title.weight(.heavy))
+                    .foregroundStyle(ink.primary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 18)
+                Text(Formatting.trackSummary(entries.compactMap(\.track)))
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.top, 5)
+            }
+            .frame(maxWidth: .infinity)
+            .modifier(CollectionMenu(tracks: entries.compactMap(\.track), name: playlist.name, problemKey: "playlist-\(playlist.id.uuidString)"))
 
             PlayShufflePair(isEnabled: !playable.isEmpty) {
                 guard let first = playable.first else { return }
@@ -340,7 +346,8 @@ struct PlaylistDetailView: View {
     }
 }
 
-/// An entry whose track has left the library.
+/// An entry whose track has left the library. Not a track row: there is no track
+/// left to act on, only the entry to remove.
 private struct MissingEntryRow: View {
     let playlist: Playlist
     let entry: PlaylistEntry
@@ -364,6 +371,11 @@ private struct MissingEntryRow: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
+        }
+        .swipeActions(edge: .trailing) {
+            Button("Rimuovi", role: .destructive) {
+                store.remove([entry], from: playlist)
+            }
         }
     }
 }
@@ -449,8 +461,6 @@ struct AddToPlaylistSheet: View {
 // MARK: - Favourites filter
 
 struct FavouritesContent: View {
-    @Environment(PlaybackEngine.self) private var playback
-    @Environment(PlayerPresenter.self) private var presenter
     @Environment(\.prismaInk) private var ink
     @Query private var tracks: [StoredTrack]
 
@@ -477,10 +487,7 @@ struct FavouritesContent: View {
         }
 
         ForEach(favourites) { track in
-            TrackRow(track: track, subtitle: track.album?.artist, onPlay: {
-                presenter.sourceName = nil
-                playback.play(track: track)
-            }) {
+            TrackRow(track: track, subtitle: track.album?.artist) {
                 Image(systemName: "heart.fill")
                     .font(.system(size: 15))
                     .foregroundStyle(ink.favourite)

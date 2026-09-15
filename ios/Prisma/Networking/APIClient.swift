@@ -56,6 +56,9 @@ nonisolated struct APIClient: Sendable {
         static let probe: TimeInterval = 6
         /// POST and GET /downloads only touch the jobs table.
         static let jobs: TimeInterval = 20
+        /// DELETE /tracks/{id} removes files on the server; a busy library answers
+        /// 409 straight away rather than waiting.
+        static let deletion: TimeInterval = 30
     }
 
     let address: ServerAddress
@@ -112,6 +115,13 @@ nonisolated struct APIClient: Sendable {
     /// GET /downloads: every server job with its state and progress.
     func downloadJobs() async throws -> APIResponse<[ServerJob]> {
         try await getJSON("/downloads", timeout: Timeout.jobs)
+    }
+
+    /// DELETE /tracks/{id}: deletes the track and its file from the server. The
+    /// local library follows on the next sync, through `deleted_track_ids`.
+    func deleteTrack(trackID: String) async throws -> APIResponse<TrackDeletionResult> {
+        let segment = try ServerAddress.pathSegment(trackID)
+        return try await requestJSON("/tracks/" + segment, method: "DELETE", body: nil, timeout: Timeout.deletion)
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.

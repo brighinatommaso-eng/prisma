@@ -17,6 +17,7 @@ final class AppModel {
         let theme: ThemeEngine
         let playlists: PlaylistStore
         let acquisitions: AcquisitionCoordinator
+        let deletion: TrackDeletion
     }
 
     let settings: AppSettings
@@ -40,7 +41,8 @@ final class AppModel {
             // Created here but idle: it only runs once RootView reports the app is
             // in the foreground, never during a background launch.
             let acquisitions = AcquisitionCoordinator(context: container.mainContext, settings: settings, sync: sync, downloads: downloads)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions)
+            let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
+            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
             playlists.removeOrphanedEntries()
             launchError = nil
             downloads.checkTransfers(reason: "avvio dell'app")

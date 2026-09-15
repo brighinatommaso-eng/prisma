@@ -39,6 +39,7 @@ struct RootView: View {
                     .environment(services.playback)
                     .environment(services.theme)
                     .environment(services.playlists)
+                    .environment(services.deletion)
                     .environment(presenter)
                     .modelContainer(services.container)
                     .preferredColorScheme(colorScheme)
@@ -49,6 +50,7 @@ struct RootView: View {
             .environment(services.theme)
             .environment(services.playlists)
             .environment(services.acquisitions)
+            .environment(services.deletion)
             .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every

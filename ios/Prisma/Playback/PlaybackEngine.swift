@@ -185,6 +185,33 @@ final class PlaybackEngine {
         startQueue(ids, at: startIndex)
     }
 
+    /// Appends a downloaded track to the end of the queue, after anything shuffled.
+    /// With nothing loaded it becomes the queue, paused: adding never starts
+    /// playback by itself.
+    func addToQueue(_ track: StoredTrack) {
+        lastError = nil
+        guard track.downloadState == .downloaded else {
+            lastError = .invalidInput(
+                "“\(track.title ?? track.serverID)” non è scaricato",
+                detail: "Si possono mettere in coda solo i brani salvati sul telefono: scaricalo prima."
+            )
+            return
+        }
+        guard currentIndex != nil, !queue.isEmpty else {
+            albumOrder = [track.serverID]
+            queueSources = [0]
+            queue = [track.serverID]
+            load(index: 0, position: 0, autoplay: false)
+            return
+        }
+        albumOrder.append(track.serverID)
+        queueSources.append(albumOrder.count - 1)
+        queue.append(track.serverID)
+        preloadNext()
+        updateNowPlaying()
+        persist()
+    }
+
     /// Replaces the queue with `ids` and starts playing at `start`. With shuffle on,
     /// the starting track plays first and the rest follow in random order.
     private func startQueue(_ ids: [String], at start: Int) {
