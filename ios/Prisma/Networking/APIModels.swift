@@ -102,3 +102,58 @@ nonisolated struct LibraryTrack: Decodable, Sendable, Identifiable {
         case updatedAt = "updated_at"
     }
 }
+
+/// Reply to POST /downloads: 202 with a queued job, or 200 with the track the
+/// server already has.
+nonisolated struct DownloadRequestResult: Decodable, Sendable {
+    let status: String
+    let jobID: Int?
+    let track: ExistingServerTrack?
+
+    nonisolated enum CodingKeys: String, CodingKey {
+        case status
+        case jobID = "job_id"
+        case track
+    }
+}
+
+/// Only the id is read from the stored track the server returns; the track itself
+/// arrives through /library.
+nonisolated struct ExistingServerTrack: Decodable, Sendable {
+    let id: String
+}
+
+/// One row of GET /downloads.
+nonisolated struct ServerJob: Decodable, Sendable {
+    let id: Int
+    /// The video id the job downloads.
+    let trackID: String?
+    let state: String
+    let progress: Double
+    let error: String?
+    let createdAt: Int
+    let updatedAt: Int?
+
+    nonisolated enum CodingKeys: String, CodingKey {
+        case id
+        case trackID = "track_id"
+        case state
+        case progress
+        case error
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+
+    /// backend/app/db.py job states.
+    nonisolated enum State: String, Sendable {
+        case queued
+        case running
+        case done
+        case failed
+        case cancelled
+    }
+
+    var knownState: State? {
+        State(rawValue: state)
+    }
+}

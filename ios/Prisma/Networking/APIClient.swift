@@ -54,6 +54,8 @@ nonisolated struct APIClient: Sendable {
         /// Pre-flight before a background download: long enough for a Tailscale
         /// round trip, short enough that a wrong address fails while you watch.
         static let probe: TimeInterval = 6
+        /// POST and GET /downloads only touch the jobs table.
+        static let jobs: TimeInterval = 20
     }
 
     let address: ServerAddress
@@ -94,6 +96,22 @@ nonisolated struct APIClient: Sendable {
             query.append((name: "since", value: String(since)))
         }
         return try await getJSON("/library", query: query, timeout: Timeout.library)
+    }
+
+    /// POST /downloads: asks the server to fetch a track from YouTube Music.
+    func requestDownload(videoID: String) async throws -> APIResponse<DownloadRequestResult> {
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(["video_id": videoID])
+        } catch {
+            throw APIError.unexpected(error, url: nil)
+        }
+        return try await requestJSON("/downloads", method: "POST", body: body, timeout: Timeout.jobs)
+    }
+
+    /// GET /downloads: every server job with its state and progress.
+    func downloadJobs() async throws -> APIResponse<[ServerJob]> {
+        try await getJSON("/downloads", timeout: Timeout.jobs)
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.
@@ -205,8 +223,18 @@ nonisolated struct APIClient: Sendable {
         query: [(name: String, value: String)] = [],
         timeout: TimeInterval
     ) async throws -> APIResponse<Value> {
+        try await requestJSON(path, query: query, method: "GET", body: nil, timeout: timeout)
+    }
+
+    private func requestJSON<Value: Decodable & Sendable>(
+        _ path: String,
+        query: [(name: String, value: String)] = [],
+        method: String,
+        body: Data?,
+        timeout: TimeInterval
+    ) async throws -> APIResponse<Value> {
         let url = try address.endpoint(path, query: query)
-        let fetched = try await fetch(url, accept: "application/json", timeout: timeout)
+        let fetched = try await fetch(url, accept: "application/json", timeout: timeout, method: method, body: body)
         let value: Value
         do {
             value = try JSONDecoder().decode(Value.self, from: fetched.data)
@@ -227,7 +255,9 @@ nonisolated struct APIClient: Sendable {
         _ url: URL,
         accept: String,
         timeout: TimeInterval,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        method: String = "GET",
+        body: Data? = nil
     ) async throws -> Fetched {
         // A conditional request must reach the server, not be answered from the
         // in-memory cache, so its 304 comes back to the caller.
@@ -237,6 +267,11 @@ nonisolated struct APIClient: Sendable {
             cachePolicy: isConditional ? .reloadIgnoringLocalCacheData : .useProtocolCachePolicy,
             timeoutInterval: timeout
         )
+        request.httpMethod = method
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)

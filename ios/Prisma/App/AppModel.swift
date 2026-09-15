@@ -16,6 +16,7 @@ final class AppModel {
         let playback: PlaybackEngine
         let theme: ThemeEngine
         let playlists: PlaylistStore
+        let acquisitions: AcquisitionCoordinator
     }
 
     let settings: AppSettings
@@ -27,7 +28,7 @@ final class AppModel {
         let settings = AppSettings()
         self.settings = settings
         do {
-            let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self, Playlist.self, PlaylistEntry.self)
+            let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self, Playlist.self, PlaylistEntry.self, PendingAcquisition.self)
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
             settings.onAddressChange = { [downloads] previous, new in
@@ -36,7 +37,10 @@ final class AppModel {
             let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists)
+            // Created here but idle: it only runs once RootView reports the app is
+            // in the foreground, never during a background launch.
+            let acquisitions = AcquisitionCoordinator(context: container.mainContext, settings: settings, sync: sync, downloads: downloads)
+            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions)
             playlists.removeOrphanedEntries()
             launchError = nil
             downloads.checkTransfers(reason: "app launch")

@@ -3,8 +3,14 @@ import SwiftData
 import SwiftUI
 
 /// The download queue, rendered from the local store. No network call.
+///
+/// One list from the tap in Search to a playable track: acquisitions still in the
+/// server phase come first in "In corso", followed by device downloads, and each
+/// row says which phase it is in.
 struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
+    @Environment(AcquisitionCoordinator.self) private var acquisitionCoordinator
+    @Query(sort: \PendingAcquisition.createdAt) private var acquisitions: [PendingAcquisition]
     @Environment(\.prismaInk) private var ink
 
     @Query private var tracks: [StoredTrack]
@@ -14,10 +20,16 @@ struct DownloadsView: View {
         let failed = items(in: [.failed])
         let cancelled = items(in: [.cancelled])
         let downloaded = items(in: [.downloaded])
+        let acquiring = acquisitions.filter { $0.isActive }
+        let acquisitionsFailed = acquisitions.filter { !$0.isActive }
 
         List {
-            if inProgress.isEmpty && failed.isEmpty && cancelled.isEmpty && downloaded.isEmpty {
-                Text("Nessun download. Tocca la freccia accanto a un brano in Libreria.")
+            AcquisitionCoordinatorError()
+                .prismaRow()
+                .listRowSeparator(.hidden)
+
+            if acquisitions.isEmpty && inProgress.isEmpty && failed.isEmpty && cancelled.isEmpty && downloaded.isEmpty {
+                Text("Nessun download. Tocca un brano in Cerca, o la freccia accanto a un brano in Libreria.")
                     .font(.subheadline)
                     .foregroundStyle(ink.secondary)
                     .padding(.vertical, 16)
@@ -25,8 +37,8 @@ struct DownloadsView: View {
                     .listRowSeparator(.hidden)
             }
 
-            group("In corso", inProgress)
-            group("Non riuscito", failed)
+            group("In corso", inProgress, acquisitions: acquiring)
+            group("Non riuscito", failed, acquisitions: acquisitionsFailed)
             group("Annullati", cancelled)
             group("Scaricati", downloaded)
 
@@ -42,11 +54,15 @@ struct DownloadsView: View {
     }
 
     @ViewBuilder
-    private func group(_ title: String, _ matching: [StoredTrack]) -> some View {
-        if !matching.isEmpty {
+    private func group(_ title: String, _ matching: [StoredTrack], acquisitions: [PendingAcquisition] = []) -> some View {
+        if !matching.isEmpty || !acquisitions.isEmpty {
             SectionLabel(title)
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
+            ForEach(acquisitions) { record in
+                AcquisitionRow(record: record)
+                    .prismaRow()
+            }
             ForEach(matching) { track in
                 DownloadRow(track: track)
                     .prismaRow()
@@ -58,6 +74,21 @@ struct DownloadsView: View {
     @ViewBuilder
     private var transferDetails: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text(acquisitionCoordinator.isRunning
+                 ? "Server job polling: running (every \(Int(AcquisitionCoordinator.serverPollInterval)) s while the server works)."
+                 : "Server job polling: stopped (nothing pending, or the app is in the background).")
+            if let lastPoll = acquisitionCoordinator.lastPollAt {
+                Text("Last GET /downloads at \(Formatting.time(lastPoll)).")
+            }
+            if let problem = acquisitionCoordinator.pollProblem {
+                Text(problem)
+                    .textSelection(.enabled)
+            }
+            ForEach(acquisitions) { record in
+                Text(Self.acquisitionLine(record))
+                    .font(.caption2.monospaced())
+                    .textSelection(.enabled)
+            }
             if downloads.isChecking {
                 HStack(spacing: 12) {
                     ProgressView()
@@ -95,6 +126,21 @@ struct DownloadsView: View {
                     .frame(minHeight: 44)
             }
         }
+    }
+
+    /// One acquisition's raw state, for the technical details.
+    private static func acquisitionLine(_ record: PendingAcquisition) -> String {
+        var parts = ["\(record.videoID): \(record.stageRaw)"]
+        if let jobID = record.jobID {
+            parts.append("job \(jobID)")
+        }
+        if let state = record.serverJobState {
+            parts.append("server \(state)")
+        }
+        if let error = record.serverError {
+            parts.append("server error: \(error)")
+        }
+        return parts.joined(separator: ", ")
     }
 
     private func items(in states: Set<DownloadState>) -> [StoredTrack] {
@@ -139,7 +185,7 @@ private struct DownloadRow: View {
                             Text(subtitle)
                                 .font(.caption)
                                 .foregroundStyle(ink.secondary)
-                                .lineLimit(1)
+                                .lineLimit(2)
                         }
                         Spacer(minLength: 0)
                     }
@@ -191,11 +237,17 @@ private struct DownloadRow: View {
         }
     }
 
+    /// Device-phase rows say so, to read apart from acquisitions still on the server.
     private var subtitle: String {
         if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
-            return PlainLanguage.summary(for: track.failureCause)
+            return "Download sul telefono non riuscito: " + PlainLanguage.summary(for: track.failureCause).lowercasedFirst
         }
-        return track.album?.artist ?? ""
+        switch track.downloadState {
+        case .queued, .downloading:
+            return ["Sul telefono", track.album?.artist].compactMap { $0 }.joined(separator: " · ")
+        default:
+            return track.album?.artist ?? ""
+        }
     }
 
     /// Prototype `.jthumb`: a ring over the artwork while downloading, a clock while

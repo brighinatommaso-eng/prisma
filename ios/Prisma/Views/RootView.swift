@@ -48,17 +48,25 @@ struct RootView: View {
             .environment(services.playback)
             .environment(services.theme)
             .environment(services.playlists)
+            .environment(services.acquisitions)
             .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every
             // glass surface through the colour scheme, not through repainted materials.
             .preferredColorScheme(colorScheme)
+            // onChange does not fire for the scene phase at launch: continue any
+            // acquisition left unfinished by the last run.
+            .task {
+                services.acquisitions.resume()
+            }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
                     services.downloads.checkTransfers(reason: "app opened")
+                    services.acquisitions.resume()
                 case .background:
                     services.playback.persist()
+                    services.acquisitions.pause()
                 default:
                     break
                 }

@@ -9,6 +9,8 @@ struct SearchView: View {
     /// Favourites, playlists and downloads refer to tracks in the local library, so
     /// a result offers them only once its video id is in the library.
     @Query private var libraryTracks: [StoredTrack]
+    /// Results already being acquired, so a second tap cannot queue them again.
+    @Query private var acquisitions: [PendingAcquisition]
 
     var body: some View {
         List {
@@ -19,6 +21,10 @@ struct SearchView: View {
             .padding(.bottom, 10)
             .prismaRow()
             .listRowSeparator(.hidden)
+
+            AcquisitionCoordinatorError()
+                .prismaRow()
+                .listRowSeparator(.hidden)
 
             switch model.state {
             case .idle:
@@ -42,13 +48,14 @@ struct SearchView: View {
             case .loaded(let results):
                 let songs = results.response.value
                 let localTracks = Dictionary(libraryTracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+                let pending = Dictionary(acquisitions.map { ($0.videoID, $0) }, uniquingKeysWith: { first, _ in first })
                 if songs.isEmpty {
                     message("Nessun risultato per “\(results.query)”.")
                 } else {
                     // Indexed rather than keyed by video_id: nothing guarantees
                     // the results contain no duplicates.
                     ForEach(Array(songs.enumerated()), id: \.offset) { _, song in
-                        SongRow(song: song, client: results.client, localTrack: localTracks[song.videoID])
+                        SongRow(song: song, client: results.client, localTrack: localTracks[song.videoID], pending: pending[song.videoID])
                             .prismaRow()
                     }
                 }
@@ -139,50 +146,61 @@ private struct SongRow: View {
     let song: SongResult
     let client: APIClient
     let localTrack: StoredTrack?
+    let pending: PendingAcquisition?
 
-    @Environment(PlaybackEngine.self) private var playback
-    @Environment(PlayerPresenter.self) private var presenter
+    @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
     @State private var artworkError: APIError?
 
     var body: some View {
         let subtitle = [song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
         if let localTrack {
-            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkError, onPlay: {
-                presenter.sourceName = nil
-                playback.play(track: localTrack)
-            }) {
+            // Tapping a search result acquires, never plays: a downloaded track does
+            // nothing here, one not yet on the phone starts its device download.
+            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkError, onPlay: {}) {
                 thumbnail
             }
         } else {
+            // Not in the library: tapping acquires it through the server.
             VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 13) {
-                    thumbnail
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(song.title ?? "Senza titolo")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(ink.primary)
-                            .lineLimit(1)
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(ink.secondary)
-                            .lineLimit(1)
+                HStack(spacing: 10) {
+                    Button {
+                        acquisitions.acquire(song)
+                    } label: {
+                        HStack(spacing: 13) {
+                            thumbnail
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(song.title ?? "Senza titolo")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(ink.primary)
+                                    .lineLimit(1)
+                                Text(pending.map { AcquisitionText.phase(of: $0) } ?? subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(ink.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
+                            Text(Formatting.trackTime(song.durationS))
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(ink.secondary)
+                        }
+                        .frame(minHeight: 62)
+                        .contentShape(Rectangle())
                     }
-                    Spacer(minLength: 0)
-                    Text(Formatting.trackTime(song.durationS))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(ink.secondary)
-                        .padding(.trailing, 10)
+                    .buttonStyle(.plain)
+                    // Not disabled while pending, which would dim the row; acquire()
+                    // ignores a track already being acquired.
+                    .accessibilityHint(pending == nil ? "Scarica il brano sul server e poi sul telefono" : "")
+
+                    AcquisitionStateIcon(song: song, record: pending)
+                        .padding(.trailing, -10)
                 }
-                .frame(minHeight: 62)
+                if let pending, pending.stage == .failed {
+                    AcquisitionProblem(record: pending)
+                }
                 if let artworkError {
                     ProblemBlock(error: artworkError)
                 }
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityHint("Non ancora nella libreria: non si può scaricare, aggiungere ai preferiti o a una playlist finché il server non lo ha e la libreria non è sincronizzata.")
-            .contextMenu {
-                Text("Non ancora nella libreria. Quando il server lo avrà, sincronizza la libreria per scaricarlo o aggiungerlo a una playlist.")
             }
         }
     }
