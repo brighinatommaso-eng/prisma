@@ -86,10 +86,11 @@
 				};
 			};
 			buildConfigurationList = B8DA58791C16C12860395FE1 /* Build configuration list for PBXProject "Prisma" */;
-			developmentRegion = en;
+			developmentRegion = it;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				en,
+				it,
 				Base,
 			);
 			mainGroup = 5B214E4C84256D3D1E6BB0A5;
