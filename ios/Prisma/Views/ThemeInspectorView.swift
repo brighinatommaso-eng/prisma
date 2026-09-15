@@ -11,29 +11,29 @@ struct ThemeInspectorView: View {
         let resolved = theme.resolved
         List {
             Section {
-                Text("Development tool. Temporary: it exists only to check the theme engine on this iPhone and will be removed.")
+                Text("Strumento di sviluppo, temporaneo: serve solo a controllare il motore dei temi su questo telefono e verrà rimosso.")
                     .font(.headline)
             }
 
             Section {
-                FieldRow(label: "Mode", value: resolved.mode.label)
-                FieldRow(label: "Palette source", value: resolved.source)
+                FieldRow(label: "Modalità", value: resolved.mode.label)
+                FieldRow(label: "Origine della palette", value: resolved.source)
                 if let problem = resolved.problem {
-                    FieldRow(label: "Problem", value: problem)
+                    FieldRow(label: "Problema", value: problem)
                 }
                 if let settingsProblem = theme.settingsProblem {
-                    FieldRow(label: "Saved settings problem", value: settingsProblem)
+                    FieldRow(label: "Problema nelle impostazioni salvate", value: settingsProblem)
                 }
                 if theme.testPalette != nil {
-                    Button("Stop test palette (back to the playing track)") {
+                    Button("Ferma la palette di prova (torna al brano in riproduzione)") {
                         theme.clearTestPalette()
                     }
                 }
-                FieldRow(label: "Background", value: resolved.surface.background.hex)
-                FieldRow(label: "Colour scheme (glass polarity)", value: resolved.surface.colorScheme == .light ? "light" : "dark")
-                FieldRow(label: "Aura", value: resolved.surface.showsAura ? "on" : "off (flat theme)")
+                FieldRow(label: "Sfondo", value: resolved.surface.background.hex)
+                FieldRow(label: "Schema colori (polarità del vetro)", value: resolved.surface.colorScheme == .light ? "chiaro" : "scuro")
+                FieldRow(label: "Aura", value: resolved.surface.showsAura ? "attiva" : "assente (tema piatto)")
             } header: {
-                Text("Active theme").textCase(nil)
+                Text("Tema attivo").textCase(nil)
             }
 
             Section {
@@ -46,23 +46,23 @@ struct ThemeInspectorView: View {
                     )
                 }
             } header: {
-                Text(resolved.surface.showsAura ? "Active colours" : "Colours (not drawn in this mode)").textCase(nil)
+                Text(resolved.surface.showsAura ? "Colori attivi" : "Colori (non disegnati in questa modalità)").textCase(nil)
             }
 
             Section {
-                FieldRow(label: "Mean relative luminance", value: String(format: "%.3f", resolved.luminance))
+                FieldRow(label: "Luminanza relativa media", value: String(format: "%.3f", resolved.luminance))
                 if let base = resolved.surface.scrimBase,
                    let top = resolved.surface.scrimTop,
                    let bottom = resolved.surface.scrimBottom {
-                    FieldRow(label: "Scrim base (computed)", value: String(format: "%.2f", base))
-                    FieldRow(label: "Scrim as drawn", value: String(format: "top %.2f, bottom %.2f (ceiling %.2f)", top, bottom, ThemeResolver.scrimCeiling))
-                    CompositeRow(label: "Brightest colour under the scrim, top", source: resolved.palette.brightest, opacity: top)
-                    CompositeRow(label: "Brightest colour under the scrim, bottom", source: resolved.palette.brightest, opacity: bottom)
+                    FieldRow(label: "Base del velo (calcolata)", value: String(format: "%.2f", base))
+                    FieldRow(label: "Velo disegnato", value: String(format: "in alto %.2f, in basso %.2f (massimo %.2f)", top, bottom, ThemeResolver.scrimCeiling))
+                    CompositeRow(label: "Colore più chiaro sotto il velo, in alto", source: resolved.palette.brightest, opacity: top)
+                    CompositeRow(label: "Colore più chiaro sotto il velo, in basso", source: resolved.palette.brightest, opacity: bottom)
                 } else {
-                    FieldRow(label: "Scrim", value: "none: no scrim in \(resolved.mode.label)")
+                    FieldRow(label: "Velo", value: "nessuno in modalità \(resolved.mode.label)")
                 }
                 Text(String(
-                    format: "Base is %.2f at luminance ≤ %.2f and %.2f at ≥ %.2f, linear in between. Drawn from base − %.2f at the top to base + %.2f at the bottom, never above %.2f. Colours from the server are clamped to HLS lightness %.2f, then saturation moves %.0f%% towards full; presets are used as they are.",
+                    format: "La base vale %.2f con luminanza ≤ %.2f e %.2f con luminanza ≥ %.2f, lineare nel mezzo. Il velo va da base − %.2f in alto a base + %.2f in basso, mai oltre %.2f. I colori dal server sono limitati a luminosità HLS %.2f, poi la saturazione sale del %.0f%% verso il massimo; i preset si usano così come sono.",
                     ThemeResolver.scrimMinimum, ThemeResolver.luminanceAtMinimum,
                     ThemeResolver.scrimCeiling, ThemeResolver.luminanceAtMaximum,
                     ThemeResolver.scrimSpread, ThemeResolver.scrimSpread, ThemeResolver.scrimCeiling,
@@ -70,14 +70,14 @@ struct ThemeInspectorView: View {
                 ))
                 .font(.caption)
             } header: {
-                Text("Contrast").textCase(nil)
+                Text("Contrasto").textCase(nil)
             }
 
             Section {
-                FieldRow(label: "Reduce Transparency", value: reduceTransparency ? "on: glass surfaces are opaque" : "off")
-                FieldRow(label: "Reduce Motion", value: reduceMotion ? "on: palette changes are instant" : "off")
+                FieldRow(label: "Riduci trasparenza", value: reduceTransparency ? "attivo: le superfici di vetro sono opache" : "disattivo")
+                FieldRow(label: "Riduci movimento", value: reduceMotion ? "attivo: i cambi di palette sono istantanei" : "disattivo")
             } header: {
-                Text("Accessibility").textCase(nil)
+                Text("Accessibilità").textCase(nil)
             }
 
             Section {
@@ -89,7 +89,7 @@ struct ThemeInspectorView: View {
                     }
                 }
             } header: {
-                Text("Mode").textCase(nil)
+                Text("Modalità").textCase(nil)
             }
 
             Section {
@@ -102,9 +102,9 @@ struct ThemeInspectorView: View {
                     }
                 }
             } header: {
-                Text("Presets (spec 5.3)").textCase(nil)
+                Text("Preset (specifica 5.3)").textCase(nil)
             } footer: {
-                Text("Tapping a preset also switches to Preset mode.")
+                Text("Toccare un preset attiva anche la modalità Preset.")
             }
 
             Section {
@@ -116,12 +116,12 @@ struct ThemeInspectorView: View {
                     }
                 }
             } header: {
-                Text("Synthetic test palettes").textCase(nil)
+                Text("Palette di prova").textCase(nil)
             } footer: {
-                Text("Applied as if the server had sent them for the playing album: Adaptive mode, lightness clamp included. Not saved; cleared on restart.")
+                Text("Applicate come se il server le avesse inviate per l'album in riproduzione: modalità Adattivo, limite di luminosità compreso. Non vengono salvate e spariscono al riavvio.")
             }
         }
-        .navigationTitle("Theme inspector")
+        .navigationTitle("Ispettore del tema")
         // Pushed inside a tab, so it needs the mini player inset itself.
         .miniPlayerInset()
         .themedScreenBackground()
@@ -150,10 +150,10 @@ private struct CompositeRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(label)
                     .font(.caption)
-                Text(String(format: "%@ over %@ at %.2f → %@", source.hex, ThemeResolver.scrimColor.hex, opacity, result.hex))
+                Text(String(format: "%@ sotto %@ al %.2f → %@", source.hex, ThemeResolver.scrimColor.hex, opacity, result.hex))
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
-                Text(String(format: "white text contrast %.1f:1", ThemeResolver.whiteTextContrast(on: result)))
+                Text(String(format: "contrasto del testo bianco %.1f:1", ThemeResolver.whiteTextContrast(on: result)))
                     .font(.caption.monospaced())
             }
         }
@@ -176,10 +176,10 @@ private struct SwatchRow: View {
                 Text("c\(index + 1)  \(color.hex)")
                     .font(.body.monospaced())
                     .textSelection(.enabled)
-                Text(String(format: "luminance %.3f, lightness %.2f", color.relativeLuminance, color.lightness))
+                Text(String(format: "luminanza %.3f, luminosità %.2f", color.relativeLuminance, color.lightness))
                     .font(.caption.monospaced())
                 if let incoming, let clamped, incoming != color {
-                    Text("received \(incoming.hex) → clamped \(clamped.hex) → boosted \(color.hex)")
+                    Text("ricevuto \(incoming.hex) → limitato \(clamped.hex) → saturato \(color.hex)")
                         .font(.caption.monospaced())
                 }
             }

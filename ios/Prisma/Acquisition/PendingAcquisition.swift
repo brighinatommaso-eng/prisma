@@ -88,7 +88,7 @@ final class PendingAcquisition {
     var failureRaw: String?
     /// The plain-language message, composed when the failure happened.
     var failureMessage: String?
-    /// Full error text, for "Mostra dettagli tecnici".
+    /// Full error text, kept with the record; the interface shows `failureMessage`.
     var errorText: String?
 
     init(videoID: String, title: String?, artist: String?, album: String?, durationS: Int?, artworkURL: String?) {

@@ -5,10 +5,14 @@ import SwiftUI
 /// Words for where an acquisition is. Server and device phases say which they are,
 /// so one row reads continuously from the tap in Search to the device download.
 enum AcquisitionText {
-    static func phase(of record: PendingAcquisition) -> String {
+    /// `pollFailures`: failed polls in a row, so a row waiting on the server says the
+    /// server is not answering while the coordinator retries.
+    static func phase(of record: PendingAcquisition, pollFailures: Int = 0) -> String {
         switch record.stage {
         case .requesting:
             return "Sul server · invio della richiesta…"
+        case .onServer where pollFailures > 0:
+            return "Sul server · il server non risponde, nuovo tentativo…"
         case .onServer:
             switch record.serverJobState.flatMap({ ServerJob.State(rawValue: $0) }) {
             case .queued: return "Sul server · in coda"
@@ -87,18 +91,17 @@ struct AcquisitionStateIcon: View {
 }
 
 /// A failed acquisition: what failed and what to check, Riprova and Rimuovi, and
-/// the full error behind "Mostra dettagli tecnici".
+/// nothing else: the message carries the cause.
 struct AcquisitionProblem: View {
     let record: PendingAcquisition
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
-    @State private var expanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Label {
-                Text(record.failureMessage ?? "Acquisizione non riuscita. Tocca Riprova.")
+                Text(record.failureMessage ?? "L'acquisizione non è riuscita per un errore imprevisto: tocca Riprova; se si ripete, riavvia l'app.")
                     .fixedSize(horizontal: false, vertical: true)
             } icon: {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -112,13 +115,6 @@ struct AcquisitionProblem: View {
                 link("Riprova") { acquisitions.retry(videoID: record.videoID) }
                 link("Rimuovi") { acquisitions.remove(videoID: record.videoID) }
                 Spacer(minLength: 0)
-            }
-
-            TechnicalDetailsToggle(expanded: $expanded)
-            if expanded {
-                ErrorReport(storedText: record.errorText ?? "No error text was recorded for this failure.")
-                    .foregroundStyle(ink.primary)
-                    .padding(.bottom, 8)
             }
         }
     }
@@ -154,6 +150,7 @@ struct AcquisitionCoordinatorError: View {
 struct AcquisitionRow: View {
     let record: PendingAcquisition
 
+    @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(AppSettings.self) private var settings
     @Environment(\.prismaInk) private var ink
     @State private var artworkError: APIError?
@@ -167,7 +164,7 @@ struct AcquisitionRow: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(ink.primary)
                         .lineLimit(1)
-                    Text(AcquisitionText.phase(of: record))
+                    Text(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))
                         .font(.caption)
                         .foregroundStyle(ink.secondary)
                         .lineLimit(1)

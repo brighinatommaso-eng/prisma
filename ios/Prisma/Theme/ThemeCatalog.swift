@@ -135,12 +135,12 @@ nonisolated struct AuraPalette: Equatable, Sendable {
     /// Exactly four "#rrggbb" values, or a problem saying what is wrong.
     static func parse(_ hexes: [String]) -> Result<AuraPalette, Problem> {
         guard hexes.count == 4 else {
-            return .failure(Problem(message: "Expected 4 colours, got \(hexes.count): \(hexes)"))
+            return .failure(Problem(message: "servono 4 colori, ne sono arrivati \(hexes.count)"))
         }
         var colors: [RGBColor] = []
         for hex in hexes {
             guard let color = RGBColor(hex: hex) else {
-                return .failure(Problem(message: "\"\(hex)\" is not a #rrggbb colour (in \(hexes))"))
+                return .failure(Problem(message: "“\(hex)” non è un colore nel formato #rrggbb"))
             }
             colors.append(color)
         }
@@ -223,16 +223,16 @@ nonisolated enum ThemeCatalog {
     /// Synthetic palettes for the development inspector. They go through the same
     /// path as a palette from the server, lightness clamp included.
     static let testPalettes: [NamedPalette] = [
-        NamedPalette(id: "test-white", name: "Near-white", hexes: ["#ffffff", "#fafafa", "#f4f1ea", "#eef2f7"],
-                     purpose: "A white cover. The clamp must pull it down and the scrim must rise to its ceiling."),
-        NamedPalette(id: "test-black", name: "Near-black", hexes: ["#000000", "#050507", "#0b0b0f", "#121212"],
-                     purpose: "A black cover. The scrim should stay at its floor."),
-        NamedPalette(id: "test-fluo", name: "Fluorescent", hexes: ["#39ff14", "#ff00ff", "#00ffff", "#ffff00"],
-                     purpose: "Saturated neon. Lightness is only 0.5, so the clamp leaves it alone; the scrim must still rise."),
-        NamedPalette(id: "test-amber", name: "Pale amber", hexes: ["#fde68a", "#fcd34d", "#fef3c7", "#fbbf24"],
-                     purpose: "The spec's example: white text on light amber."),
-        NamedPalette(id: "test-invalid", name: "Invalid data", hexes: ["#zzzzzz", "#123"],
-                     purpose: "Malformed server data. Must fall back to Prisma and show the problem, not crash."),
+        NamedPalette(id: "test-white", name: "Quasi bianca", hexes: ["#ffffff", "#fafafa", "#f4f1ea", "#eef2f7"],
+                     purpose: "Una copertina bianca: il limite di luminosità deve abbassarla e il velo deve salire al massimo."),
+        NamedPalette(id: "test-black", name: "Quasi nera", hexes: ["#000000", "#050507", "#0b0b0f", "#121212"],
+                     purpose: "Una copertina nera: il velo deve restare al minimo."),
+        NamedPalette(id: "test-fluo", name: "Fluorescente", hexes: ["#39ff14", "#ff00ff", "#00ffff", "#ffff00"],
+                     purpose: "Neon saturo: la luminosità è solo 0,5, quindi il limite non interviene, ma il velo deve comunque salire."),
+        NamedPalette(id: "test-amber", name: "Ambra chiara", hexes: ["#fde68a", "#fcd34d", "#fef3c7", "#fbbf24"],
+                     purpose: "L'esempio della specifica: testo bianco su ambra chiara."),
+        NamedPalette(id: "test-invalid", name: "Dati non validi", hexes: ["#zzzzzz", "#123"],
+                     purpose: "Dati del server malformati: deve tornare a Prisma e mostrare il problema, senza bloccarsi."),
     ]
 
     private static func preset(_ id: String, _ name: String, _ c1: String, _ c2: String, _ c3: String, _ c4: String) -> NamedPalette {

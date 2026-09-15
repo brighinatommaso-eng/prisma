@@ -277,7 +277,7 @@ final class LibrarySync {
         do {
             albums = try context.fetch(FetchDescriptor<StoredAlbum>())
         } catch {
-            downloads.notice("Covers were not checked: the local albums could not be read. \(error.localizedDescription)")
+            downloads.notice("Le copertine non sono state controllate perché gli album sul telefono non si sono potuti leggere: verranno ricontrollate alla prossima sincronizzazione.")
             return (0, 0, 0)
         }
 

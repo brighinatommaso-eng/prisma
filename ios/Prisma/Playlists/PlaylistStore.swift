@@ -37,14 +37,15 @@ final class PlaylistStore {
     func createPlaylist(named rawName: String) -> Playlist? {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            lastError = .invalidInput("The playlist needs a name", detail: "Type a name, then create the playlist.")
+            lastError = .invalidInput("La playlist ha bisogno di un nome", detail: "Scrivi un nome, poi crea la playlist.")
             return nil
         }
         let next: Int
         do {
             next = (try context.fetch(FetchDescriptor<Playlist>()).map(\.sortPosition).max() ?? -1) + 1
         } catch {
-            lastError = .storage("Could not read the existing playlists", location: nil, error: error)
+            lastError = .storage("Could not read the existing playlists", location: nil, error: error,
+                                 message: "Impossibile leggere le playlist sul telefono, quindi quella nuova non è stata creata: riavvia l'app e riprova.")
             return nil
         }
         let playlist = Playlist(name: name, sortPosition: next)
@@ -56,7 +57,7 @@ final class PlaylistStore {
     func rename(_ playlist: Playlist, to rawName: String) {
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
-            lastError = .invalidInput("The playlist needs a name", detail: "An empty name was not saved; the playlist keeps “\(playlist.name)”.")
+            lastError = .invalidInput("La playlist ha bisogno di un nome", detail: "Un nome vuoto non viene salvato: la playlist resta “\(playlist.name)”.")
             return
         }
         playlist.name = name
@@ -90,7 +91,7 @@ final class PlaylistStore {
         context.insert(entry)
         playlist.updatedAt = Date()
         if save("adding “\(track.title ?? track.serverID)” to “\(playlist.name)”") {
-            notice = "Added “\(track.title ?? track.serverID)” to “\(playlist.name)”."
+            notice = "“\(track.title ?? track.serverID)” aggiunto a “\(playlist.name)”."
         }
     }
 
@@ -126,7 +127,8 @@ final class PlaylistStore {
         do {
             orphans = try context.fetch(FetchDescriptor<PlaylistEntry>()).filter { $0.track == nil || $0.playlist == nil }
         } catch {
-            lastError = .storage("Could not check playlists for removed tracks", location: nil, error: error)
+            lastError = .storage("Could not check playlists for removed tracks", location: nil, error: error,
+                                 message: "Impossibile controllare le playlist per i brani rimossi dalla libreria: riavvia l'app; se si ripete, controlla lo spazio libero.")
             return
         }
         guard !orphans.isEmpty else { return }
@@ -135,8 +137,10 @@ final class PlaylistStore {
             context.delete(orphan)
         }
         if save("removing entries for tracks no longer in the library") {
-            notice = "Removed \(orphans.count) playlist entr\(orphans.count == 1 ? "y" : "ies") whose track is no longer in the library"
-                + (affected.isEmpty ? "." : " (from \(affected.sorted().joined(separator: ", "))).")
+            notice = (orphans.count == 1
+                      ? "Rimosso 1 brano che non è più in libreria"
+                      : "Rimossi \(orphans.count) brani che non sono più in libreria")
+                + (affected.isEmpty ? "." : " dalle playlist \(affected.sorted().joined(separator: ", ")).")
         }
     }
 
@@ -160,11 +164,11 @@ final class PlaylistStore {
             }
         }
         if started == 0 && busy == 0 {
-            notice = "Every track in “\(playlist.name)” is already downloaded."
+            notice = "Tutti i brani di “\(playlist.name)” sono già scaricati."
         } else {
-            notice = "Requested \(started) download\(started == 1 ? "" : "s")"
-                + (busy > 0 ? "; \(busy) already in progress" : "")
-                + ". Each track's row shows its progress or why it could not start."
+            notice = (started == 1 ? "Avviato 1 download" : "Avviati \(started) download")
+                + (busy > 0 ? ", \(busy) erano già in corso" : "")
+                + ". La riga di ogni brano mostra l'avanzamento o perché non è partito."
         }
     }
 
@@ -172,7 +176,7 @@ final class PlaylistStore {
     func play(_ playlist: Playlist, fromEntryAt index: Int) {
         let entries = Self.orderedEntries(of: playlist)
         guard entries.indices.contains(index), entries[index].track != nil else {
-            lastError = .invalidInput("Could not play this entry", detail: "Its track is no longer in the library.")
+            lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
             return
         }
         let tracks = entries.compactMap(\.track)
@@ -203,7 +207,8 @@ final class PlaylistStore {
             try context.save()
             return true
         } catch {
-            lastError = .storage("Saving failed while \(activity)", location: nil, error: error)
+            lastError = .storage("Saving failed while \(activity)", location: nil, error: error,
+                                 message: "Il salvataggio sul telefono non è riuscito, quindi l'ultima modifica alle playlist o ai preferiti potrebbe non essere registrata: controlla lo spazio libero e riprova.")
             return false
         }
     }

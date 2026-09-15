@@ -210,8 +210,9 @@ Apple divide ogni interfaccia iOS 26 in due strati e la regola è esplicita: **i
 Glass va solo sul functional layer**. Controlli, tab bar, toolbar, overlay transitori.
 Mai sul content layer — liste di brani, griglie di copertine, testo lungo.
 
-In Prisma quindi: aura colorata sul fondo, contenuto su superfici piene sopra, vetro solo
-su tab bar, mini-player, campo di ricerca, chip e pulsante play principale.
+In Prisma quindi: aura colorata sul fondo, contenuto direttamente sopra senza superfici
+proprie — le righe sono trasparenti e l'aura si vede attraverso di esse (vedi 5.8) — e
+vetro solo su tab bar, mini-player, campo di ricerca, chip e pulsante play principale.
 
 ### 5.2 Le quattro modalità
 

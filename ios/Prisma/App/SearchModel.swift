@@ -24,7 +24,7 @@ final class SearchModel {
 
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
-            state = .failed(.invalidInput("Nothing to search for", detail: "Type a song, artist or album first."))
+            state = .failed(.invalidInput("Non c'è niente da cercare", detail: "Scrivi prima un brano, un artista o un album."))
             return
         }
         let client: APIClient

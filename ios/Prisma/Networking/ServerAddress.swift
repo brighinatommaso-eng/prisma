@@ -14,22 +14,22 @@ nonisolated struct ServerAddress: Sendable, Equatable {
 
         let lowercased = text.lowercased()
         guard lowercased.hasPrefix("http://") || lowercased.hasPrefix("https://") else {
-            throw APIError.invalidAddress(text, reason: "It must start with http:// (the backend serves plain HTTP), for example http://hostname:8000.")
+            throw APIError.invalidAddress(text, reason: "deve iniziare con http:// (il backend usa HTTP semplice), per esempio http://nome-server:8000.")
         }
         guard var components = URLComponents(string: text) else {
-            throw APIError.invalidAddress(text, reason: "It is not a valid URL. Check for spaces or stray characters.")
+            throw APIError.invalidAddress(text, reason: "non è un URL valido; controlla che non ci siano spazi o caratteri estranei.")
         }
         guard let host = components.host, !host.isEmpty else {
-            throw APIError.invalidAddress(text, reason: "It has no host name after http://.")
+            throw APIError.invalidAddress(text, reason: "manca il nome del server dopo http://.")
         }
         if components.user != nil || components.password != nil {
-            throw APIError.invalidAddress(text, reason: "Remove the user name or password; the backend has no login.")
+            throw APIError.invalidAddress(text, reason: "togli nome utente e password, il backend non ha un accesso con credenziali.")
         }
         if components.query != nil || components.fragment != nil {
-            throw APIError.invalidAddress(text, reason: "Remove everything from ? or # onwards.")
+            throw APIError.invalidAddress(text, reason: "togli tutto quello che segue ? o #.")
         }
         if let port = components.port, !(1...65535).contains(port) {
-            throw APIError.invalidAddress(text, reason: "Port \(port) is out of range (1 to 65535).")
+            throw APIError.invalidAddress(text, reason: "la porta \(port) non esiste, deve essere tra 1 e 65535.")
         }
 
         components.scheme = components.scheme?.lowercased()
@@ -38,7 +38,7 @@ nonisolated struct ServerAddress: Sendable, Equatable {
         components.percentEncodedPath = path
 
         guard let url = components.url else {
-            throw APIError.invalidAddress(text, reason: "iOS could not build a URL from it.")
+            throw APIError.invalidAddress(text, reason: "iOS non riesce a ricavarne un URL; ricontrolla come è scritto.")
         }
         return ServerAddress(url: url)
     }
@@ -47,7 +47,7 @@ nonisolated struct ServerAddress: Sendable, Equatable {
     /// a backend behind a path prefix still works.
     func endpoint(_ path: String, query: [(name: String, value: String)] = []) throws -> URL {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            throw APIError.invalidAddress(url.absoluteString, reason: "The saved address could not be split into URL parts.")
+            throw APIError.invalidAddress(url.absoluteString, reason: "l'indirizzo salvato non si può scomporre; salvalo di nuovo in Impostazioni.")
         }
         components.percentEncodedPath += path
         if !query.isEmpty {
@@ -60,7 +60,7 @@ nonisolated struct ServerAddress: Sendable, Equatable {
             components.percentEncodedQuery = pairs.joined(separator: "&")
         }
         guard let result = components.url else {
-            throw APIError.invalidInput("Could not build the request URL", detail: "Base \(url.absoluteString), path \(path).")
+            throw APIError.invalidInput("Impossibile comporre l'indirizzo della richiesta", detail: "Salva di nuovo l'indirizzo del server in Impostazioni.")
         }
         return result
     }
@@ -73,15 +73,15 @@ nonisolated struct ServerAddress: Sendable, Equatable {
             return absolute
         }
         guard reference.hasPrefix("/"), let relative = URLComponents(string: reference) else {
-            throw APIError.invalidInput("Unusable URL from the server", detail: "Expected an absolute URL or a path starting with /, got \"\(reference)\".")
+            throw APIError.invalidInput("Il server ha inviato un indirizzo inutilizzabile", detail: "App e backend potrebbero non essere allineati: aggiorna il backend.")
         }
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
-            throw APIError.invalidAddress(url.absoluteString, reason: "The saved address could not be split into URL parts.")
+            throw APIError.invalidAddress(url.absoluteString, reason: "l'indirizzo salvato non si può scomporre; salvalo di nuovo in Impostazioni.")
         }
         components.percentEncodedPath += relative.percentEncodedPath
         components.percentEncodedQuery = relative.percentEncodedQuery
         guard let result = components.url else {
-            throw APIError.invalidInput("Could not resolve a URL from the server", detail: "Base \(url.absoluteString), reference \(reference).")
+            throw APIError.invalidInput("Impossibile usare un indirizzo inviato dal server", detail: "App e backend potrebbero non essere allineati: aggiorna il backend.")
         }
         return result
     }
@@ -89,7 +89,7 @@ nonisolated struct ServerAddress: Sendable, Equatable {
     /// Percent-encodes one path segment, e.g. a track id, so it cannot add path levels.
     static func pathSegment(_ value: String) throws -> String {
         guard let encoded = value.addingPercentEncoding(withAllowedCharacters: pathSegmentAllowed) else {
-            throw APIError.invalidInput("Could not encode a path segment", detail: "The text \"\(value)\" could not be percent-encoded.")
+            throw APIError.invalidInput("Impossibile comporre la richiesta per “\(value)”", detail: "L'identificativo contiene caratteri non validi.")
         }
         return encoded
     }
@@ -110,7 +110,7 @@ nonisolated struct ServerAddress: Sendable, Equatable {
 
     private static func encode(_ value: String) throws -> String {
         guard let encoded = value.addingPercentEncoding(withAllowedCharacters: queryValueAllowed) else {
-            throw APIError.invalidInput("Could not encode the query", detail: "The text \"\(value)\" could not be percent-encoded.")
+            throw APIError.invalidInput("Impossibile comporre la ricerca", detail: "Il testo contiene caratteri che non si possono inviare: modificalo e riprova.")
         }
         return encoded
     }

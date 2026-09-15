@@ -41,8 +41,7 @@ struct SearchView: View {
                 .prismaRow()
                 .listRowSeparator(.hidden)
             case .failed(let error):
-                ProblemBlock(summary: "Ricerca non riuscita: " + PlainLanguage.summary(for: error).lowercasedFirst,
-                             details: .error(error))
+                ProblemBlock("La ricerca non è riuscita. " + PlainLanguage.message(for: error))
                     .prismaRow()
                     .listRowSeparator(.hidden)
             case .loaded(let results):
@@ -60,13 +59,6 @@ struct SearchView: View {
                     }
                 }
             }
-
-            TechnicalDetailsSection {
-                searchDetails
-            }
-            .padding(.top, 12)
-            .prismaRow()
-            .listRowSeparator(.hidden)
         }
         .prismaList()
         .scrollDismissesKeyboard(.immediately)
@@ -80,26 +72,6 @@ struct SearchView: View {
             .padding(.vertical, 12)
             .prismaRow()
             .listRowSeparator(.hidden)
-    }
-
-    @ViewBuilder
-    private var searchDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(Formatting.serverLine(settings.savedAddress))
-                .textSelection(.enabled)
-            switch model.state {
-            case .idle:
-                Text("No search yet.")
-            case .loading(let since):
-                LoadingRow(message: "Searching…", since: since, timeout: APIClient.Timeout.search)
-            case .failed(let error):
-                Text(error.fullText)
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-            case .loaded(let results):
-                Text("\(results.response.value.count) results for “\(results.query)” in \(results.response.milliseconds) ms")
-            }
-        }
     }
 }
 
@@ -157,7 +129,7 @@ private struct SongRow: View {
         if let localTrack {
             // Tapping a search result acquires, never plays: a downloaded track does
             // nothing here, one not yet on the phone starts its device download.
-            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkError, onPlay: {}) {
+            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkProblem, onPlay: {}) {
                 thumbnail
             }
         } else {
@@ -174,7 +146,7 @@ private struct SongRow: View {
                                     .font(.subheadline.weight(.medium))
                                     .foregroundStyle(ink.primary)
                                     .lineLimit(1)
-                                Text(pending.map { AcquisitionText.phase(of: $0) } ?? subtitle)
+                                Text(pending.map { AcquisitionText.phase(of: $0, pollFailures: acquisitions.pollFailures) } ?? subtitle)
                                     .font(.caption)
                                     .foregroundStyle(ink.secondary)
                                     .lineLimit(1)
@@ -198,11 +170,22 @@ private struct SongRow: View {
                 if let pending, pending.stage == .failed {
                     AcquisitionProblem(record: pending)
                 }
-                if let artworkError {
-                    ProblemBlock(error: artworkError)
+                if let artworkProblem {
+                    ProblemBlock(error: artworkProblem)
                 }
             }
         }
+    }
+
+    /// Search artwork comes from YouTube's image servers, not the Prisma backend, so a
+    /// failure is about the internet connection rather than the server address.
+    private var artworkProblem: APIError? {
+        guard let artworkError else { return nil }
+        var problem = artworkError
+        problem.message = artworkError.kind == .transport
+            ? "La copertina di questo risultato non si è caricata: controlla la connessione a internet. Il brano si può comunque scaricare."
+            : "La copertina di questo risultato non è un'immagine valida: il brano si può comunque scaricare."
+        return problem
     }
 
     /// Prototype `.rthumb`: 46 pt, radius 10.

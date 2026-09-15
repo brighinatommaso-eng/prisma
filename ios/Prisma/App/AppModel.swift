@@ -43,7 +43,7 @@ final class AppModel {
             services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions)
             playlists.removeOrphanedEntries()
             launchError = nil
-            downloads.checkTransfers(reason: "app launch")
+            downloads.checkTransfers(reason: "avvio dell'app")
         } catch {
             services = nil
             launchError = .storage("The local library database could not be opened", location: nil, error: error)

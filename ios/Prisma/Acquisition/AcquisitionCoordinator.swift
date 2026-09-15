@@ -20,7 +20,8 @@ final class AcquisitionCoordinator {
     /// For the technical details: whether the loop is running, and its last poll.
     private(set) var isRunning = false
     private(set) var lastPollAt: Date?
-    private(set) var pollProblem: String?
+    /// Consecutive failed polls of GET /downloads, shown while it retries.
+    private(set) var pollFailures = 0
 
     /// Between polls of GET /downloads while the server is working.
     static let serverPollInterval: Double = 2
@@ -45,7 +46,6 @@ final class AcquisitionCoordinator {
     /// the network when it changed ignores its error: the request was interrupted
     /// by iOS, not refused by the server, and the step runs again on return.
     @ObservationIgnored private var foregroundGeneration = 0
-    @ObservationIgnored private var pollFailures = 0
     /// Video ids whose device download was requested by this process, so a refusal
     /// or a silent start is attributed to this handoff and not an older action.
     @ObservationIgnored private var handoffsThisProcess = Set<String>()
@@ -313,7 +313,6 @@ final class AcquisitionCoordinator {
             guard generation == foregroundGeneration else { return }
             let apiError = APIError.from(error)
             pollFailures += 1
-            pollProblem = "Poll \(pollFailures) of \(Self.maxPollFailures) failed at \(Formatting.time(Date())): \(apiError.oneLine)"
             guard pollFailures >= Self.maxPollFailures else { return }
             pollFailures = 0
             for record in activeRecords() where record.stage == .onServer {
@@ -322,7 +321,6 @@ final class AcquisitionCoordinator {
             return
         }
         pollFailures = 0
-        pollProblem = nil
         lastPollAt = Date()
 
         let jobsByID = Dictionary(response.value.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -352,7 +350,8 @@ final class AcquisitionCoordinator {
                     kind: .unexpected,
                     title: "The server could not download the track",
                     url: response.url.absoluteString,
-                    details: ["Job \(job.id) for \(record.videoID) failed.", "Server error: \(job.error ?? "(none given)")"]
+                    details: ["Job \(job.id) for \(record.videoID) failed.", "Server error: \(job.error ?? "(none given)")"],
+                    message: Self.serverFailureMessage(job.error)
                 ), saving: false)
             case .cancelled:
                 fail(record, .serverCancelled, APIError(
@@ -532,24 +531,40 @@ final class AcquisitionCoordinator {
         case .unreadableResponse:
             return "La risposta del server non è leggibile: app e backend potrebbero non essere allineati. Aggiorna il backend, poi tocca Riprova."
         case .serverDownloadFailed:
-            return "Il server non è riuscito a scaricare il brano da YouTube. Riprova più tardi; se succede con ogni brano, yt-dlp sul server va aggiornato."
+            return error.message ?? serverFailureMessage(nil)
         case .serverCancelled:
             return "Il download è stato annullato sul server. Tocca Riprova per richiederlo di nuovo."
         case .serverLostJob:
             return "Il server ha perso traccia della richiesta, forse perché è stato riavviato o reinstallato. Tocca Riprova."
         case .syncFailed:
             return "Il brano è sul server, ma la sincronizzazione della libreria non è riuscita: "
-                + PlainLanguage.summary(for: error).lowercasedFirst + ". Tocca Riprova."
+                + PlainLanguage.message(for: error).lowercasedFirst + " Poi tocca Riprova."
         case .notInLibrary:
             return "Il server dice di avere il brano, ma non compare nella libreria. Prova Risincronizza tutto in Libreria, poi tocca Riprova."
         case .deviceDownloadRefused:
             return "Il brano è in libreria, ma il download sul telefono non è partito: "
-                + PlainLanguage.summary(for: error).lowercasedFirst + ". Tocca Riprova."
+                + PlainLanguage.message(for: error).lowercasedFirst + " Poi tocca Riprova."
         case .storage:
             return "Non è stato possibile salvare sul telefono. Controlla lo spazio libero, poi tocca Riprova."
         case .unexpected:
-            return "Errore imprevisto durante la richiesta al server. Tocca Riprova; se si ripete, apri i dettagli tecnici."
+            return "Errore imprevisto durante la richiesta al server. Tocca Riprova; se si ripete, riavvia l'app."
         }
+    }
+
+    /// The server's job error, reduced to a cause. Recognises the failures the backend
+    /// and yt-dlp report in a stable form; anything else gets the general sentence.
+    static func serverFailureMessage(_ serverError: String?) -> String {
+        let text = (serverError ?? "").lowercased()
+        if text.contains("interrupted by a backend restart") {
+            return "Il server è stato riavviato mentre scaricava il brano, quindi il download si è interrotto. Tocca Riprova."
+        }
+        if text.contains("sign in to confirm") || text.contains("confirm you") {
+            return "YouTube ha bloccato il server chiedendo di confermare che non è un bot. Riprova più tardi; se continua, yt-dlp sul server va aggiornato."
+        }
+        if text.contains("video unavailable") || text.contains("not available") || text.contains("private video") {
+            return "Il video non è disponibile su YouTube, per esempio perché è privato o rimosso. Cerca un'altra versione del brano."
+        }
+        return "Il server non è riuscito a scaricare il brano da YouTube. Riprova più tardi; se succede con ogni brano, yt-dlp sul server va aggiornato."
     }
 
     private func activeRecords() -> [PendingAcquisition] {

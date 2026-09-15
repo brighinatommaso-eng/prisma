@@ -27,6 +27,14 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
     /// The URL that was attempted, when there was one.
     let url: String?
     let details: [String]
+    /// What the user reads: one or two complete Italian sentences saying what failed
+    /// and what to check. Set where the failure is best understood; when nil the
+    /// interface builds the sentence from `kind` and the typed facts below.
+    var message: String? = nil
+    /// The URLError code of a transport failure.
+    var urlErrorCode: Int? = nil
+    /// The status of an HTTP error response.
+    var httpStatus: Int? = nil
 
     var errorDescription: String? { title }
 
@@ -61,7 +69,8 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
         kind: .notConfigured,
         title: "No server address set",
         url: nil,
-        details: ["Enter the backend address in the Settings tab, for example http://hostname:8000, and tap Save."]
+        details: ["Enter the backend address in the Settings tab, for example http://hostname:8000, and tap Save."],
+        message: "Nessun indirizzo del server impostato: inseriscilo in Impostazioni, per esempio http://nome-server:8000."
     )
 
     static func invalidAddress(_ text: String, reason: String) -> APIError {
@@ -69,12 +78,15 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
             kind: .invalidAddress,
             title: "Invalid server address",
             url: nil,
-            details: ["You entered: \"\(text)\"", reason]
+            details: ["You entered: \"\(text)\"", reason],
+            message: "L'indirizzo del server “\(text)” non è valido: \(reason)"
         )
     }
 
+    /// `title` and `detail` are Italian and together form the message, e.g.
+    /// "Il brano non è scaricato. Scaricalo prima di riprodurlo."
     static func invalidInput(_ title: String, detail: String) -> APIError {
-        APIError(kind: .invalidInput, title: title, url: nil, details: [detail])
+        APIError(kind: .invalidInput, title: title, url: nil, details: [detail], message: title + ". " + detail)
     }
 
     static func cancelled(url: URL?) -> APIError {
@@ -113,7 +125,8 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
             kind: .transport,
             title: "Could not reach the server",
             url: (url ?? urlError.failingURL)?.absoluteString,
-            details: lines
+            details: lines,
+            urlErrorCode: urlError.code.rawValue
         )
     }
 
@@ -129,7 +142,7 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
         if status == 404 {
             lines.append("Hint: this path does not exist on the server. Check the address points at the Prisma backend, and that the deployed backend has this endpoint.")
         }
-        return APIError(kind: .http, title: "Server returned HTTP \(status)", url: url.absoluteString, details: lines)
+        return APIError(kind: .http, title: "Server returned HTTP \(status)", url: url.absoluteString, details: lines, httpStatus: status)
     }
 
     static func invalidResponse(url: URL, response: URLResponse) -> APIError {
@@ -179,10 +192,11 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
     }
 
     /// A file or database operation failed. `location` is a file path or URL.
-    static func storage(_ title: String, location: URL?, error: Error) -> APIError {
+    /// `message`, in Italian, says what could not be saved or read and what to check.
+    static func storage(_ title: String, location: URL?, error: Error, message: String? = nil) -> APIError {
         if let apiError = error as? APIError {
             return APIError(kind: .storage, title: title, url: location?.path(percentEncoded: false),
-                            details: [apiError.title] + apiError.details)
+                            details: [apiError.title] + apiError.details, message: message ?? apiError.message)
         }
         let nsError = error as NSError
         return APIError(
@@ -192,7 +206,8 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
             details: [
                 "\(nsError.domain) \(nsError.code): \(error.localizedDescription)",
                 "Debug: \(String(describing: error))",
-            ]
+            ],
+            message: message
         )
     }
 

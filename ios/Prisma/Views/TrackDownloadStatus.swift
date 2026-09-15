@@ -3,87 +3,6 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// Everything the download machinery knows about a track: sizes, the pre-flight
-/// check, how long it has waited, what iOS last reported, progress in bytes and the
-/// last automatic action. Developer information, shown behind
-/// "Mostra dettagli tecnici"; failures and refusals are shown by `TrackProblems`.
-struct TrackTechnicalDetails: View {
-    let track: StoredTrack
-
-    @Environment(DownloadManager.self) private var downloads
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(stateLine)
-                .textSelection(.enabled)
-
-            if let since = downloads.preflights[track.serverID] {
-                LoadingRow(
-                    message: "Pre-flight: checking the server can serve this file…",
-                    since: since,
-                    timeout: APIClient.Timeout.probe
-                )
-            } else if track.downloadState == .queued {
-                queuedView
-            } else if track.downloadState == .downloading {
-                progressView
-            }
-
-            if let note = track.note {
-                Text(note)
-            }
-
-            if let target = track.targetAddress {
-                Text("Server address for this attempt: \(target)")
-                    .textSelection(.enabled)
-            }
-        }
-        .font(.caption2.monospaced())
-    }
-
-    private var stateLine: String {
-        switch track.downloadState {
-        case .downloaded:
-            return "Downloaded, \(Formatting.bytes(track.storedBytes))"
-        case .notDownloaded:
-            return "Not downloaded, \(Formatting.bytes(track.fileBytes))"
-        default:
-            return "\(track.downloadState.label), \(Formatting.bytes(track.fileBytes))"
-        }
-    }
-
-    /// Queued: how long this attempt has waited, what iOS last said, and when it
-    /// will give up.
-    @ViewBuilder
-    private var queuedView: some View {
-        if let started = track.attemptStartedAt {
-            TimelineView(.periodic(from: started, by: 1)) { context in
-                let waited = Int(context.date.timeIntervalSince(started))
-                Text("Waiting \(Formatting.elapsed(waited)) for iOS to start the transfer. If no data arrives within \(Int(DownloadManager.startDeadline / 60)) min it fails as never started.")
-            }
-        } else {
-            Text("Queued, but no start time was recorded for this attempt.")
-        }
-        Text("Last problem reported by iOS: \(track.lastSessionError ?? "none so far")")
-        if let summary = track.preflightSummary {
-            Text(summary)
-                .textSelection(.enabled)
-        }
-        if let queuedAt = track.queuedAt {
-            Text("In the queue since \(Formatting.time(queuedAt)).")
-        }
-    }
-
-    @ViewBuilder
-    private var progressView: some View {
-        if let token = track.downloadToken, let progress = downloads.progress[token], progress.expected > 0 {
-            Text("\(Int((Double(progress.received) / Double(progress.expected) * 100).rounded()))%: \(Formatting.bytes(Int(progress.received))) of \(Formatting.bytes(Int(progress.expected)))")
-        } else {
-            Text("No progress reported since the app opened; the transfer is running in the background.")
-        }
-    }
-}
-
 /// An album cover read from Application Support/Artwork. Never touches the network.
 /// Without a file it draws a neutral tile with a note glyph; an unreadable file is
 /// reported through `problem`.
@@ -123,12 +42,12 @@ struct LocalCoverImage: View {
         do {
             let url = try LocalFiles.url(.artwork, fileName)
             guard let loaded = UIImage(contentsOfFile: url.path(percentEncoded: false)) else {
-                problem = "The cover file \(fileName) is missing or unreadable. It is downloaded again on the next sync."
+                problem = "Il file della copertina di questo album manca o è illeggibile: viene riscaricato alla prossima sincronizzazione."
                 return
             }
             image = loaded
         } catch {
-            problem = APIError.from(error).fullText
+            problem = "La copertina di questo album non si è potuta leggere. " + PlainLanguage.message(for: .from(error))
         }
     }
 }

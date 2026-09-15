@@ -34,12 +34,16 @@ struct SettingsView: View {
                     presetGrid
                         .padding(.top, 8)
                 }
-                Text(theme.mode == .adaptive
-                     ? "Adattivo segue i colori dell'album in riproduzione; senza musica usa il preset Prisma."
-                     : " ")
-                    .font(.caption)
-                    .foregroundStyle(ink.secondary)
-                    .padding(.top, 6)
+                if theme.mode == .adaptive {
+                    Text("Adattivo segue i colori dell'album in riproduzione; senza musica usa il preset Prisma.")
+                        .font(.caption)
+                        .foregroundStyle(ink.secondary)
+                        .padding(.top, 6)
+                }
+                if let problem = theme.settingsProblem {
+                    ProblemBlock(problem)
+                        .padding(.top, 6)
+                }
 
                 SectionLabel("Info")
                 infoCard
@@ -48,7 +52,7 @@ struct SettingsView: View {
                     ThemeInspectorView()
                 } label: {
                     HStack {
-                        Text("Theme inspector (strumento di sviluppo)")
+                        Text("Ispettore del tema (strumento di sviluppo)")
                             .font(.subheadline)
                             .foregroundStyle(ink.primary)
                         Spacer(minLength: 0)
@@ -84,7 +88,7 @@ struct SettingsView: View {
             HStack(spacing: 12) {
                 Text("Indirizzo")
                     .foregroundStyle(ink.primary)
-                TextField("http://hostname:8000", text: $draft)
+                TextField("http://nome-server:8000", text: $draft)
                     .keyboardType(.URL)
                     .textContentType(.URL)
                     .textInputAutocapitalization(.never)
@@ -100,15 +104,33 @@ struct SettingsView: View {
 
             hairline
 
-            HStack(spacing: 12) {
-                Text("Stato")
-                    .foregroundStyle(ink.primary)
-                Spacer(minLength: 0)
+            valueRow("Stato") {
                 statusValue
             }
-            .font(.subheadline)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 50)
+
+            if case .loaded(let response) = test {
+                let health = response.value
+                hairline
+                valueRow("YouTube Music") {
+                    Text(health.youtubeMusicReachable ? "Raggiungibile" : "Non raggiungibile")
+                        .foregroundStyle(health.youtubeMusicReachable ? ink.secondary : ink.primary)
+                }
+                hairline
+                valueRow("Catalogo") {
+                    Text("\(Formatting.trackCount(health.trackCount)), \(health.albumCount == 1 ? "1 album" : "\(health.albumCount) album")")
+                        .foregroundStyle(ink.secondary)
+                }
+                hairline
+                valueRow("Spazio libero sul server") {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(health.musicFreeBytes), countStyle: .file))
+                        .foregroundStyle(ink.secondary)
+                }
+                hairline
+                valueRow("yt-dlp") {
+                    Text(health.ytdlpVersion)
+                        .foregroundStyle(ink.secondary)
+                }
+            }
 
             hairline
 
@@ -121,13 +143,9 @@ struct SettingsView: View {
             }
             .frame(minHeight: 50)
 
-            problems
+            messages
                 .padding(.horizontal, 16)
-
-            TechnicalDetailsSection {
-                serverDetails
-            }
-            .padding(.horizontal, 16)
+                .padding(.bottom, 8)
         }
         .prismaGlass(RoundedRectangle(cornerRadius: 20))
     }
@@ -155,54 +173,33 @@ struct SettingsView: View {
         }
     }
 
-    /// Failures in plain language; the full report is behind the toggle.
+    /// Save confirmation and failures, each a complete sentence.
     @ViewBuilder
-    private var problems: some View {
-        if case .failed(let error)? = saveResult {
-            ProblemBlock(summary: "Indirizzo non salvato: " + PlainLanguage.summary(for: error).lowercasedFirst,
-                         details: .error(error))
-        } else if case .failed(let error) = test {
-            ProblemBlock(summary: "Verifica non riuscita: " + PlainLanguage.summary(for: error).lowercasedFirst,
-                         details: .error(error))
+    private var messages: some View {
+        switch saveResult {
+        case .saved(_)?:
+            Text("Indirizzo salvato su questo telefono.")
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
+                .padding(.top, 4)
+        case .failed(let error)?:
+            ProblemBlock("L'indirizzo non è stato salvato. " + PlainLanguage.message(for: error))
+        case nil:
+            EmptyView()
+        }
+        if case .failed(let error) = test, !saveFailed {
+            ProblemBlock("La verifica della connessione non è riuscita. " + PlainLanguage.message(for: error))
+        }
+        if case .loaded(let response) = test, !response.value.youtubeMusicReachable {
+            ProblemBlock("Il server è raggiungibile, ma non raggiunge YouTube Music: ricerche e nuovi download non riusciranno finché la sua connessione a internet non torna.")
         }
     }
 
-    @ViewBuilder
-    private var serverDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FieldRow(label: "Saved address", value: settings.savedAddress.isEmpty ? "(none)" : settings.savedAddress)
-            if case .saved(let address)? = saveResult {
-                Text("Saved \(address)")
-            }
-            Text("Stored on this iPhone only. Include http:// and the port. Test connection saves the address first.")
-            switch test {
-            case .idle:
-                Text("Not tested yet.")
-            case .loading(let since):
-                LoadingRow(message: "Calling /health…", since: since, timeout: APIClient.Timeout.health)
-            case .failed(let error):
-                Text(error.fullText)
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-            case .loaded(let response):
-                let health = response.value
-                FieldRow(label: "Result", value: "Connected: HTTP \(response.status) in \(response.milliseconds) ms")
-                FieldRow(label: "URL", value: response.url.absoluteString)
-                FieldRow(label: "Received at", value: response.receivedAt.formatted(date: .omitted, time: .standard))
-                FieldRow(label: "track_count", value: String(health.trackCount))
-                FieldRow(label: "album_count", value: String(health.albumCount))
-                FieldRow(label: "total_bytes_stored", value: Formatting.bytes(health.totalBytesStored))
-                FieldRow(label: "music_free_bytes", value: Formatting.bytes(health.musicFreeBytes))
-                FieldRow(label: "youtube_music_reachable", value: health.youtubeMusicReachable ? "true" : "false")
-                FieldRow(label: "ytdlp_version", value: health.ytdlpVersion)
-                FieldRow(label: "ytmusicapi_version", value: health.ytmusicapiVersion)
-                Text("Raw /health response")
-                    .font(.caption.weight(.semibold))
-                Text(response.bodyText)
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-            }
+    private var saveFailed: Bool {
+        if case .failed(_)? = saveResult {
+            return true
         }
+        return false
     }
 
     // MARK: - Appearance
@@ -253,34 +250,43 @@ struct SettingsView: View {
 
     private var infoCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Versione")
-                    .foregroundStyle(ink.primary)
-                Spacer(minLength: 0)
-                Text("\(buildInfo.version) (\(buildInfo.build))")
+            valueRow("Versione") {
+                Text("\(buildInfo.version) (build \(buildInfo.build))")
                     .foregroundStyle(ink.secondary)
                     .textSelection(.enabled)
             }
-            .font(.subheadline)
-            .padding(.horizontal, 16)
-            .frame(minHeight: 50)
-
-            TechnicalDetailsSection {
-                VStack(alignment: .leading, spacing: 8) {
-                    FieldRow(label: "Version", value: buildInfo.version)
-                    FieldRow(label: "Build", value: buildInfo.build)
-                    FieldRow(label: "Commit", value: buildInfo.commit)
-                    if let problem = theme.settingsProblem {
-                        FieldRow(label: "Theme settings problem", value: problem)
-                    }
-                }
+            hairline
+            valueRow("Revisione") {
+                Text(Self.localised(buildInfo.commit))
+                    .foregroundStyle(ink.secondary)
+                    .textSelection(.enabled)
             }
-            .padding(.horizontal, 16)
         }
         .prismaGlass(RoundedRectangle(cornerRadius: 20))
     }
 
+    /// BuildInfo's placeholders, in Italian.
+    private static func localised(_ value: String) -> String {
+        switch value {
+        case "unknown": return "sconosciuta"
+        case "local": return "build locale"
+        default: return value
+        }
+    }
+
     // MARK: - Pieces
+
+    private func valueRow<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
+        HStack(spacing: 12) {
+            Text(label)
+                .foregroundStyle(ink.primary)
+            Spacer(minLength: 0)
+            value()
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 16)
+        .frame(minHeight: 50)
+    }
 
     private var hairline: some View {
         Rectangle()
@@ -320,7 +326,7 @@ struct SettingsView: View {
 
         guard let address = save() else {
             // save() has already put the reason on screen, above.
-            test = .failed(.invalidInput("Not tested", detail: "The address could not be saved; see the error in the Server section."))
+            test = .failed(.invalidInput("Connessione non verificata", detail: "Prima correggi l'indirizzo."))
             return
         }
 

@@ -13,10 +13,10 @@ nonisolated enum ThemeMode: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
-        case .adaptive: return "Adaptive"
+        case .adaptive: return "Adattivo"
         case .preset: return "Preset"
-        case .monoDark: return "Black"
-        case .monoLight: return "White"
+        case .monoDark: return "Nero"
+        case .monoLight: return "Bianco"
         }
     }
 }
@@ -123,7 +123,7 @@ nonisolated enum ThemeResolver {
             choice = (parsed.palette, nil, nil, "Preset \(preset.name)", parsed.problem)
         case .monoDark, .monoLight:
             let parsed = presetPalette(preset)
-            choice = (parsed.palette, nil, nil, "None: \(mode.label) is a flat theme without an aura", parsed.problem)
+            choice = (parsed.palette, nil, nil, "Nessuna: \(mode.label) è un tema piatto senza aura", parsed.problem)
         case .adaptive:
             choice = adaptiveChoice(adaptive)
         }
@@ -161,15 +161,15 @@ nonisolated enum ThemeResolver {
         switch adaptive {
         case .nothingPlaying:
             let prisma = prismaPalette()
-            return (prisma.palette, nil, nil, "Prisma preset: nothing is playing", prisma.problem)
+            return (prisma.palette, nil, nil, "Preset Prisma: non c'è niente in riproduzione", prisma.problem)
         case .track(let title, let album, let hexes):
             guard let hexes else {
                 let prisma = prismaPalette()
-                return (prisma.palette, nil, nil, "Prisma preset: the album of “\(title)” has no palette", prisma.problem)
+                return (prisma.palette, nil, nil, "Preset Prisma: l'album di “\(title)” non ha una palette", prisma.problem)
             }
-            return incomingChoice(label: "“\(title)” (\(album ?? "no album"))", hexes: hexes)
+            return incomingChoice(label: "“\(title)” (\(album ?? "senza album"))", hexes: hexes)
         case .test(let named):
-            return incomingChoice(label: "Test palette \(named.name)", hexes: named.hexes)
+            return incomingChoice(label: "Palette di prova \(named.name)", hexes: named.hexes)
         }
     }
 
@@ -184,14 +184,14 @@ nonisolated enum ThemeResolver {
         case .failure(let failure):
             let prisma = prismaPalette()
             let problems = [failure.message, prisma.problem].compactMap { $0 }
-            return (prisma.palette, nil, nil, "Prisma preset: the palette of \(label) could not be used",
+            return (prisma.palette, nil, nil, "Preset Prisma: la palette di \(label) non è utilizzabile",
                     problems.joined(separator: " "))
         }
     }
 
     private static func prismaPalette() -> (palette: AuraPalette, problem: String?) {
         guard let prisma = ThemeCatalog.preset(id: ThemeCatalog.defaultPresetID) else {
-            return (ThemeCatalog.fallbackPalette, "The Prisma preset is missing from the catalogue; drawing built-in colours.")
+            return (ThemeCatalog.fallbackPalette, "Il preset Prisma manca dal catalogo: vengono usati i colori incorporati.")
         }
         return presetPalette(prisma)
     }
@@ -203,7 +203,7 @@ nonisolated enum ThemeResolver {
             return (parsed, nil)
         case .failure(let failure):
             return (ThemeCatalog.fallbackPalette,
-                    "Preset \(named.name) is invalid: \(failure.message). Drawing built-in Prisma colours instead.")
+                    "Il preset \(named.name) non è valido (\(failure.message)): vengono usati i colori incorporati di Prisma.")
         }
     }
 }
@@ -235,7 +235,7 @@ final class ThemeEngine {
         } else {
             mode = .adaptive
             if let storedMode {
-                problems.append("The saved mode \"\(storedMode)\" is unknown; using Adaptive.")
+                problems.append("La modalità salvata “\(storedMode)” non esiste più: viene usato Adattivo. Sceglila di nuovo in Impostazioni.")
             }
         }
 
@@ -245,7 +245,7 @@ final class ThemeEngine {
         } else {
             presetID = ThemeCatalog.defaultPresetID
             if let storedPreset {
-                problems.append("The saved preset \"\(storedPreset)\" is unknown; using Prisma.")
+                problems.append("Il preset salvato “\(storedPreset)” non esiste più: viene usato Prisma. Sceglilo di nuovo in Impostazioni.")
             }
         }
         settingsProblem = problems.isEmpty ? nil : problems.joined(separator: " ")
@@ -283,7 +283,7 @@ final class ThemeEngine {
 
     func setPreset(id: String) {
         guard ThemeCatalog.preset(id: id) != nil else {
-            settingsProblem = "Preset \"\(id)\" does not exist."
+            settingsProblem = "Il preset “\(id)” non esiste: scegline un altro."
             return
         }
         presetID = id

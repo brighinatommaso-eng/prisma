@@ -12,12 +12,12 @@ enum DownloadState: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .notDownloaded: return "Not downloaded"
-        case .queued: return "Queued"
-        case .downloading: return "Downloading"
-        case .downloaded: return "Downloaded"
-        case .failed: return "Failed"
-        case .cancelled: return "Cancelled"
+        case .notDownloaded: return "Non scaricato"
+        case .queued: return "In coda"
+        case .downloading: return "In download"
+        case .downloaded: return "Scaricato"
+        case .failed: return "Non riuscito"
+        case .cancelled: return "Annullato"
         }
     }
 }
@@ -64,23 +64,23 @@ enum FailureCause: String, CaseIterable {
     var notRevivedReason: String {
         switch self {
         case .unreachable, .neverStarted, .noAddress:
-            return "revived by an address change"
+            return "recuperabile con un cambio di indirizzo"
         case .httpStatus:
-            return "the server answered with an error status such as 404, so it does not have the file"
+            return "il server non ha il file"
         case .verification:
-            return "the file failed SHA-256 verification, which an address cannot fix"
+            return "il file ricevuto era danneggiato"
         case .storage:
-            return "not enough free space or a file could not be written"
+            return "spazio insufficiente o salvataggio non riuscito"
         case .missingServerData:
-            return "the server gave no SHA-256 or file size; sync the library first"
+            return "il server non ha fornito i dati del file, serve sincronizzare la libreria"
         case .serverFileChanged:
-            return "the server's file changed during the download"
+            return "il file sul server è cambiato durante il download"
         case .fileMissing:
-            return "the downloaded file disappeared from this iPhone"
+            return "il file scaricato non è più sul telefono"
         case .systemCancelled:
-            return "iOS cancelled the transfer"
+            return "iOS ha interrotto il trasferimento"
         case .other:
-            return "an error unrelated to reaching the server"
+            return "un errore che non dipende dall'indirizzo"
         }
     }
 

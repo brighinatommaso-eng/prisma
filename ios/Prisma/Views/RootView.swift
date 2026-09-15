@@ -62,7 +62,7 @@ struct RootView: View {
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
-                    services.downloads.checkTransfers(reason: "app opened")
+                    services.downloads.checkTransfers(reason: "apertura dell'app")
                     services.acquisitions.resume()
                 case .background:
                     services.playback.persist()
@@ -74,11 +74,7 @@ struct RootView: View {
         } else {
             NavigationStack {
                 List {
-                    if let error = model.launchError {
-                        ErrorReport(error: error)
-                    } else {
-                        Text("The app services were not created, and no error was recorded.")
-                    }
+                    Text("La libreria sul telefono non si è aperta, quindi l'app non può partire: riavvia l'app; se si ripete, libera spazio sul telefono o reinstalla l'app.")
                 }
                 .navigationTitle("Prisma non si avvia")
             }

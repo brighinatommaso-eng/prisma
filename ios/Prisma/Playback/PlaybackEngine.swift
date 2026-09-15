@@ -41,9 +41,9 @@ final class PlaybackEngine {
 
         var label: String {
             switch self {
-            case .off: return "Off"
-            case .all: return "Repeat queue"
-            case .one: return "Repeat track"
+            case .off: return "Ripeti disattivato"
+            case .all: return "Ripeti la coda"
+            case .one: return "Ripeti il brano"
             }
         }
     }
@@ -135,8 +135,8 @@ final class PlaybackEngine {
         message = nil
         guard track.downloadState == .downloaded else {
             lastError = .invalidInput(
-                "“\(track.title ?? track.serverID)” is not downloaded",
-                detail: "Only tracks stored on this iPhone can be played. Download it from the Library tab first."
+                "“\(track.title ?? track.serverID)” non è scaricato",
+                detail: "Si possono riprodurre solo i brani salvati sul telefono: scaricalo prima."
             )
             return
         }
@@ -159,14 +159,14 @@ final class PlaybackEngine {
         lastError = nil
         message = nil
         guard tracks.indices.contains(startOffset) else {
-            lastError = .invalidInput("Could not start the playlist", detail: "Entry \(startOffset) is outside the playlist's \(tracks.count) tracks.")
+            lastError = .invalidInput("Impossibile avviare la riproduzione", detail: "Il brano scelto non è più nell'elenco: riapri la schermata e riprova.")
             return
         }
         let start = tracks[startOffset]
         guard start.downloadState == .downloaded else {
             lastError = .invalidInput(
-                "“\(start.title ?? start.serverID)” is not downloaded",
-                detail: "Only tracks stored on this iPhone can be played. Download it first."
+                "“\(start.title ?? start.serverID)” non è scaricato",
+                detail: "Si possono riprodurre solo i brani salvati sul telefono: scaricalo prima."
             )
             return
         }
@@ -179,7 +179,7 @@ final class PlaybackEngine {
             ids.append(track.serverID)
         }
         guard let startIndex else {
-            lastError = .invalidInput("Could not start the playlist", detail: "The tapped track is not among the playlist's downloaded tracks.")
+            lastError = .invalidInput("Impossibile avviare la riproduzione", detail: "Il brano scelto non risulta tra quelli scaricati: controlla che sia scaricato e riprova.")
             return
         }
         startQueue(ids, at: startIndex)
@@ -205,7 +205,7 @@ final class PlaybackEngine {
             if let currentIndex {
                 load(index: currentIndex, position: elapsed, autoplay: true)
             } else {
-                message = "Nothing to play. Tap a downloaded track in the Library tab."
+                message = "Non c'è niente da riprodurre: tocca un brano scaricato in Libreria."
             }
             return
         }
@@ -214,7 +214,8 @@ final class PlaybackEngine {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            report("Playback could not start: the audio session could not be activated", error: error)
+            report("Playback could not start: the audio session could not be activated", error: error,
+                   message: "La riproduzione non è partita perché iOS non ha concesso l'audio: chiudi le altre app che stanno suonando o chiamando, poi riprova.")
             return
         }
         wantsToPlay = true
@@ -241,7 +242,7 @@ final class PlaybackEngine {
     @discardableResult
     func next() -> Bool {
         guard let index = nextIndex(after: currentIndex) else {
-            message = "This is the last track in the queue."
+            message = "Questo è l'ultimo brano della coda."
             return false
         }
         load(index: index, position: 0, autoplay: wantsToPlay)
@@ -348,22 +349,26 @@ final class PlaybackEngine {
         guard track.downloadState == .downloaded else { return .notDownloaded }
         let title = "Could not play “\(track.title ?? track.serverID)”"
         let marked = "The track was marked failed (file missing). Download it again from the Library tab."
+        let missing = "Impossibile riprodurre “\(track.title ?? track.serverID)”: il file audio non è più sul telefono, quindi il brano è segnato come da riscaricare. Scaricalo di nuovo."
         guard let fileName = track.fileName else {
             return .unplayable(APIError(
                 kind: .storage, title: title, url: nil,
-                details: ["The track is marked downloaded but no file name is recorded for it.", marked]
+                details: ["The track is marked downloaded but no file name is recorded for it.", marked],
+                message: missing
             ))
         }
         let url: URL
         do {
             url = try LocalFiles.url(.music, fileName)
         } catch {
-            return .unplayable(.storage(title, location: nil, error: error))
+            return .unplayable(.storage(title, location: nil, error: error,
+                                        message: "Impossibile raggiungere la cartella della musica sul telefono per riprodurre “\(track.title ?? track.serverID)”: riavvia l'app; se si ripete, controlla lo spazio libero."))
         }
         guard LocalFiles.exists(url) else {
             return .unplayable(APIError(
                 kind: .storage, title: title, url: url.path(percentEncoded: false),
-                details: ["The audio file is not on this iPhone.", marked]
+                details: ["The audio file is not on this iPhone.", marked],
+                message: missing
             ))
         }
         return .file(url)
@@ -415,7 +420,7 @@ final class PlaybackEngine {
         wantsToPlay = false
         isPlaying = false
         currentIndex = nil
-        message = "Nothing left to play in this queue: the remaining tracks are not downloaded or their files are missing."
+        message = "Nella coda non resta niente da riprodurre: i brani successivi non sono scaricati o i loro file mancano."
         updateNowPlaying()
         persist()
     }
@@ -519,7 +524,8 @@ final class PlaybackEngine {
             return
         }
         guard let index = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(index) else {
-            report("The player moved to an item Prisma did not queue", error: nil)
+            report("The player moved to an item Prisma did not queue", error: nil,
+                   message: "Il lettore è passato a un brano che l'app non aveva messo in coda: tocca un brano per ripartire.")
             return
         }
         let previousIndex = currentIndex
@@ -596,7 +602,7 @@ final class PlaybackEngine {
             updateNowPlaying()
             return
         }
-        message = "Reached the end of the queue."
+        message = "La coda è finita."
         load(index: index, position: 0, autoplay: false)
     }
 
@@ -625,10 +631,16 @@ final class PlaybackEngine {
 
         if let track, track.downloadState == .downloaded {
             details.append("The audio file is missing or unreadable, so the track was marked failed (file missing). Download it again from the Library tab.")
-            recordUnplayable(track, error: APIError(kind: .storage, title: title, url: path, details: details))
+            recordUnplayable(track, error: APIError(
+                kind: .storage, title: title, url: path, details: details,
+                message: "Impossibile riprodurre “\(track.title ?? trackID)”: il file audio manca o è danneggiato, quindi il brano è segnato come da riscaricare. Scaricalo di nuovo."
+            ))
         } else {
             details.append("The track is no longer downloaded on this iPhone; it was removed or re-synced during playback.")
-            lastError = APIError(kind: .storage, title: title, url: path, details: details)
+            lastError = APIError(
+                kind: .storage, title: title, url: path, details: details,
+                message: "Impossibile riprodurre “\(track?.title ?? trackID)”: il brano è stato rimosso dal telefono o risincronizzato durante la riproduzione. Scaricalo di nuovo."
+            )
         }
 
         guard let next = nextIndex(after: failedIndex) else {
@@ -653,7 +665,8 @@ final class PlaybackEngine {
             // .playback: keeps playing with the screen locked and ignores the ringer switch.
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         } catch {
-            report("The audio session could not be set up for music playback", error: error)
+            report("The audio session could not be set up for music playback", error: error,
+                   message: "iOS non ha preparato l'audio per la musica: la riproduzione potrebbe fermarsi a schermo bloccato. Riavvia l'app.")
         }
     }
 
@@ -662,7 +675,8 @@ final class PlaybackEngine {
         guard let info = notification.userInfo,
               let typeValue = info[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
-            report("iOS sent an audio interruption notification that could not be read", error: nil)
+            report("iOS sent an audio interruption notification that could not be read", error: nil,
+                   message: "iOS ha segnalato un'interruzione dell'audio che l'app non ha capito: se la musica si è fermata, tocca Riproduci.")
             return
         }
         switch type {
@@ -675,7 +689,7 @@ final class PlaybackEngine {
             resumeAfterInterruption = wantsToPlay
             wantsToPlay = false
             if resumeAfterInterruption {
-                message = "Paused at \(Formatting.time(Date())) by an interruption such as a call."
+                message = "In pausa dalle \(Formatting.time(Date())) per un'interruzione, per esempio una chiamata."
             }
             updateNowPlaying()
             persist()
@@ -684,10 +698,10 @@ final class PlaybackEngine {
             resumeAfterInterruption = false
             let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
             if options.contains(.shouldResume) {
-                message = "Resumed at \(Formatting.time(Date())) after an interruption."
+                message = "Ripresa alle \(Formatting.time(Date())) dopo un'interruzione."
                 play()
             } else {
-                message = "An interruption ended, but iOS did not allow playback to resume on its own. Tap play to continue."
+                message = "L'interruzione è finita, ma iOS non ha permesso di riprendere da sola: tocca Riproduci per continuare."
             }
         @unknown default:
             break
@@ -699,7 +713,8 @@ final class PlaybackEngine {
         guard let info = notification.userInfo,
               let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
-            report("iOS sent an audio route change notification that could not be read", error: nil)
+            report("iOS sent an audio route change notification that could not be read", error: nil,
+                   message: "iOS ha segnalato un cambio di uscita audio che l'app non ha capito: se la musica si è fermata, tocca Riproduci.")
             return
         }
         guard reason == .oldDeviceUnavailable else { return }
@@ -708,14 +723,14 @@ final class PlaybackEngine {
         if wasPlaying {
             let previous = (info[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?
                 .outputs.map(\.portName).joined(separator: ", ")
-            message = "Paused at \(Formatting.time(Date())) because the audio output (\(previous ?? "unknown")) was disconnected."
+            message = "In pausa dalle \(Formatting.time(Date())) perché l'uscita audio (\(previous ?? "sconosciuta")) si è scollegata."
         }
     }
 
     private func handleMediaServicesReset() {
         configureAudioSession()
         wantsToPlay = false
-        message = "iOS reset its audio services, so playback stopped. Tap play to continue."
+        message = "iOS ha riavviato i servizi audio e la riproduzione si è fermata: tocca Riproduci per continuare."
         if let index = currentIndex {
             load(index: index, position: elapsed, autoplay: false)
         }
@@ -814,7 +829,7 @@ final class PlaybackEngine {
         do {
             let url = try LocalFiles.url(.artwork, fileName)
             guard let image = UIImage(contentsOfFile: url.path(percentEncoded: false)) else {
-                artworkProblem = "The cover file \(fileName) is missing or unreadable, so the lock screen shows no artwork. Sync the library to download it again."
+                artworkProblem = "Il file della copertina manca o è illeggibile, quindi la schermata di blocco non la mostra: sincronizza la libreria per riscaricarla."
                 return nil
             }
             let artwork = PlaybackBridge.artwork(image)
@@ -822,7 +837,7 @@ final class PlaybackEngine {
             artworkProblem = nil
             return artwork
         } catch {
-            artworkProblem = "The cover could not be read: \(error.localizedDescription)"
+            artworkProblem = "La copertina non si è potuta leggere: sincronizza la libreria per riscaricarla."
             return nil
         }
     }
@@ -835,7 +850,7 @@ final class PlaybackEngine {
         guard let savedQueue = defaults.stringArray(forKey: Key.queue), !savedQueue.isEmpty else { return }
         let index = defaults.integer(forKey: Key.index)
         guard savedQueue.indices.contains(index) else {
-            message = "The saved playback position did not match the saved queue, so it was discarded."
+            message = "La posizione di ascolto salvata non corrispondeva alla coda salvata ed è stata scartata: tocca un brano per ricominciare."
             for key in Key.all {
                 defaults.removeObject(forKey: key)
             }
@@ -853,8 +868,8 @@ final class PlaybackEngine {
         let position = defaults.double(forKey: Key.position)
         load(index: index, position: position, autoplay: false)
         if let track = currentTrack {
-            let at = currentIndex == index ? Formatting.clock(position) : "the start"
-            message = "Restored “\(track.title ?? track.serverID)” at \(at), paused."
+            let at = currentIndex == index ? "da \(Formatting.clock(position))" : "dall'inizio"
+            message = "Ripristinato “\(track.title ?? track.serverID)” \(at), in pausa."
         }
     }
 
@@ -906,18 +921,20 @@ final class PlaybackEngine {
         do {
             return try context.fetch(descriptor).first
         } catch {
-            report("Could not read track \(id) from the local library", error: error)
+            report("Could not read track \(id) from the local library", error: error,
+                   message: "Impossibile leggere un brano dalla libreria sul telefono: riavvia l'app; se si ripete, controlla lo spazio libero.")
             return nil
         }
     }
 
-    private func report(_ title: String, error: Error?) {
+    /// `message` is the Italian sentence shown to the user.
+    private func report(_ title: String, error: Error?, message userMessage: String) {
         var details: [String] = []
         if let error {
             let nsError = error as NSError
             details.append("\(nsError.domain) \(nsError.code): \(nsError.localizedDescription)")
             details.append("Debug: \(String(describing: error))")
         }
-        lastError = APIError(kind: .unexpected, title: title, url: nil, details: details)
+        lastError = APIError(kind: .unexpected, title: title, url: nil, details: details, message: userMessage)
     }
 }

@@ -87,7 +87,7 @@ final class DownloadManager {
     func download(_ track: StoredTrack) {
         refusals[track.serverID] = nil
         guard preflights[track.serverID] == nil else {
-            refusals[track.serverID] = .invalidInput("Already checking", detail: "The pre-flight check for this track is still running.")
+            refusals[track.serverID] = .invalidInput("Verifica già in corso", detail: "Il controllo del server per questo brano non è ancora finito: attendi qualche secondo.")
             return
         }
         switch track.downloadState {
@@ -96,14 +96,14 @@ final class DownloadManager {
                 await enqueue(track, automatic: false, note: nil, keepQueuePosition: false, failureLead: nil)
             }
         case .queued, .downloading, .downloaded:
-            refusals[track.serverID] = .invalidInput("Nothing to do", detail: "This track is already \(track.downloadState.label.lowercased()).")
+            refusals[track.serverID] = .invalidInput("Niente da fare", detail: "Questo brano è già \(track.downloadState.label.lowercased()).")
         }
     }
 
     func cancel(_ track: StoredTrack) {
         refusals[track.serverID] = nil
         guard track.downloadState == .queued || track.downloadState == .downloading else {
-            refusals[track.serverID] = .invalidInput("Nothing to cancel", detail: "This track is \(track.downloadState.label.lowercased()).")
+            refusals[track.serverID] = .invalidInput("Niente da annullare", detail: "Il download di questo brano non è in corso.")
             return
         }
         let token = track.downloadToken
@@ -121,7 +121,7 @@ final class DownloadManager {
     func dismiss(_ track: StoredTrack) {
         refusals[track.serverID] = nil
         guard track.downloadState == .failed || track.downloadState == .cancelled else {
-            refusals[track.serverID] = .invalidInput("Nothing to dismiss", detail: "This track is \(track.downloadState.label.lowercased()).")
+            refusals[track.serverID] = .invalidInput("Niente da ignorare", detail: "Questo brano non ha un download non riuscito o annullato.")
             return
         }
         track.errorText = nil
@@ -135,14 +135,15 @@ final class DownloadManager {
     func removeFile(_ track: StoredTrack) {
         refusals[track.serverID] = nil
         guard track.downloadState == .downloaded else {
-            refusals[track.serverID] = .invalidInput("Nothing to remove", detail: "This track is \(track.downloadState.label.lowercased()).")
+            refusals[track.serverID] = .invalidInput("Niente da rimuovere", detail: "Questo brano non è scaricato sul telefono.")
             return
         }
         if let fileName = track.fileName {
             do {
                 try LocalFiles.removeIfPresent(try LocalFiles.url(.music, fileName))
             } catch {
-                refusals[track.serverID] = .storage("Could not delete the audio file", location: nil, error: error)
+                refusals[track.serverID] = .storage("Could not delete the audio file", location: nil, error: error,
+                                                     message: "Impossibile eliminare il file audio dal telefono: riprova; se si ripete, riavvia l'app.")
                 return
             }
         }
@@ -195,8 +196,8 @@ final class DownloadManager {
     func serverFileChanged(for track: StoredTrack) {
         switch track.downloadState {
         case .downloaded:
-            if let problem = discardLocalData(for: track) {
-                notice(problem)
+            if discardLocalData(for: track) != nil {
+                notice("Il file sul server di “\(track.title ?? "un brano")” è cambiato, ma il vecchio file non si è potuto eliminare dal telefono: verrà eliminato al prossimo controllo dei trasferimenti.")
             }
             track.fileName = nil
             track.storedBytes = nil
@@ -226,7 +227,7 @@ final class DownloadManager {
     /// Called by the app delegate when iOS launches or wakes the app for this session.
     func handleBackgroundEvents(identifier: String, completionHandler: @escaping () -> Void) {
         guard identifier == Self.sessionIdentifier else {
-            notice("iOS delivered events for an unknown background session \"\(identifier)\"; ignored.")
+            notice("iOS ha consegnato eventi per una sessione di download sconosciuta, che sono stati ignorati: non serve fare nulla.")
             completionHandler()
             return
         }
@@ -251,7 +252,7 @@ final class DownloadManager {
     func checkTransfers(reason: String) {
         guard !isChecking else { return }
         guard let session else {
-            notice("Transfer check skipped: the background session does not exist.")
+            notice("Controllo dei trasferimenti saltato: la sessione dei download in background non esiste. Riavvia l'app.")
             return
         }
         isChecking = true
@@ -261,7 +262,7 @@ final class DownloadManager {
             do {
                 try await Task.sleep(for: .seconds(5))
             } catch {
-                notice("Transfer check was interrupted: \(error.localizedDescription)")
+                notice("Il controllo dei trasferimenti si è interrotto: ripartirà alla prossima apertura dell'app.")
                 isChecking = false
                 return
             }
@@ -301,7 +302,7 @@ final class DownloadManager {
         do {
             tracks = try context.fetch(FetchDescriptor<StoredTrack>())
         } catch {
-            notice("Transfer check could not read the local library: \(error.localizedDescription)")
+            notice("Il controllo dei trasferimenti non ha potuto leggere la libreria sul telefono: riavvia l'app; se si ripete, controlla lo spazio libero.")
             return []
         }
 
@@ -329,7 +330,7 @@ final class DownloadManager {
                 do {
                     present = LocalFiles.exists(try LocalFiles.url(.music, fileName))
                 } catch {
-                    notice("Could not check the file of \(track.title ?? track.serverID): \(error.localizedDescription)")
+                    notice("Impossibile controllare il file di “\(track.title ?? "un brano")”: verrà ricontrollato alla prossima apertura dell'app.")
                     continue
                 }
             } else {
@@ -346,12 +347,12 @@ final class DownloadManager {
         }
 
         var summary: [String] = []
-        if restarted > 0 { summary.append("restarting \(restarted) lost transfer(s), each after a pre-flight check") }
-        if recovered.adopted > 0 { summary.append("recovered \(recovered.adopted) verified file(s) from interrupted transfers") }
-        if recovered.removed > 0 { summary.append("deleted \(recovered.removed) stray file(s)") }
-        if missing > 0 { summary.append("\(missing) downloaded track(s) had lost their file and were marked failed") }
+        if restarted > 0 { summary.append("\(restarted) trasferimenti persi da iOS vengono riavviati, ciascuno dopo un controllo del server") }
+        if recovered.adopted > 0 { summary.append("\(recovered.adopted) file completati da trasferimenti interrotti sono stati verificati e recuperati") }
+        if recovered.removed > 0 { summary.append("\(recovered.removed) file non più usati sono stati eliminati") }
+        if missing > 0 { summary.append("\(missing) brani scaricati avevano perso il file e sono segnati come non riusciti: scaricali di nuovo") }
         if !summary.isEmpty {
-            notice("Transfer check (\(reason)): " + summary.joined(separator: "; ") + ".")
+            notice("Controllo dei trasferimenti (\(reason)): " + summary.joined(separator: "; ") + ".")
         }
         save("recording the transfer check")
         return toRestart
@@ -364,7 +365,7 @@ final class DownloadManager {
         do {
             files = try LocalFiles.contents(of: .music)
         } catch {
-            notice("Could not list the Music folder: \(error.localizedDescription)")
+            notice("Impossibile leggere la cartella della musica sul telefono: i file rimasti non sono stati controllati; riavvia l'app.")
             return (0, 0)
         }
         var referenced = Set<String>()
@@ -385,7 +386,7 @@ final class DownloadManager {
             do {
                 if let modified = try LocalFiles.modificationDate(file), Date().timeIntervalSince(modified) < 60 { continue }
             } catch {
-                notice("Could not read the date of \(name): \(error.localizedDescription)")
+                notice("Impossibile leggere la data di un file rimasto: verrà ricontrollato alla prossima apertura dell'app.")
                 continue
             }
 
@@ -411,7 +412,7 @@ final class DownloadManager {
                         continue
                     }
                 } catch {
-                    notice("Could not verify leftover file \(name): \(error.localizedDescription). It will be deleted.")
+                    notice("Impossibile verificare un file rimasto da un trasferimento interrotto: viene eliminato e il brano si potrà riscaricare.")
                 }
             }
 
@@ -419,7 +420,7 @@ final class DownloadManager {
                 try FileManager.default.removeItem(at: file)
                 removed += 1
             } catch {
-                notice("Could not delete stray file \(name): \(error.localizedDescription)")
+                notice("Impossibile eliminare un file non più usato: verrà ritentato alla prossima apertura dell'app.")
             }
         }
         return (adopted, removed)
@@ -444,19 +445,19 @@ final class DownloadManager {
     private func prepare(_ track: StoredTrack) -> Result<Prepared, PrepareFailure> {
         guard session != nil else {
             return .failure(PrepareFailure(cause: .other, error: .invalidInput(
-                "Downloads unavailable", detail: "The background download session was not created."
+                "Download non disponibili", detail: "La sessione dei download in background non è stata creata: riavvia l'app."
             )))
         }
         guard let sha = track.sha256?.lowercased(), sha.count == 64 else {
             return .failure(PrepareFailure(cause: .missingServerData, error: .invalidInput(
-                "Cannot verify this track",
-                detail: "The server gave no valid SHA-256 for track \(track.serverID) (got \"\(track.sha256 ?? "nothing")\"), so a download could not be checked. Sync the library and try again."
+                "Impossibile verificare questo brano",
+                detail: "Il server non ha fornito l'impronta del file, quindi il download non si potrebbe controllare: sincronizza la libreria e riprova."
             )))
         }
         guard let bytes = track.fileBytes, bytes > 0 else {
             return .failure(PrepareFailure(cause: .missingServerData, error: .invalidInput(
-                "Unknown file size",
-                detail: "The server gave no file size for track \(track.serverID), so free space cannot be checked. Sync the library and try again."
+                "Dimensione del file sconosciuta",
+                detail: "Il server non ha indicato quanto pesa il file, quindi non si può controllare lo spazio libero: sincronizza la libreria e riprova."
             )))
         }
         let client: APIClient
@@ -549,7 +550,7 @@ final class DownloadManager {
         note: String?
     ) throws {
         guard let session else {
-            throw APIError.invalidInput("Downloads unavailable", detail: "The background download session was not created.")
+            throw APIError.invalidInput("Download non disponibili", detail: "La sessione dei download in background non è stata creata: riavvia l'app.")
         }
         let token = UUID().uuidString
         let description = try DownloadTaskDescriptor(
@@ -626,7 +627,7 @@ final class DownloadManager {
         do {
             tracks = try context.fetch(FetchDescriptor<StoredTrack>())
         } catch {
-            notice("The server address changed, but downloads could not be read to re-target them: \(error.localizedDescription)")
+            notice("L'indirizzo del server è cambiato, ma i download non si sono potuti leggere per aggiornarli: tocca Riprova sui download non riusciti.")
             return
         }
 
@@ -710,39 +711,39 @@ final class DownloadManager {
             }
         }
 
-        var lines = ["Server address changed from \(previous.isEmpty ? "(none)" : previous) to \(new)."]
+        var lines = ["Indirizzo del server cambiato da \(previous.isEmpty ? "nessuno" : previous) a \(new)."]
         if !candidates.isEmpty {
             var parts: [String] = []
-            if !queued.isEmpty { parts.append("\(queued.count) queued") }
-            if !revivable.isEmpty { parts.append("\(revivable.count) failed because the server could not be reached") }
-            var line = "Checked again against the new address, in their original order: " + parts.joined(separator: " and ") + "."
-            line += " Result: \(requeued + revived) now queued"
-            if revived > 0 { line += " (\(revived) of them revived from failed)" }
-            if failedAgain > 0 { line += ", \(failedAgain) failed again (their rows show why)" }
-            if skipped > 0 { line += ", \(skipped) skipped because they were changed or removed meanwhile" }
+            if !queued.isEmpty { parts.append("\(queued.count) in coda") }
+            if !revivable.isEmpty { parts.append("\(revivable.count) non riusciti perché il server era irraggiungibile") }
+            var line = "Ricontrollati con il nuovo indirizzo, nell'ordine originale: " + parts.joined(separator: " e ") + "."
+            line += " Risultato: \(requeued + revived) ora in coda"
+            if revived > 0 { line += " (\(revived) recuperati tra i non riusciti)" }
+            if failedAgain > 0 { line += ", \(failedAgain) non riusciti di nuovo, e la loro riga spiega perché" }
+            if skipped > 0 { line += ", \(skipped) saltati perché modificati o rimossi nel frattempo" }
             lines.append(line + ".")
         }
         if !leftAlone.isEmpty {
             var byCause: [String: Int] = [:]
             for track in leftAlone {
                 let reason = track.failureCause?.notRevivedReason
-                    ?? "the failure was recorded before this build tracked causes, so it cannot be told apart"
+                    ?? "l'errore risale a una versione dell'app che non ne registrava la causa"
                 byCause[reason, default: 0] += 1
             }
             let detail = byCause
                 .sorted { $0.value > $1.value }
                 .map { "\($0.value): \($0.key)" }
-                .joined(separator: "\n  ")
-            lines.append("\(leftAlone.count) failed download(s) left alone, still retryable by hand, because an address change cannot fix them:\n  " + detail)
+                .joined(separator: "; ")
+            lines.append("\(leftAlone.count) download non riusciti restano come sono, perché un cambio di indirizzo non li risolve; si possono riprovare a mano. Motivi: " + detail + ".")
         }
         if !running.isEmpty {
-            lines.append("\(running.count) running transfer(s) left to finish on the previous address: they were already receiving data, and each file is checked against its SHA-256 whichever address served it, so restarting would only discard progress. If one fails, Retry uses the new address.")
+            lines.append("\(running.count) trasferimenti in corso finiscono sull'indirizzo precedente: stavano già ricevendo dati e ogni file viene comunque verificato. Se uno non riesce, Riprova usa il nuovo indirizzo.")
         }
         if discardedResume > 0 {
-            lines.append("\(discardedResume) failed or cancelled download(s) had resume data for the previous address discarded; Retry starts them from the beginning.")
+            lines.append("\(discardedResume) download non riusciti o annullati ripartiranno dall'inizio con Riprova, perché i dati per riprenderli valevano per il vecchio indirizzo.")
         }
         if candidates.isEmpty && leftAlone.isEmpty && running.isEmpty && discardedResume == 0 {
-            lines.append("No downloads were affected.")
+            lines.append("Nessun download interessato.")
         }
         notice(lines.joined(separator: "\n"))
         save("re-targeting downloads")
@@ -757,7 +758,7 @@ final class DownloadManager {
                 do {
                     try await Task.sleep(for: .seconds(15))
                 } catch {
-                    notice("The check for downloads that never start stopped: \(error.localizedDescription)")
+                    notice("Il controllo dei download che non partono si è fermato: ripartirà alla prossima apertura dell'app.")
                     break
                 }
             }
@@ -784,7 +785,7 @@ final class DownloadManager {
         do {
             queued = try context.fetch(FetchDescriptor<StoredTrack>()).filter { $0.downloadState == .queued }
         } catch {
-            notice("Could not read queued downloads to check for ones that never started: \(error.localizedDescription)")
+            notice("Impossibile leggere i download in coda per controllare quelli che non partono: riavvia l'app.")
             return false
         }
 
@@ -820,8 +821,8 @@ final class DownloadManager {
             neverStarted.append(track.title ?? track.serverID)
         }
         if !neverStarted.isEmpty {
-            notice("\(neverStarted.count) download(s) received no data within \(Int(Self.startDeadline / 60)) minutes and were marked failed: "
-                + neverStarted.joined(separator: ", ") + ". Check the server address, then Retry.")
+            notice("\(neverStarted.count) download non hanno ricevuto dati entro \(Int(Self.startDeadline / 60)) minuti e sono segnati come non riusciti: "
+                + neverStarted.joined(separator: ", ") + ". Controlla l'indirizzo del server in Impostazioni, poi tocca Riprova.")
         }
         if context.hasChanges {
             save("checking for downloads that never started")
@@ -844,7 +845,8 @@ final class DownloadManager {
         do {
             available = try LocalFiles.availableCapacity()
         } catch {
-            throw APIError.storage("Could not check free space before downloading", location: nil, error: error)
+            throw APIError.storage("Could not check free space before downloading", location: nil, error: error,
+                                   message: "Impossibile controllare lo spazio libero sul telefono prima del download: riprova tra poco.")
         }
         let pending: Int
         do {
@@ -852,7 +854,8 @@ final class DownloadManager {
                 .filter { $0.serverID != track.serverID && ($0.downloadState == .queued || $0.downloadState == .downloading) }
                 .reduce(0) { $0 + ($1.fileBytes ?? 0) }
         } catch {
-            throw APIError.storage("Could not read queued downloads to check free space", location: nil, error: error)
+            throw APIError.storage("Could not read queued downloads to check free space", location: nil, error: error,
+                                   message: "Impossibile leggere i download in coda per controllare lo spazio libero: riprova tra poco.")
         }
         let needed = Int64(bytes + pending + Self.reserveBytes)
         guard available >= needed else {
@@ -866,7 +869,8 @@ final class DownloadManager {
                     "Kept free as a reserve: \(Formatting.bytes(Self.reserveBytes))",
                     "Needed: \(Formatting.bytes(Int(needed))), available: \(Formatting.bytes(Int(available)))",
                     "Free up space or remove downloaded tracks, then try again.",
-                ]
+                ],
+                message: "Spazio insufficiente sul telefono: per questo download servono \(Self.size(Int(needed))) e ne restano \(Self.size(Int(available))). Libera spazio o rimuovi brani scaricati, poi riprova."
             )
         }
     }
@@ -903,7 +907,7 @@ final class DownloadManager {
             finish(trackID: trackID, token: token, result: result)
 
         case .unmatched(let taskIdentifier, let error):
-            notice("A background transfer (task \(taskIdentifier)) could not be matched to a track and was ignored.\n\(error.fullText)")
+            notice("Un trasferimento in background non corrispondeva a nessun brano ed è stato ignorato: non serve fare nulla.")
 
         case .allEventsDelivered:
             save("recording background transfer results")
@@ -1016,7 +1020,7 @@ final class DownloadManager {
         do {
             return try context.fetch(descriptor).first
         } catch {
-            notice("Could not read track \(id) from the local library: \(error.localizedDescription)")
+            notice("Impossibile leggere un brano dalla libreria sul telefono: se i download non si aggiornano, riavvia l'app.")
             return nil
         }
     }
@@ -1025,7 +1029,7 @@ final class DownloadManager {
         do {
             try LocalFiles.removeIfPresent(try LocalFiles.url(.music, fileName))
         } catch {
-            notice("Could not delete \(fileName), which is unused because \(reason): \(error.localizedDescription)")
+            notice("Impossibile eliminare un file non più usato: verrà ritentato alla prossima apertura dell'app.")
         }
     }
 
@@ -1033,12 +1037,17 @@ final class DownloadManager {
         do {
             try context.save()
         } catch {
-            notice("Saving the local library failed while \(activity): \(error.localizedDescription)\n\(String(describing: error))")
+            notice("Il salvataggio della libreria sul telefono non è riuscito: controlla lo spazio libero; alcune modifiche ai download potrebbero non essere state registrate.")
         }
     }
 
     func notice(_ text: String) {
         notices.insert(Notice(date: Date(), text: text), at: 0)
+    }
+
+    /// A size for a message, e.g. "12,4 MB".
+    private static func size(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
     private static func describeCancelReason(_ reason: Int) -> String {

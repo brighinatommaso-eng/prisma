@@ -161,9 +161,7 @@ struct PlaylistsContent: View {
             }
             .prismaRow()
         }
-        .onDelete { offsets in
-            store.delete(offsets.map { playlists[$0] })
-        }
+        // No onDelete: its edit-mode button would read "Delete". Swipe offers Elimina.
         .onMove { source, destination in
             store.movePlaylists(playlists, from: source, to: destination)
         }
@@ -207,6 +205,7 @@ struct PlaylistDetailView: View {
 
     @State private var renaming = false
     @State private var renameText = ""
+    @State private var editMode: EditMode = .inactive
 
     var body: some View {
         let entries = PlaylistStore.orderedEntries(of: playlist)
@@ -247,10 +246,12 @@ struct PlaylistDetailView: View {
                         MissingEntryRow(playlist: playlist, entry: entry)
                     }
                 }
+                .swipeActions(edge: .trailing) {
+                    Button("Rimuovi", role: .destructive) {
+                        store.remove([entry], from: playlist)
+                    }
+                }
                 .prismaRow()
-            }
-            .onDelete { offsets in
-                store.remove(offsets.map { entries[$0] }, from: playlist)
             }
             .onMove { source, destination in
                 store.moveEntries(in: playlist, ordered: entries, from: source, to: destination)
@@ -271,11 +272,12 @@ struct PlaylistDetailView: View {
             }
         }
         .prismaList()
+        .environment(\.editMode, $editMode)
         .navigationTitle(playlist.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                EditButton()
+                EditModeButton(editMode: $editMode)
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -317,44 +319,20 @@ struct PlaylistDetailView: View {
                 .foregroundStyle(ink.secondary)
                 .padding(.top, 5)
 
-            HStack(spacing: 10) {
-                Button {
-                    guard let first = playable.first else { return }
-                    // Riproduci plays in playlist order, even if shuffle was left on.
-                    playback.setShuffle(false)
-                    presenter.sourceName = playlist.name
-                    store.play(playlist, fromEntryAt: first)
-                } label: {
-                    Label("Riproduci", systemImage: "play.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(ink.fillForeground)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .background(ink.fillBackground, in: RoundedRectangle(cornerRadius: 16))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    // Starts shuffled: shuffle on first, so the new queue is built
-                    // shuffled from a random downloaded entry.
-                    guard let start = playable.randomElement() else { return }
-                    playback.setShuffle(true)
-                    presenter.sourceName = playlist.name
-                    store.play(playlist, fromEntryAt: start)
-                } label: {
-                    Label("Casuale", systemImage: "shuffle")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(ink.primary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 48)
-                        .prismaGlass(RoundedRectangle(cornerRadius: 16))
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+            PlayShufflePair(isEnabled: !playable.isEmpty) {
+                guard let first = playable.first else { return }
+                // Riproduci plays in playlist order, even if shuffle was left on.
+                playback.setShuffle(false)
+                presenter.sourceName = playlist.name
+                store.play(playlist, fromEntryAt: first)
+            } onShuffle: {
+                // Starts shuffled: shuffle on first, so the new queue is built
+                // shuffled from a random downloaded entry.
+                guard let start = playable.randomElement() else { return }
+                playback.setShuffle(true)
+                presenter.sourceName = playlist.name
+                store.play(playlist, fromEntryAt: start)
             }
-            .disabled(playable.isEmpty)
-            .opacity(playable.isEmpty ? 0.45 : 1)
             .padding(.top, 20)
         }
         .frame(maxWidth: .infinity)
@@ -481,6 +459,14 @@ struct FavouritesContent: View {
             .filter { $0.favouritedAt != nil }
             .sorted { ($0.favouritedAt ?? .distantPast) > ($1.favouritedAt ?? .distantPast) }
 
+        if !favourites.isEmpty {
+            PlayShuffleButtons(tracks: favourites, sourceName: "Preferiti")
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
+
         if favourites.isEmpty {
             Text("Nessun preferito. Scorri verso destra su un brano, oppure tienilo premuto, per aggiungerlo.")
                 .font(.subheadline)
@@ -502,6 +488,72 @@ struct FavouritesContent: View {
                     .accessibilityLabel("Preferito")
             }
             .prismaRow()
+        }
+    }
+}
+
+// MARK: - Riproduci and Casuale
+
+/// Prototype `.acts`: Riproduci filled and Casuale in glass, side by side.
+struct PlayShufflePair: View {
+    let isEnabled: Bool
+    let onPlay: () -> Void
+    let onShuffle: () -> Void
+
+    @Environment(\.prismaInk) private var ink
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onPlay) {
+                Label("Riproduci", systemImage: "play.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(ink.fillForeground)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .background(ink.fillBackground, in: RoundedRectangle(cornerRadius: 16))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onShuffle) {
+                Label("Casuale", systemImage: "shuffle")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(ink.primary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .prismaGlass(RoundedRectangle(cornerRadius: 16))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.45)
+    }
+}
+
+/// Riproduci and Casuale over a list of tracks, in the order given: the queue is
+/// the downloaded ones among them. Riproduci turns shuffle off and starts at the
+/// first; Casuale turns shuffle on first, so the queue is built shuffled from a
+/// random one.
+struct PlayShuffleButtons: View {
+    let tracks: [StoredTrack]
+    let sourceName: String
+
+    @Environment(PlaybackEngine.self) private var playback
+    @Environment(PlayerPresenter.self) private var presenter
+
+    var body: some View {
+        let playable = tracks.indices.filter { tracks[$0].downloadState == .downloaded }
+        PlayShufflePair(isEnabled: !playable.isEmpty) {
+            guard let first = playable.first else { return }
+            playback.setShuffle(false)
+            presenter.sourceName = sourceName
+            playback.play(playlistTracks: tracks, startingAt: first)
+        } onShuffle: {
+            guard let start = playable.randomElement() else { return }
+            playback.setShuffle(true)
+            presenter.sourceName = sourceName
+            playback.play(playlistTracks: tracks, startingAt: start)
         }
     }
 }

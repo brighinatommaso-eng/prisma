@@ -128,7 +128,7 @@ struct MiniPlayerView: View {
 
     private var errorLine: some View {
         Button(action: openPlayer) {
-            Label("Errore di riproduzione · tocca per i dettagli", systemImage: "exclamationmark.triangle.fill")
+            Label("Errore di riproduzione · tocca per sapere perché", systemImage: "exclamationmark.triangle.fill")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(ink.primary)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -169,7 +169,6 @@ struct FullPlayerView: View {
 
     @State private var showingQueue = false
     @State private var addingToPlaylist = false
-    @State private var showingDetails = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -258,11 +257,6 @@ struct FullPlayerView: View {
                 } label: {
                     Label("Coda", systemImage: "list.bullet")
                 }
-                Button {
-                    showingDetails.toggle()
-                } label: {
-                    Label(showingDetails ? "Nascondi dettagli tecnici" : "Mostra dettagli tecnici", systemImage: "info.circle")
-                }
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 18, weight: .semibold))
@@ -309,22 +303,10 @@ struct FullPlayerView: View {
         transport
             .padding(.top, 12)
 
-        if showingDetails {
-            VStack(alignment: .leading, spacing: 6) {
-                if let index = playback.currentIndex {
-                    Text("Track \(index + 1) of \(playback.queue.count) in the queue")
-                }
-                Text("Album: \(track.album?.title ?? "none")")
-                Text("Shuffle \(playback.shuffle ? "on" : "off"), repeat \(playback.repeatMode.label.lowercased())")
-                if let problem = playback.artworkProblem {
-                    Text(problem)
-                }
-            }
-            .font(.caption2.monospaced())
-            .foregroundStyle(ink.primary)
-            .textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.top, 16)
+        if let problem = playback.artworkProblem {
+            ProblemBlock(problem)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 12)
         }
     }
 
@@ -427,8 +409,7 @@ struct FullPlayerView: View {
                 DismissLink { playback.clearMessage() }
             }
             if let error = playback.lastError {
-                ProblemBlock(summary: "Errore di riproduzione: " + PlainLanguage.summary(for: error).lowercasedFirst,
-                             details: .error(error))
+                ProblemBlock(PlainLanguage.message(for: error))
                 DismissLink { playback.clearError() }
             }
         }

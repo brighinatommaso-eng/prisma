@@ -17,6 +17,9 @@ struct LibraryView: View {
 
     @State private var confirmingFullResync = false
     @State private var filter: LibraryFilter = .albums
+    /// Owned here rather than by the system EditButton, whose labels would follow the
+    /// app's English development region.
+    @State private var editMode: EditMode = .inactive
 
     var body: some View {
         List {
@@ -35,11 +38,12 @@ struct LibraryView: View {
             }
         }
         .prismaList()
+        .environment(\.editMode, $editMode)
         .navigationTitle("Libreria")
         .toolbar {
             if filter == .playlists {
                 ToolbarItem(placement: .topBarTrailing) {
-                    EditButton()
+                    EditModeButton(editMode: $editMode)
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -62,6 +66,11 @@ struct LibraryView: View {
                 .accessibilityLabel("Sincronizzazione")
             }
         }
+        .onChange(of: filter) { _, newFilter in
+            if newFilter != .playlists {
+                editMode = .inactive
+            }
+        }
         .refreshable { [sync] in
             await sync.refresh()
         }
@@ -69,6 +78,7 @@ struct LibraryView: View {
             Button("Risincronizza tutto", role: .destructive) {
                 sync.syncNow(full: true)
             }
+            Button("Annulla", role: .cancel) {}
         } message: {
             Text("Scarica di nuovo l'intero catalogo. Album e brani che il server non elenca più vengono rimossi da questo iPhone, insieme ai file scaricati.")
         }
@@ -78,12 +88,22 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var albumsContent: some View {
+        let listed = listedTracks
+
+        if !listed.isEmpty {
+            PlayShuffleButtons(tracks: listed, sourceName: "Libreria")
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
+
         syncStatus
 
         if albums.isEmpty && tracks.isEmpty {
             Text(settings.savedAddress.isEmpty
                  ? "La libreria è vuota. Imposta l'indirizzo del server in Impostazioni, poi trascina verso il basso per sincronizzare."
-                 : "La libreria è vuota. Trascina verso il basso per sincronizzare.")
+                 : "La libreria è vuota. Trascina verso il basso per sincronizzare, oppure cerca un brano in Cerca.")
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
                 .padding(.vertical, 16)
@@ -97,31 +117,32 @@ struct LibraryView: View {
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(StoredTrack.albumOrder(album.tracks)) { track in
                 TrackRow(track: track, onPlay: { play(track) }) {
-                    TrackNumber(track: track)
+                    EmptyView()
                 }
                 .prismaRow()
             }
         }
 
-        let unlisted = StoredTrack.albumOrder(tracks.filter { $0.album == nil })
+        let unlisted = unlistedTracks
         if !unlisted.isEmpty {
             SectionLabel("Brani senza album")
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(unlisted) { track in
                 TrackRow(track: track, onPlay: { play(track) }) {
-                    TrackNumber(track: track)
+                    EmptyView()
                 }
                 .prismaRow()
             }
         }
 
-        TechnicalDetailsSection {
-            libraryDetails
-        }
-        .padding(.top, 12)
-        .prismaRow()
-        .listRowSeparator(.hidden)
+        Text(lastSyncLine)
+            .font(.caption)
+            .foregroundStyle(ink.secondary)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+            .prismaRow()
+            .listRowSeparator(.hidden)
     }
 
     private func play(_ track: StoredTrack) {
@@ -129,8 +150,7 @@ struct LibraryView: View {
         playback.play(track: track)
     }
 
-    /// Only what needs attention: a sync running or failed. The rest is in the
-    /// technical details.
+    /// Only what needs attention: a sync running or failed.
     @ViewBuilder
     private var syncStatus: some View {
         switch sync.status {
@@ -148,53 +168,17 @@ struct LibraryView: View {
             .prismaRow()
             .listRowSeparator(.hidden)
         case .failed(let error):
-            VStack(alignment: .leading, spacing: 0) {
-                ProblemBlock(summary: "Sincronizzazione non riuscita: " + PlainLanguage.summary(for: error).lowercasedFirst,
-                             details: .error(error))
-                Text("La libreria qui sotto è quella già salvata sul telefono.")
-                    .font(.caption)
-                    .foregroundStyle(ink.secondary)
-                    .padding(.bottom, 8)
-            }
-            .prismaRow()
-            .listRowSeparator(.hidden)
+            ProblemBlock("La sincronizzazione della libreria non è riuscita, quindi vedi quella già salvata sul telefono. " + PlainLanguage.message(for: error))
+                .prismaRow()
+                .listRowSeparator(.hidden)
         }
     }
 
-    @ViewBuilder
-    private var libraryDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(Formatting.serverLine(settings.savedAddress))
-                .textSelection(.enabled)
-            Text("\(albums.count) albums, \(tracks.count) tracks stored on this iPhone. \(tracks.filter { $0.downloadState == .downloaded }.count) downloaded.")
-            if case .syncing(let started, let since) = sync.status {
-                LoadingRow(
-                    message: since.map { "Syncing changes since \($0)…" } ?? "Syncing the full catalogue…",
-                    since: started,
-                    timeout: APIClient.Timeout.library
-                )
-            }
-            if case .succeeded(let date) = sync.status {
-                Text("Sync succeeded at \(Formatting.time(date)).")
-            }
-            if let record = records.first, let lastSyncAt = record.lastSyncAt {
-                FieldRow(label: "Last successful sync", value: Formatting.dateTime(lastSyncAt))
-                if let summary = record.lastSummary {
-                    Text(summary)
-                        .font(.caption2.monospaced())
-                        .textSelection(.enabled)
-                }
-            } else {
-                Text("Never synced.")
-            }
-            ForEach(sortedAlbums.filter { $0.coverError != nil }) { album in
-                if let coverError = album.coverError {
-                    Text("Cover of “\(album.title)” (album id \(album.serverID)) failed:\n\(coverError)")
-                        .font(.caption2.monospaced())
-                        .textSelection(.enabled)
-                }
-            }
+    private var lastSyncLine: String {
+        guard let lastSyncAt = records.first?.lastSyncAt else {
+            return "Mai sincronizzata: trascina verso il basso per scaricare il catalogo dal server."
         }
+        return "Ultima sincronizzazione: " + lastSyncAt.formatted(date: .abbreviated, time: .shortened) + "."
     }
 
     private var sortedAlbums: [StoredAlbum] {
@@ -203,6 +187,15 @@ struct LibraryView: View {
             if byArtist != .orderedSame { return byArtist == .orderedAscending }
             return $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
+    }
+
+    private var unlistedTracks: [StoredTrack] {
+        StoredTrack.albumOrder(tracks.filter { $0.album == nil })
+    }
+
+    /// Every track in the order shown: albums, then tracks without an album.
+    private var listedTracks: [StoredTrack] {
+        sortedAlbums.flatMap { StoredTrack.albumOrder($0.tracks) } + unlistedTracks
     }
 }
 
@@ -214,28 +207,26 @@ extension String {
     }
 }
 
-/// Prototype `.tno`.
-struct TrackNumber: View {
-    let track: StoredTrack
-
-    @Environment(\.prismaInk) private var ink
+/// "Modifica" / "Fine" for a list that reorders, driving the list's own edit mode.
+struct EditModeButton: View {
+    @Binding var editMode: EditMode
 
     var body: some View {
-        Text(track.trackNo.map { String($0) } ?? "—")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(ink.secondary)
-            .frame(width: 18, alignment: .leading)
+        Button(editMode.isEditing ? "Fine" : "Modifica") {
+            withAnimation {
+                editMode = editMode.isEditing ? .inactive : .active
+            }
+        }
     }
 }
 
 /// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
-/// download or cannot be read shows a warning that reveals the error.
+/// download or cannot be read says so under the header.
 private struct AlbumHeaderRow: View {
     let album: StoredAlbum
 
     @Environment(\.prismaInk) private var ink
     @State private var coverProblem: String?
-    @State private var showingCoverProblem = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -254,22 +245,9 @@ private struct AlbumHeaderRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                if problemText != nil {
-                    Button {
-                        showingCoverProblem.toggle()
-                    } label: {
-                        Image(systemName: "exclamationmark.triangle")
-                            .foregroundStyle(ink.secondary)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel(showingCoverProblem ? "Nascondi dettagli tecnici della copertina" : "Copertina non disponibile. Mostra dettagli tecnici")
-                }
             }
-            if showingCoverProblem, let problemText {
-                ErrorReport(storedText: "Copertina non disponibile\n" + problemText)
-                    .foregroundStyle(ink.primary)
+            if let problem = problemText {
+                ProblemBlock(problem)
             }
         }
         .padding(.top, 22)
@@ -277,7 +255,12 @@ private struct AlbumHeaderRow: View {
     }
 
     private var problemText: String? {
-        let parts = [album.coverError.map { "Cover download failed:\n\($0)" }, coverProblem].compactMap { $0 }
-        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+        if let coverProblem {
+            return coverProblem
+        }
+        if album.coverError != nil {
+            return "La copertina di questo album non è stata scaricata: viene ritentata a ogni sincronizzazione; se resta così, controlla che il server abbia la copertina."
+        }
+        return nil
     }
 }

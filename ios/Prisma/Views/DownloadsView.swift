@@ -9,7 +9,6 @@ import SwiftUI
 /// row says which phase it is in.
 struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
-    @Environment(AcquisitionCoordinator.self) private var acquisitionCoordinator
     @Query(sort: \PendingAcquisition.createdAt) private var acquisitions: [PendingAcquisition]
     @Environment(\.prismaInk) private var ink
 
@@ -42,12 +41,10 @@ struct DownloadsView: View {
             group("Annullati", cancelled)
             group("Scaricati", downloaded)
 
-            TechnicalDetailsSection {
-                transferDetails
-            }
-            .padding(.top, 12)
-            .prismaRow()
-            .listRowSeparator(.hidden)
+            transferFooter
+                .padding(.top, 12)
+                .prismaRow()
+                .listRowSeparator(.hidden)
         }
         .prismaList()
         .navigationTitle("Download")
@@ -70,77 +67,43 @@ struct DownloadsView: View {
         }
     }
 
-    /// Background transfer checks and notices: developer information.
+    /// What the download machinery did on its own, e.g. transfers restarted after
+    /// the app was closed, and the manual transfer check.
     @ViewBuilder
-    private var transferDetails: some View {
+    private var transferFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(acquisitionCoordinator.isRunning
-                 ? "Server job polling: running (every \(Int(AcquisitionCoordinator.serverPollInterval)) s while the server works)."
-                 : "Server job polling: stopped (nothing pending, or the app is in the background).")
-            if let lastPoll = acquisitionCoordinator.lastPollAt {
-                Text("Last GET /downloads at \(Formatting.time(lastPoll)).")
-            }
-            if let problem = acquisitionCoordinator.pollProblem {
-                Text(problem)
-                    .textSelection(.enabled)
-            }
-            ForEach(acquisitions) { record in
-                Text(Self.acquisitionLine(record))
-                    .font(.caption2.monospaced())
-                    .textSelection(.enabled)
-            }
-            if downloads.isChecking {
-                HStack(spacing: 12) {
-                    ProgressView()
-                    Text("Checking transfers…")
+            if !downloads.notices.isEmpty {
+                SectionLabel("Avvisi")
+                ForEach(downloads.notices) { notice in
+                    Text(notice.date.formatted(date: .omitted, time: .shortened) + " · " + notice.text)
+                        .font(.footnote)
+                        .foregroundStyle(ink.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                DismissLink { downloads.clearNotices() }
             }
-            if let count = downloads.liveTransferCount, let checked = downloads.lastCheck {
-                Text("iOS reported \(count) transfer(s) in progress at \(Formatting.time(checked)).")
-            } else {
-                Text("Transfers not checked yet.")
-            }
-            Button("Controlla trasferimenti ora") {
-                downloads.checkTransfers(reason: "manual check")
+            Button {
+                downloads.checkTransfers(reason: "controllo manuale")
+            } label: {
+                HStack(spacing: 8) {
+                    if downloads.isChecking {
+                        ProgressView()
+                            .tint(ink.secondary)
+                    }
+                    Text(downloads.isChecking ? "Controllo dei trasferimenti…" : "Controlla i trasferimenti")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(ink.accentText)
+                }
+                .frame(minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
-            .frame(minHeight: 44)
             .disabled(downloads.isChecking)
-            Text("The check restarts transfers iOS has lost, e.g. after the app was closed from the app switcher. It waits a few seconds first so finished transfers are recorded, not restarted.")
-                .font(.caption2)
-
-            if !downloads.notices.isEmpty {
-                Text("Notices")
-                    .font(.caption.weight(.semibold))
-                    .padding(.top, 8)
-                ForEach(downloads.notices) { notice in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(Formatting.time(notice.date))
-                        Text(notice.text)
-                            .font(.caption2.monospaced())
-                            .textSelection(.enabled)
-                    }
-                }
-                Button("Cancella avvisi") { downloads.clearNotices() }
-                    .buttonStyle(.borderless)
-                    .frame(minHeight: 44)
-            }
+            Text("Riavvia i download che iOS ha perso, per esempio dopo aver chiuso l'app dal selettore delle app. Succede anche da solo a ogni apertura.")
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
         }
-    }
-
-    /// One acquisition's raw state, for the technical details.
-    private static func acquisitionLine(_ record: PendingAcquisition) -> String {
-        var parts = ["\(record.videoID): \(record.stageRaw)"]
-        if let jobID = record.jobID {
-            parts.append("job \(jobID)")
-        }
-        if let state = record.serverJobState {
-            parts.append("server \(state)")
-        }
-        if let error = record.serverError {
-            parts.append("server error: \(error)")
-        }
-        return parts.joined(separator: ", ")
+        .padding(.bottom, 12)
     }
 
     private func items(in states: Set<DownloadState>) -> [StoredTrack] {
@@ -157,43 +120,35 @@ struct DownloadsView: View {
 }
 
 /// Prototype `.job`: artwork with the state drawn over it, title and artist, and on
-/// the right the percentage, a cancel button or Riprova. Failures read in plain
-/// language with their technical details one tap away; every other row shows its
-/// technical details on tap.
+/// the right the percentage, a cancel button or Riprova. A failure reads in full,
+/// in plain language, under the row.
 private struct DownloadRow: View {
     let track: StoredTrack
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.prismaInk) private var ink
 
-    @State private var showingDetails = false
     @State private var addingToPlaylist = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
-                Button {
-                    showingDetails.toggle()
-                } label: {
-                    HStack(spacing: 12) {
-                        artwork
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(track.title ?? "Senza titolo")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(ink.primary)
-                                .lineLimit(1)
-                            Text(subtitle)
-                                .font(.caption)
-                                .foregroundStyle(ink.secondary)
-                                .lineLimit(2)
-                        }
-                        Spacer(minLength: 0)
+                HStack(spacing: 12) {
+                    artwork
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(track.title ?? "Senza titolo")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(ink.primary)
+                            .lineLimit(1)
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(ink.secondary)
+                            .lineLimit(2)
                     }
-                    .frame(minHeight: 62)
-                    .contentShape(Rectangle())
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain)
-                .accessibilityHint(showingDetails ? "Nasconde i dettagli tecnici" : "Mostra i dettagli tecnici")
+                .frame(minHeight: 62)
+                .accessibilityElement(children: .combine)
 
                 trailing
             }
@@ -202,19 +157,8 @@ private struct DownloadRow: View {
                 ProblemBlock(error: refusal)
             }
 
-            if track.downloadState == .failed {
-                TechnicalDetailsToggle(expanded: $showingDetails)
-            }
-
-            if showingDetails {
-                VStack(alignment: .leading, spacing: 8) {
-                    if track.downloadState == .failed {
-                        ErrorReport(storedText: track.errorText ?? "No error text was recorded for this failure.")
-                    }
-                    TrackTechnicalDetails(track: track)
-                }
-                .foregroundStyle(ink.primary)
-                .padding(.bottom, 12)
+            if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
+                ProblemBlock(PlainLanguage.message(for: track.failureCause))
             }
         }
         .contextMenu {
@@ -240,7 +184,7 @@ private struct DownloadRow: View {
     /// Device-phase rows say so, to read apart from acquisitions still on the server.
     private var subtitle: String {
         if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
-            return "Download sul telefono non riuscito: " + PlainLanguage.summary(for: track.failureCause).lowercasedFirst
+            return "Download sul telefono non riuscito"
         }
         switch track.downloadState {
         case .queued, .downloading:
