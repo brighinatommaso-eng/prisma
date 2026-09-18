@@ -212,6 +212,90 @@ final class PlaybackEngine {
         persist()
     }
 
+    // MARK: - Used by LibrarySync
+
+    /// Lets go of tracks that are about to leave the library, before their rows are
+    /// deleted.
+    ///
+    /// The sync calls this while the rows still exist, so nothing in playback keeps
+    /// pointing at a track the store no longer has: the queue holds ids that would
+    /// stop resolving, and the mini player, the full player and Now Playing would go
+    /// on showing a track that is gone until something else happened to make them
+    /// render again. If one of the removed tracks is playing, playback moves to the
+    /// next one still in the queue, or stops.
+    func forget(trackIDs gone: Set<String>) {
+        guard !gone.isEmpty else { return }
+        guard queue.contains(where: { gone.contains($0) }) || albumOrder.contains(where: { gone.contains($0) }) else { return }
+
+        let losingCurrent = currentTrackID.map { gone.contains($0) } ?? false
+        let resume = wantsToPlay
+        // Where the next surviving track ends up once the queue is rebuilt.
+        let landing: Int
+        if let index = currentIndex, queue.indices.contains(index) {
+            landing = queue[..<index].filter { !gone.contains($0) }.count
+        } else {
+            landing = 0
+        }
+
+        var newAlbumOrder: [String] = []
+        var moved: [Int: Int] = [:]
+        for (position, id) in albumOrder.enumerated() where !gone.contains(id) {
+            moved[position] = newAlbumOrder.count
+            newAlbumOrder.append(id)
+        }
+        var newQueue: [String] = []
+        var newSources: [Int] = []
+        var survivingCurrent: Int?
+        for (position, id) in queue.enumerated() where !gone.contains(id) {
+            if let index = currentIndex, position == index {
+                survivingCurrent = newQueue.count
+            }
+            let source: Int? = queueSources.indices.contains(position) ? moved[queueSources[position]] : nil
+            newSources.append(source ?? newQueue.count)
+            newQueue.append(id)
+        }
+        albumOrder = newAlbumOrder
+        queueSources = newSources
+        queue = newQueue
+
+        guard !queue.isEmpty else {
+            replacingItems = true
+            player.removeAllItems()
+            itemQueueIndices.removeAll()
+            replacingItems = false
+            wantsToPlay = false
+            isPlaying = false
+            currentIndex = nil
+            elapsed = 0
+            duration = 0
+            message = "La coda si è svuotata: i brani che conteneva sono stati eliminati dal server."
+            updateNowPlaying()
+            persist()
+            return
+        }
+
+        if losingCurrent {
+            message = "Il brano in riproduzione è stato eliminato dal server: la riproduzione continua dal brano successivo della coda."
+            load(index: min(landing, queue.count - 1), position: 0, autoplay: resume)
+            return
+        }
+
+        currentIndex = survivingCurrent
+        if let playing = player.currentItem, let survivingCurrent {
+            // Only the item playing now keeps its place; the one preloaded after it
+            // was queued for a position that has moved, so it is worked out again.
+            itemQueueIndices = [ObjectIdentifier(playing): survivingCurrent]
+            for item in player.items() where item !== playing {
+                player.remove(item)
+            }
+        } else {
+            itemQueueIndices.removeAll()
+        }
+        preloadNext()
+        updateNowPlaying()
+        persist()
+    }
+
     /// Replaces the queue with `ids` and starts playing at `start`. With shuffle on,
     /// the starting track plays first and the rest follow in random order.
     private func startQueue(_ ids: [String], at start: Int) {

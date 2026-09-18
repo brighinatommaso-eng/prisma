@@ -9,6 +9,13 @@ import SwiftData
 /// track the server dropped: its audio file and transfer (`DownloadManager.
 /// discardLocalData`), its row, and with the row its favourite flag and every
 /// playlist entry pointing at it (a cascade relationship).
+///
+/// `inProgress` and `problems` are read by the track rows and by the album and
+/// playlist headers, which hold the `StoredTrack` objects themselves. Changing
+/// either makes those views render again, so this class says nothing about a track
+/// once it has asked the sync to remove it: after that point the object a row holds
+/// may already be gone from the store, and reading any of its properties traps.
+/// Everything published here is therefore published while the rows still exist.
 @Observable
 final class TrackDeletion {
     /// Tracks whose DELETE or follow-up sync is still running, by track id.
@@ -34,6 +41,9 @@ final class TrackDeletion {
 
     /// Deletes `tracks` from the server one at a time, then syncs once. Tracks
     /// already being deleted are skipped.
+    ///
+    /// Only the id and the title of each track are kept: the work runs across
+    /// awaits, and a `StoredTrack` must not be carried over one that may remove it.
     func delete(_ tracks: [StoredTrack], reportingUnder key: String) {
         var seen = Set<String>()
         let targets = tracks
@@ -44,8 +54,7 @@ final class TrackDeletion {
         let ids = targets.map(\.id)
         inProgress.formUnion(ids)
         Task {
-            problems[key] = await run(targets)
-            inProgress.subtract(ids)
+            await run(targets, ids: ids, key: key)
         }
     }
 
@@ -55,12 +64,14 @@ final class TrackDeletion {
 
     // MARK: - Work
 
-    private func run(_ targets: [Target]) async -> APIError? {
+    private func run(_ targets: [Target], ids: [String], key: String) async {
         let client: APIClient
         do {
             client = try settings.makeClient()
         } catch {
-            return Self.failure(.from(error), title: targets[0].title, failed: targets.count, of: targets.count)
+            inProgress.subtract(ids)
+            problems[key] = Self.failure(.from(error), title: targets[0].title, failed: targets.count, of: targets.count)
+            return
         }
 
         var deleted: [String] = []
@@ -78,14 +89,23 @@ final class TrackDeletion {
             }
         }
 
-        var syncProblem: APIError?
-        if !deleted.isEmpty {
-            syncProblem = await syncAway(deleted)
-        }
+        // The server has answered for every track, so nothing is running any more.
+        // Cleared here, before the sync deletes the rows, and not after it: this is
+        // the last moment at which a row that renders again because of it is certain
+        // to still have its track. The row keeps the user informed from here on by
+        // disappearing.
+        inProgress.subtract(ids)
         if let firstFailure {
-            return Self.failure(firstFailure.error, title: firstFailure.title, failed: failed, of: targets.count)
+            problems[key] = Self.failure(firstFailure.error, title: firstFailure.title, failed: failed, of: targets.count)
         }
-        return syncProblem
+
+        guard !deleted.isEmpty else { return }
+        let syncProblem = await syncAway(deleted)
+        // syncAway reports only when the tracks are still in the library, so this
+        // assignment can never make a row read a track the sync has just deleted.
+        if firstFailure == nil, let syncProblem {
+            problems[key] = syncProblem
+        }
     }
 
     /// Syncs until the deleted tracks are gone from this iPhone, or says why not.

@@ -360,7 +360,12 @@ struct TrackMenu: ViewModifier {
 ///
 /// The two removals ask first, naming how many tracks they touch.
 struct CollectionMenu: ViewModifier {
-    let tracks: [StoredTrack]
+    /// The collection's current members, read again at every body rather than kept
+    /// as an array. A stored array would be a snapshot of live `StoredTrack`
+    /// objects: this modifier renders again whenever `TrackDeletion` changes, and
+    /// its owner (the album or playlist header) does not, so a snapshot taken before
+    /// a deletion would still be here afterwards and reading it would trap.
+    let members: () -> [StoredTrack]
     let name: String
     /// Where this collection's deletion problems are kept, e.g. "album-3".
     let problemKey: String
@@ -382,18 +387,18 @@ struct CollectionMenu: ViewModifier {
         .destructiveConfirmation($confirmation)
     }
 
-    /// Each track once, without any the sync has just removed.
-    private var members: [StoredTrack] {
+    /// Each track once, without any awaiting deletion in the open context.
+    private var distinctMembers: [StoredTrack] {
         var seen = Set<String>()
-        return tracks.filter { !$0.isDeleted && seen.insert($0.serverID).inserted }
+        return members().filter { !$0.isDeleted && seen.insert($0.serverID).inserted }
     }
 
     @ViewBuilder
     private var menuItems: some View {
-        let members = self.members
-        let missing = members.filter { TrackAvailability.canDownload($0, downloads: downloads) }
-        let onPhone = members.filter { $0.downloadState == .downloaded }
-        let deletable = members.filter { !deletion.inProgress.contains($0.serverID) }
+        let tracks = distinctMembers
+        let missing = tracks.filter { TrackAvailability.canDownload($0, downloads: downloads) }
+        let onPhone = tracks.filter { $0.downloadState == .downloaded }
+        let deletable = tracks.filter { !deletion.inProgress.contains($0.serverID) }
 
         if !missing.isEmpty || !onPhone.isEmpty {
             Section {
@@ -429,7 +434,7 @@ struct CollectionMenu: ViewModifier {
 
     @ViewBuilder
     private var problems: some View {
-        let deleting = members.filter { deletion.inProgress.contains($0.serverID) }.count
+        let deleting = distinctMembers.filter { deletion.inProgress.contains($0.serverID) }.count
         if deleting > 0 {
             Text(deleting == 1 ? "Eliminazione di 1 brano dal server in corso…" : "Eliminazione di \(deleting) brani dal server in corso…")
                 .font(.caption)

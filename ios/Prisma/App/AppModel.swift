@@ -36,6 +36,7 @@ final class AppModel {
                 downloads.serverAddressChanged(from: previous, to: new)
             }
             let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
+            sync.playback = playback
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
             // Created here but idle: it only runs once RootView reports the app is

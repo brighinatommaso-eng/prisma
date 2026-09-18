@@ -521,7 +521,10 @@ final class DownloadManager {
         } catch {
             preflights[trackID] = nil
             let apiError = APIError.from(error)
-            guard !track.isDeleted, track.downloadState == stateBefore else { return nil }
+            // Read again by id rather than using the object from before the check: a
+            // sync may have deleted the row while the probe was in flight, and then
+            // every property of that object is unreadable.
+            guard let track = self.track(id: trackID), track.downloadState == stateBefore else { return nil }
             failTrack(
                 track,
                 error: apiError,
@@ -532,8 +535,10 @@ final class DownloadManager {
             return apiError.kind == .transport ? apiError : nil
         }
         preflights[trackID] = nil
-        // Removed by a sync, or cancelled, while the check was running.
-        guard !track.isDeleted, track.downloadState == stateBefore else { return nil }
+        // Removed by a sync, or cancelled, while the check was running. Read again by
+        // id: a deleted row's object cannot be asked anything, not even whether it is
+        // deleted, once the sync has saved.
+        guard let track = self.track(id: trackID), track.downloadState == stateBefore else { return nil }
 
         do {
             try handToSession(track, prepared: prepared, probe: probe, note: note)

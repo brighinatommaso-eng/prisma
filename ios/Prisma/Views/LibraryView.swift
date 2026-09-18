@@ -244,7 +244,7 @@ private struct AlbumHeaderRow: View {
                 ProblemBlock(problem)
             }
         }
-        .modifier(CollectionMenu(tracks: album.tracks, name: album.title, problemKey: "album-\(album.serverID)"))
+        .modifier(CollectionMenu(members: { album.tracks }, name: album.title, problemKey: "album-\(album.serverID)"))
         .padding(.top, 22)
         .padding(.bottom, 4)
     }

@@ -323,7 +323,11 @@ struct PlaylistDetailView: View {
                     .padding(.top, 5)
             }
             .frame(maxWidth: .infinity)
-            .modifier(CollectionMenu(tracks: entries.compactMap(\.track), name: playlist.name, problemKey: "playlist-\(playlist.id.uuidString)"))
+            .modifier(CollectionMenu(
+                members: { PlaylistStore.orderedEntries(of: playlist).compactMap(\.track) },
+                name: playlist.name,
+                problemKey: "playlist-\(playlist.id.uuidString)"
+            ))
 
             PlayShufflePair(isEnabled: !playable.isEmpty) {
                 guard let first = playable.first else { return }

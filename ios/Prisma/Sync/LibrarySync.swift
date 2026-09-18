@@ -29,6 +29,9 @@ final class LibrarySync {
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let downloads: DownloadManager
+    /// Set once at launch, after the engine exists. The sync is the only code that
+    /// removes tracks, so it is where playback is told to let one go.
+    @ObservationIgnored var playback: PlaybackEngine?
     @ObservationIgnored private var current: Task<Void, Never>?
 
     init(context: ModelContext, settings: AppSettings, downloads: DownloadManager) {
@@ -244,6 +247,9 @@ final class LibrarySync {
         if let problem = downloads.discardLocalData(for: track) {
             changes.problems.append(problem)
         }
+        // Before the row goes: the queue keeps ids, and the players keep this very
+        // object, so both must let go while it can still be read.
+        playback?.forget(trackIDs: [track.serverID])
         context.delete(track)
         changes.tracksDeleted += 1
     }
