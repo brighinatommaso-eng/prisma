@@ -12,6 +12,7 @@ interrupted transfer resumes instead of restarting.
 
 import asyncio
 import contextlib
+import logging
 import shutil
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as dist_version
@@ -22,8 +23,10 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import db, worker, ytm
+from . import db, diagnostics, worker, ytm
 from .config import MUSIC_DIR
+
+log = logging.getLogger("prisma.api")
 
 # A hanging upstream must not hang /health, which is the one endpoint used to
 # diagnose a broken deploy.
@@ -71,6 +74,12 @@ class Health(BaseModel):
     track_count: int
     album_count: int
     total_bytes_stored: int
+    # How yt-dlp sees its defences against YouTube's bot checks; see
+    # diagnostics.py. Local probes only, cached, never a YouTube request.
+    js_runtime: str | None
+    po_token_provider_active: bool
+    # Unix time; None until the first download succeeds.
+    last_successful_download_at: int | None
 
 
 class SongResult(BaseModel):
@@ -137,23 +146,46 @@ def _installed_version(distribution: str) -> str:
         return "not installed"
 
 
-@app.get("/health", response_model=Health)
-async def health() -> Health:
+async def _youtube_music_reachable() -> bool:
     try:
-        reachable = await asyncio.wait_for(
+        return await asyncio.wait_for(
             asyncio.to_thread(ytm.reachable), timeout=HEALTH_PROBE_TIMEOUT_S
         )
     except Exception:
         # Includes the timeout. /health must answer even when YouTube does not.
-        reachable = False
+        return False
 
+
+async def _ytdlp_environment() -> diagnostics.YtdlpEnvironment:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(diagnostics.ytdlp_environment), timeout=HEALTH_PROBE_TIMEOUT_S
+        )
+    except Exception:
+        # The probe itself never raises; this is the timeout. The thread keeps
+        # running and fills the cache for the next call.
+        log.warning("yt-dlp environment probe exceeded %ss", HEALTH_PROBE_TIMEOUT_S)
+        return diagnostics.NOT_DETECTED
+
+
+@app.get("/health", response_model=Health)
+async def health() -> Health:
+    # Concurrent: the first call after a start pays for importing yt-dlp, and
+    # that should not queue behind the YouTube Music probe.
+    reachable, environment = await asyncio.gather(
+        _youtube_music_reachable(), _ytdlp_environment()
+    )
     counts = await asyncio.to_thread(db.counters)
+    last_success = await asyncio.to_thread(db.last_successful_download_at)
     return Health(
         ytdlp_version=_installed_version("yt-dlp"),
         ytmusicapi_version=_installed_version("ytmusicapi"),
         music_free_bytes=shutil.disk_usage(MUSIC_DIR).free,
         youtube_music_reachable=reachable,
         **counts,
+        js_runtime=environment.js_runtime,
+        po_token_provider_active=environment.po_token_provider_active,
+        last_successful_download_at=last_success,
     )
 
 

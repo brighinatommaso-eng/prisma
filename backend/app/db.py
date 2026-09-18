@@ -474,6 +474,22 @@ def counters() -> dict[str, int]:
     }
 
 
+def last_successful_download_at() -> int | None:
+    """Unix time the most recent successful download finished, or None.
+
+    Spec section 3.6: this date is what tells a yt-dlp breakage apart from a
+    quiet week. It is read off the jobs table rather than stored separately:
+    finish_job stamps updated_at when a job reaches done, and nothing moves a
+    done job afterwards.
+    """
+    with _lock:
+        row = connect().execute(
+            "SELECT MAX(COALESCE(updated_at, created_at)) t FROM jobs WHERE state = ?",
+            (DONE,),
+        ).fetchone()
+    return int(row["t"]) if row["t"] is not None else None
+
+
 # --- jobs -----------------------------------------------------------------
 
 def create_job(video_id: str) -> int:

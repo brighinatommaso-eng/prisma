@@ -30,6 +30,15 @@ _PROGRESS_MIN_DELTA = 0.02
 
 ProgressCallback = Callable[[float], None]
 
+# The options that shape how yt-dlp talks to YouTube, as opposed to what it
+# downloads and where. /health builds its yt-dlp probe from these same options,
+# so any JS runtime or extractor argument added here is what it reports.
+YTDLP_OPTIONS: dict[str, Any] = {
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+}
+
 
 def sha256_of(path: Path) -> str:
     digest = hashlib.sha256()
@@ -89,11 +98,9 @@ def _download_audio(video_id: str, audio_path: Path, on_progress: ProgressCallba
     # A literal % in a title would otherwise be read as an output template field.
     stem = audio_path.stem.replace("%", "%%")
     options = {
+        **YTDLP_OPTIONS,
         "format": AUDIO_FORMAT,
         "outtmpl": str(audio_path.parent / (stem + ".%(ext)s")),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
         "progress_hooks": [hook],
     }
     with YoutubeDL(options) as ydl:
