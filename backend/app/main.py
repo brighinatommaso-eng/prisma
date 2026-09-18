@@ -34,6 +34,11 @@ SEARCH_TIMEOUT_S = 20.0
 # long max-age plus the ETag means the client revalidates rarely and cheaply.
 COVER_CACHE_CONTROL = "public, max-age=604800"
 
+# GET /downloads is polled every 2s, so by default it carries only live jobs and
+# those that ended within this window -- long enough for a client that was away
+# to still see how its job ended.
+RECENT_JOBS_WINDOW_S = 3600
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -185,8 +190,15 @@ async def create_download(payload: DownloadRequest, response: Response) -> dict[
 
 
 @app.get("/downloads", response_model=list[Job])
-async def list_downloads() -> list[Job]:
-    jobs = await asyncio.to_thread(db.list_jobs)
+async def list_downloads(
+    all_jobs: bool = Query(
+        default=False, alias="all",
+        description="Return every job ever created, for debugging. By default only "
+                    "queued and running jobs, plus jobs that ended in the last hour.",
+    ),
+) -> list[Job]:
+    window = None if all_jobs else RECENT_JOBS_WINDOW_S
+    jobs = await asyncio.to_thread(db.list_jobs, window)
     return [Job(**job) for job in jobs]
 
 

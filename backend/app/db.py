@@ -494,9 +494,22 @@ def get_job(job_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def list_jobs() -> list[dict[str, Any]]:
+def list_jobs(finished_within_s: int | None = None) -> list[dict[str, Any]]:
+    """Jobs, newest first.
+
+    With finished_within_s, only jobs still queued or running plus those that
+    reached any final state within that many seconds; None returns every job.
+    """
     with _lock:
-        rows = connect().execute("SELECT * FROM jobs ORDER BY id DESC").fetchall()
+        conn = connect()
+        if finished_within_s is None:
+            rows = conn.execute("SELECT * FROM jobs ORDER BY id DESC").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state IN (?, ?) "
+                "OR COALESCE(updated_at, created_at) >= ? ORDER BY id DESC",
+                (QUEUED, RUNNING, _now() - finished_within_s),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
