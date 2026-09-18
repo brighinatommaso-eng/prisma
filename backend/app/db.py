@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import DB_PATH
-from .paths import NO_ALBUM, UNKNOWN_ARTIST, make_dir_owned, set_owner
+from .paths import COVER_FILENAME, NO_ALBUM, UNKNOWN_ARTIST, make_dir_owned, set_owner
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -314,7 +314,14 @@ def track_for_path(file_path: str) -> str | None:
     return row["id"] if row else None
 
 
-def upsert_track(track: dict[str, Any]) -> None:
+def upsert_track(track: dict[str, Any], restore: bool = False) -> None:
+    """Insert or update a track row.
+
+    restore=True is for the download pipeline only: a track that was deleted
+    and is now downloaded again comes back, and so does its album, in the same
+    transaction as the row itself. It is not the default because repair.py
+    rewrites rows it read earlier, and must not revive a track deleted since.
+    """
     payload = dict(track)
     palette = payload.get("palette")
     if isinstance(palette, (list, tuple)):
@@ -334,8 +341,19 @@ def upsert_track(track: dict[str, Any]) -> None:
     values = [payload.get(column) for column in _TRACK_COLUMNS]
     with _lock:
         conn = connect()
-        conn.execute(statement, values)
-        conn.commit()
+        with conn:
+            conn.execute(statement, values)
+            if restore:
+                conn.execute(
+                    "UPDATE tracks SET deleted_at = NULL WHERE id = ?", (payload["id"],)
+                )
+                # updated_at moves so the album leaves deleted_album_ids and
+                # comes back in the next delta.
+                conn.execute(
+                    "UPDATE albums SET deleted_at = NULL, updated_at = ? "
+                    "WHERE id = ? AND deleted_at IS NOT NULL",
+                    (payload["updated_at"], payload.get("album_id")),
+                )
 
 
 def set_track_deleted(video_id: str, deleted: bool = True) -> bool:
@@ -354,6 +372,109 @@ def set_track_deleted(video_id: str, deleted: bool = True) -> bool:
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def mark_track_deleted(video_id: str) -> dict[str, Any] | None:
+    """The database half of deleting a track, in one transaction.
+
+    Soft-deletes the track, and its album when no live track is left in it.
+    Safe to repeat: an already-deleted track is not re-stamped, but the album
+    check runs again, and the facts the file cleanup needs are returned either
+    way. Returns None for an id that never existed.
+
+    A queued or running job for the same track blocks the deletion, and nothing
+    is written: the job would write the file back behind the delete. Jobs are
+    created and claimed under the same lock, so this check cannot race them.
+    """
+    stamp = _now()
+    with _lock:
+        conn = connect()
+        with conn:
+            row = conn.execute(
+                "SELECT id, file_path, album_id, deleted_at FROM tracks WHERE id = ?",
+                (video_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            job = conn.execute(
+                "SELECT id FROM jobs WHERE track_id = ? AND state IN (?, ?) "
+                "ORDER BY id LIMIT 1",
+                (video_id, QUEUED, RUNNING),
+            ).fetchone()
+            if job is not None:
+                return {"track_id": video_id, "active_job_id": int(job["id"])}
+
+            already_deleted = row["deleted_at"] is not None
+            if not already_deleted:
+                conn.execute(
+                    "UPDATE tracks SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                    (stamp, stamp, video_id),
+                )
+
+            album = None
+            if row["album_id"] is not None:
+                live = conn.execute(
+                    "SELECT COUNT(*) c FROM tracks WHERE album_id = ? AND deleted_at IS NULL",
+                    (row["album_id"],),
+                ).fetchone()["c"]
+                if live == 0:
+                    conn.execute(
+                        "UPDATE albums SET deleted_at = ?, updated_at = ? "
+                        "WHERE id = ? AND deleted_at IS NULL",
+                        (stamp, stamp, row["album_id"]),
+                    )
+                album = conn.execute(
+                    "SELECT id, cover_path, deleted_at FROM albums WHERE id = ?",
+                    (row["album_id"],),
+                ).fetchone()
+
+            file_in_use = False
+            if row["file_path"]:
+                file_in_use = conn.execute(
+                    "SELECT 1 FROM tracks WHERE file_path = ? AND id != ? "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (row["file_path"], video_id),
+                ).fetchone() is not None
+
+            # Asked about the cover.jpg next to this track's file, which is the
+            # one the cleanup would remove. Two album rows can share a folder:
+            # the album key is not sanitised, the path segments are.
+            cover_in_use = False
+            if row["file_path"]:
+                folder_cover = str(Path(row["file_path"]).parent / COVER_FILENAME)
+                cover_in_use = conn.execute(
+                    "SELECT 1 FROM albums WHERE cover_path = ? AND id IS NOT ? "
+                    "AND deleted_at IS NULL LIMIT 1",
+                    (folder_cover, row["album_id"]),
+                ).fetchone() is not None
+
+    return {
+        "track_id": video_id,
+        "active_job_id": None,
+        "already_deleted": already_deleted,
+        "file_path": row["file_path"],
+        "file_in_use": file_in_use,
+        "album_id": row["album_id"],
+        "album_deleted": album is not None and album["deleted_at"] is not None,
+        "cover_path": album["cover_path"] if album is not None else None,
+        "cover_in_use": cover_in_use,
+    }
+
+
+def clear_album_cover(album_id: int, cover_path: str) -> None:
+    """Forget a deleted album's cover once its file is gone from disk.
+
+    Conditional on the album still being deleted and still pointing at that
+    file: a download that revived the album in the meantime owns the cover now.
+    """
+    with _lock:
+        conn = connect()
+        conn.execute(
+            "UPDATE albums SET cover_path = NULL "
+            "WHERE id = ? AND cover_path = ? AND deleted_at IS NOT NULL",
+            (album_id, cover_path),
+        )
+        conn.commit()
 
 
 # --- read path ------------------------------------------------------------

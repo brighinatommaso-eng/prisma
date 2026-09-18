@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import db, diagnostics, worker, ytm
+from . import db, deletion, diagnostics, worker, ytm
 from .config import MUSIC_DIR
 
 log = logging.getLogger("prisma.api")
@@ -210,10 +210,11 @@ async def create_download(payload: DownloadRequest, response: Response) -> dict[
     """Queue a download.
 
     A video_id already in the catalogue is returned as-is with 200 and nothing
-    is downloaded again.
+    is downloaded again. A deleted track counts as absent: it is downloaded
+    again and reappears in the library.
     """
     existing = await asyncio.to_thread(db.get_track, payload.video_id)
-    if existing is not None:
+    if existing is not None and existing.get("deleted_at") is None:
         response.status_code = 200
         return {"status": "exists", "track": existing}
 
@@ -269,6 +270,40 @@ async def library(
 ) -> Library:
     payload = await asyncio.to_thread(db.library, since)
     return Library(**payload)
+
+
+@app.delete("/tracks/{track_id}")
+async def delete_track(track_id: str) -> dict[str, Any]:
+    """Delete a track: its row, its audio file, and its album if now empty.
+
+    Idempotent, and a retry is the recovery path for a deletion that failed
+    halfway: the ordering is explained in deletion.py. An emptied album's
+    folder is removed only when it holds nothing but its cover; anything else
+    is left in place and listed in unexpected_files.
+    """
+    try:
+        result = await asyncio.to_thread(deletion.delete_track, track_id)
+    except deletion.DownloadInProgress as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {exc.job_id} is downloading track {track_id}; cancel it or "
+                   "wait for it to finish, then delete again.",
+        )
+    except deletion.LibraryBusy:
+        raise HTTPException(
+            status_code=409,
+            detail="A download is writing to the library; retry the DELETE shortly.",
+        )
+    except OSError:
+        log.exception("deleting track %s failed after it was marked deleted", track_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Track {track_id} is marked deleted but a file could not be "
+                   "removed; retry the DELETE.",
+        )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"No track with id {track_id}.")
+    return result
 
 
 @app.get("/tracks/{track_id}/file")

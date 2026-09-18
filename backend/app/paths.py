@@ -7,6 +7,7 @@ album is a wrong path, not just wrong text -- see albums.py.
 
 import os
 import re
+import threading
 from pathlib import Path
 
 from .config import MUSIC_DIR, OWNER_GID, OWNER_UID
@@ -15,6 +16,10 @@ UNKNOWN_ARTIST = "Unknown Artist"
 NO_ALBUM = "Singles"
 MAX_SEGMENT_CHARS = 120
 COVER_FILENAME = "cover.jpg"
+
+# Held by the worker for a whole download and by a track deletion, so a delete
+# never removes a file or album folder a download is writing into right then.
+library_write_lock = threading.Lock()
 
 # Illegal on Linux (/) and additionally on SMB/Windows. Slashes become a dash so
 # "AC/DC" stays readable; the rest are dropped because they carry no meaning in

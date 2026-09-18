@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from . import db, downloader
+from .paths import library_write_lock
 
 log = logging.getLogger("prisma.worker")
 
@@ -21,11 +22,18 @@ log = logging.getLogger("prisma.worker")
 IDLE_POLL_SECONDS = 1.0
 
 
+def _run_pipeline_locked(video_id: str, job_id: int) -> dict:
+    # Held for the whole pipeline so a track deletion cannot remove a file or
+    # album folder this download is writing into.
+    with library_write_lock:
+        return downloader.run_pipeline(video_id, job_id)
+
+
 async def _process(job: dict) -> None:
     job_id = int(job["id"])
     video_id = job.get("track_id")
     try:
-        track = await asyncio.to_thread(downloader.run_pipeline, video_id, job_id)
+        track = await asyncio.to_thread(_run_pipeline_locked, video_id, job_id)
     except Exception as exc:
         message = type(exc).__name__ + ": " + str(exc)
         log.warning("job %s failed for %s: %s", job_id, video_id, message)

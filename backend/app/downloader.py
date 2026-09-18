@@ -191,6 +191,7 @@ def run_pipeline(video_id: str, job_id: int | None = None) -> dict[str, Any]:
         "artwork_path": artwork_path,
         "palette": colours,
     }
-    db.upsert_track(track)
+    # restore: a track deleted earlier and downloaded again reappears.
+    db.upsert_track(track, restore=True)
     report(1.0)
     return track
