@@ -70,6 +70,8 @@ class Health(BaseModel):
     ytdlp_version: str
     ytmusicapi_version: str
     music_free_bytes: int
+    # One YouTube Music search, cached for a minute: /health is polled, and a
+    # request per poll is what provokes a bot check. See diagnostics.py.
     youtube_music_reachable: bool
     track_count: int
     album_count: int
@@ -149,7 +151,8 @@ def _installed_version(distribution: str) -> str:
 async def _youtube_music_reachable() -> bool:
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(ytm.reachable), timeout=HEALTH_PROBE_TIMEOUT_S
+            asyncio.to_thread(diagnostics.youtube_music_reachable),
+            timeout=HEALTH_PROBE_TIMEOUT_S,
         )
     except Exception:
         # Includes the timeout. /health must answer even when YouTube does not.

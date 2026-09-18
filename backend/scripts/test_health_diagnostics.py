@@ -187,7 +187,7 @@ def test_environment_is_cached_within_ttl():
 
     saved = diagnostics._probe
     diagnostics._probe = fake_probe
-    diagnostics._cache = None
+    diagnostics._YTDLP_CACHE.entry = None
     try:
         first = diagnostics.ytdlp_environment()
         second = diagnostics.ytdlp_environment()
@@ -195,13 +195,13 @@ def test_environment_is_cached_within_ttl():
         assert first == second
 
         # Age the cache past the TTL: the next call probes again.
-        stamp, value = diagnostics._cache
-        diagnostics._cache = (stamp - diagnostics.CACHE_TTL_S - 1, value)
+        stamp, value = diagnostics._YTDLP_CACHE.entry
+        diagnostics._YTDLP_CACHE.entry = (stamp - diagnostics.YTDLP_CACHE_TTL_S - 1, value)
         diagnostics.ytdlp_environment()
         assert len(calls) == 2, calls
     finally:
         diagnostics._probe = saved
-        diagnostics._cache = None
+        diagnostics._YTDLP_CACHE.entry = None
 
 
 def test_hung_probe_does_not_block_other_callers():
@@ -211,16 +211,122 @@ def test_hung_probe_does_not_block_other_callers():
     saved_wait = diagnostics.LOCK_WAIT_S
     diagnostics.LOCK_WAIT_S = 0.05
     # Stands in for a probe that is stuck while holding the lock.
-    diagnostics._cache_lock.acquire()
+    diagnostics._YTDLP_CACHE.lock.acquire()
     try:
-        diagnostics._cache = None
+        diagnostics._YTDLP_CACHE.entry = None
         assert diagnostics.ytdlp_environment() == diagnostics.NOT_DETECTED
-        diagnostics._cache = (0.0, last_known)
+        diagnostics._YTDLP_CACHE.entry = (0.0, last_known)
         assert diagnostics.ytdlp_environment() == last_known
     finally:
-        diagnostics._cache_lock.release()
+        diagnostics._YTDLP_CACHE.lock.release()
         diagnostics.LOCK_WAIT_S = saved_wait
-        diagnostics._cache = None
+        diagnostics._YTDLP_CACHE.entry = None
+
+
+# --- YouTube Music reachability ------------------------------------------
+
+def _counting_reachable(verdict=True):
+    """Stand in for ytm.reachable, recording every call. Makes no request."""
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return verdict
+
+    return calls, probe
+
+
+def test_reachability_is_cached_within_ttl():
+    from app import diagnostics
+    calls, probe = _counting_reachable()
+
+    saved = diagnostics.ytm.reachable
+    diagnostics.ytm.reachable = probe
+    diagnostics._REACHABLE_CACHE.entry = None
+    try:
+        assert diagnostics.youtube_music_reachable() is True
+        assert diagnostics.youtube_music_reachable() is True
+        assert len(calls) == 1, calls
+
+        # Age the cache past the TTL: the next call searches again.
+        stamp, value = diagnostics._REACHABLE_CACHE.entry
+        diagnostics._REACHABLE_CACHE.entry = (
+            stamp - diagnostics.REACHABLE_CACHE_TTL_S - 1, value)
+        diagnostics.youtube_music_reachable()
+        assert len(calls) == 2, calls
+    finally:
+        diagnostics.ytm.reachable = saved
+        diagnostics._REACHABLE_CACHE.entry = None
+
+
+def test_reachability_caches_a_failure_too():
+    """A YouTube Music that is down must not be re-probed on every poll either."""
+    from app import diagnostics
+    calls, probe = _counting_reachable(verdict=False)
+
+    saved = diagnostics.ytm.reachable
+    diagnostics.ytm.reachable = probe
+    diagnostics._REACHABLE_CACHE.entry = None
+    try:
+        assert diagnostics.youtube_music_reachable() is False
+        assert diagnostics.youtube_music_reachable() is False
+        assert len(calls) == 1, calls
+    finally:
+        diagnostics.ytm.reachable = saved
+        diagnostics._REACHABLE_CACHE.entry = None
+
+
+def test_hung_reachability_probe_does_not_block_other_callers():
+    from app import diagnostics
+
+    saved_wait = diagnostics.LOCK_WAIT_S
+    diagnostics.LOCK_WAIT_S = 0.05
+    # Stands in for a search that is stuck while holding the lock.
+    diagnostics._REACHABLE_CACHE.lock.acquire()
+    try:
+        diagnostics._REACHABLE_CACHE.entry = None
+        assert diagnostics.youtube_music_reachable() is False
+        diagnostics._REACHABLE_CACHE.entry = (0.0, True)
+        assert diagnostics.youtube_music_reachable() is True
+    finally:
+        diagnostics._REACHABLE_CACHE.lock.release()
+        diagnostics.LOCK_WAIT_S = saved_wait
+        diagnostics._REACHABLE_CACHE.entry = None
+
+
+def test_the_two_caches_are_independent():
+    """Expiring one probe must not force the other to run again."""
+    from app import diagnostics
+    ytdlp_calls = []
+    reachable_calls, reachable_probe = _counting_reachable()
+
+    def fake_probe():
+        ytdlp_calls.append(1)
+        return diagnostics.NOT_DETECTED
+
+    saved_probe = diagnostics._probe
+    saved_reachable = diagnostics.ytm.reachable
+    diagnostics._probe = fake_probe
+    diagnostics.ytm.reachable = reachable_probe
+    diagnostics._YTDLP_CACHE.entry = None
+    diagnostics._REACHABLE_CACHE.entry = None
+    try:
+        diagnostics.ytdlp_environment()
+        diagnostics.youtube_music_reachable()
+        # Only reachability ages out.
+        stamp, value = diagnostics._REACHABLE_CACHE.entry
+        diagnostics._REACHABLE_CACHE.entry = (
+            stamp - diagnostics.REACHABLE_CACHE_TTL_S - 1, value)
+        diagnostics.ytdlp_environment()
+        diagnostics.youtube_music_reachable()
+
+        assert len(ytdlp_calls) == 1, ytdlp_calls
+        assert len(reachable_calls) == 2, reachable_calls
+    finally:
+        diagnostics._probe = saved_probe
+        diagnostics.ytm.reachable = saved_reachable
+        diagnostics._YTDLP_CACHE.entry = None
+        diagnostics._REACHABLE_CACHE.entry = None
 
 
 # --- the endpoint --------------------------------------------------------
@@ -233,20 +339,22 @@ def test_health_carries_new_fields_and_keeps_old_ones():
     db.finish_job(job, db.DONE, None, 1.0)
     _set_job_time(job, 4242)
 
-    saved_reachable = main.ytm.reachable
+    saved_reachable = diagnostics.ytm.reachable
     saved_probe = diagnostics._probe
     # No YouTube: the only upstream call /health makes is stubbed out.
-    main.ytm.reachable = lambda: True
+    diagnostics.ytm.reachable = lambda: True
     diagnostics._probe = lambda: diagnostics.YtdlpEnvironment(
         js_runtime="deno 2.5.1", po_token_provider_active=False)
-    diagnostics._cache = None
+    diagnostics._YTDLP_CACHE.entry = None
+    diagnostics._REACHABLE_CACHE.entry = None
     MUSIC_DIR.mkdir(parents=True, exist_ok=True)
     try:
         payload = asyncio.run(main.health()).model_dump()
     finally:
-        main.ytm.reachable = saved_reachable
+        diagnostics.ytm.reachable = saved_reachable
         diagnostics._probe = saved_probe
-        diagnostics._cache = None
+        diagnostics._YTDLP_CACHE.entry = None
+        diagnostics._REACHABLE_CACHE.entry = None
 
     for field in ("ytdlp_version", "ytmusicapi_version", "music_free_bytes",
                   "youtube_music_reachable", "track_count", "album_count",
@@ -256,6 +364,30 @@ def test_health_carries_new_fields_and_keeps_old_ones():
     assert payload["js_runtime"] == "deno 2.5.1"
     assert payload["po_token_provider_active"] is False
     assert payload["last_successful_download_at"] == 4242
+
+
+def test_health_asks_youtube_music_once_however_often_it_is_polled():
+    """The iOS client polls /health; YouTube must not see one search per poll."""
+    from app import diagnostics, main
+
+    calls, probe = _counting_reachable()
+    saved_reachable = diagnostics.ytm.reachable
+    saved_probe = diagnostics._probe
+    diagnostics.ytm.reachable = probe
+    diagnostics._probe = lambda: diagnostics.NOT_DETECTED
+    diagnostics._YTDLP_CACHE.entry = None
+    diagnostics._REACHABLE_CACHE.entry = None
+    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        payloads = [asyncio.run(main.health()).model_dump() for _ in range(5)]
+    finally:
+        diagnostics.ytm.reachable = saved_reachable
+        diagnostics._probe = saved_probe
+        diagnostics._YTDLP_CACHE.entry = None
+        diagnostics._REACHABLE_CACHE.entry = None
+
+    assert len(calls) == 1, calls
+    assert all(p["youtube_music_reachable"] is True for p in payloads), payloads
 
 
 def main() -> int:

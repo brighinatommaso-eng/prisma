@@ -1,4 +1,5 @@
-"""What yt-dlp can use against YouTube's bot checks, for /health.
+"""The probes behind /health: what yt-dlp can bring to YouTube's bot checks,
+and whether YouTube Music answers at all.
 
 Spec section 3.6 wants a broken download pipeline to be diagnosable at a
 glance. Beyond the yt-dlp version, two things decide whether extraction gets
@@ -8,15 +9,21 @@ built from the download pipeline's own options -- rather than by guessing at
 PATH or at installed packages, so "configured but not picked up" shows as
 absent.
 
-Nothing here touches the network. Building a YoutubeDL, looking up its JS
-runtimes and asking the PO token director which providers are available are
-all local: yt-dlp's provider contract forbids network requests in
-is_available(). The work is still not free -- the first call imports yt-dlp,
-about a second, and each probe runs a `deno --version` subprocess when deno is
-present -- so the result is cached for CACHE_TTL_S and callers run it off the
-event loop.
+Those two touch nothing but the local machine. Building a YoutubeDL, looking
+up its JS runtimes and asking the PO token director which providers are
+available are all local: yt-dlp's provider contract forbids network requests
+in is_available(). They are still not free -- the first call imports yt-dlp,
+about a second, and the runtime lookup runs a `deno --version` subprocess --
+so the result is cached.
 
-The probes lean on yt-dlp internals (YoutubeDL._js_runtimes and
+Reachability is the exception: it costs a real YouTube Music search, and the
+iOS client polls /health. One upstream request per poll is exactly the
+repetition that earns a bot check, so it is cached here too, on the same
+mechanism and with a much shorter TTL. The search itself stays in ytm.py.
+
+Every probe here is blocking; callers run it off the event loop.
+
+The yt-dlp probes lean on yt-dlp internals (YoutubeDL._js_runtimes and
 initialize_pot_director), which can change in any release, and yt-dlp updates
 itself on every container start. A probe that breaks logs a warning and
 reports "not detected" rather than failing /health.
@@ -26,17 +33,23 @@ import copy
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Callable, TypeVar
 
+from . import ytm
 from .downloader import YTDLP_OPTIONS
 
 log = logging.getLogger("prisma.diagnostics")
 
+T = TypeVar("T")
+
 # A JS runtime or a provider plugin only changes with a rebuild, which restarts
 # the process and empties this cache anyway; the TTL only bounds staleness for
 # anything changed by hand inside a running container.
-CACHE_TTL_S = 300.0
+YTDLP_CACHE_TTL_S = 300.0
+# Reachability does change on its own, so it is re-probed far more often -- but
+# still at most once a minute, however hard the client polls.
+REACHABLE_CACHE_TTL_S = 60.0
 # Longer than a normal probe (about a second cold), shorter than a client's
 # patience with /health.
 LOCK_WAIT_S = 5.0
@@ -54,8 +67,45 @@ class YtdlpEnvironment:
 
 NOT_DETECTED = YtdlpEnvironment(js_runtime=None, po_token_provider_active=False)
 
-_cache: tuple[float, YtdlpEnvironment] | None = None
-_cache_lock = threading.Lock()
+
+@dataclass
+class _ProbeCache:
+    """One probe's last result, its TTL and the lock that serialises it."""
+
+    name: str
+    ttl_s: float
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    # (monotonic time the probe ran, what it returned)
+    entry: tuple[float, Any] | None = None
+
+
+_YTDLP_CACHE = _ProbeCache("yt-dlp environment", YTDLP_CACHE_TTL_S)
+_REACHABLE_CACHE = _ProbeCache("YouTube Music reachability", REACHABLE_CACHE_TTL_S)
+
+
+def _cached(cache: _ProbeCache, probe: Callable[[], T], fallback: T) -> T:
+    """Run `probe` at most once per TTL. Blocking; call from a thread.
+
+    The lock is held while probing so concurrent callers wait for one probe
+    instead of each starting their own. The wait is bounded: if a probe hangs,
+    later callers get the last known result -- or `fallback` when there is
+    none -- instead of each parking a thread on the lock.
+    """
+    if not cache.lock.acquire(timeout=LOCK_WAIT_S):
+        log.warning("%s probe still running after %ss; reporting last known result",
+                    cache.name, LOCK_WAIT_S)
+        entry = cache.entry
+        return entry[1] if entry is not None else fallback
+    try:
+        now = time.monotonic()
+        entry = cache.entry
+        if entry is not None and now - entry[0] < cache.ttl_s:
+            return entry[1]
+        value = probe()
+        cache.entry = (now, value)
+        return value
+    finally:
+        cache.lock.release()
 
 
 def _js_runtime(ydl: Any) -> str | None:
@@ -100,24 +150,15 @@ def _probe() -> YtdlpEnvironment:
 
 
 def ytdlp_environment() -> YtdlpEnvironment:
-    """The cached probe result. Blocking; call from a thread.
+    """What yt-dlp would bring to a challenge. Cached; blocking, call from a thread."""
+    return _cached(_YTDLP_CACHE, _probe, NOT_DETECTED)
 
-    The lock is held while probing so concurrent callers wait for one probe
-    instead of each starting their own. The wait is bounded: if a probe hangs,
-    later callers get the last known result (or "not detected") instead of
-    each parking a thread on the lock.
+
+def youtube_music_reachable() -> bool:
+    """Whether YouTube Music answered within the last REACHABLE_CACHE_TTL_S.
+
+    Cached; blocking, call from a thread. False is the safe answer both for a
+    failed search and for a probe that could not run at all: /health reports
+    "not reachable" rather than failing.
     """
-    global _cache
-    if not _cache_lock.acquire(timeout=LOCK_WAIT_S):
-        log.warning("yt-dlp probe still running after %ss; reporting last known result", LOCK_WAIT_S)
-        cached = _cache
-        return cached[1] if cached is not None else NOT_DETECTED
-    try:
-        now = time.monotonic()
-        if _cache is not None and now - _cache[0] < CACHE_TTL_S:
-            return _cache[1]
-        environment = _probe()
-        _cache = (now, environment)
-        return environment
-    finally:
-        _cache_lock.release()
+    return _cached(_REACHABLE_CACHE, ytm.reachable, False)

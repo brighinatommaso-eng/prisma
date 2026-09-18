@@ -23,7 +23,7 @@ Every command below is runnable as written once you have.
 | `app/ytm.py` | the only module that talks to YouTube Music |
 | `app/config.py` | reads `PRISMA_MUSIC_DIR`, `PRISMA_HOST`, `PRISMA_PORT` |
 | `scripts/smoke_download.py` | manual yt-dlp spike, **not** wired into the API |
-| `Dockerfile` | python:3.12-slim + ffmpeg |
+| `Dockerfile` | python:3.12-slim + ffmpeg + deno (yt-dlp's JS runtime) |
 
 ## Endpoints
 
@@ -42,20 +42,27 @@ GET /search?q=<string>&limit=<1..50>     limit defaults to 20
 slow probe rather than failing the request — the point of the endpoint is to stay
 answerable when something upstream is broken.
 
+`youtube_music_reachable` is the only field that costs an upstream request: one
+unauthenticated YouTube Music search. It is **cached for 60 seconds**, because the
+iOS client polls `/health` every few seconds and one search per poll is exactly the
+repetition that provokes "Sign in to confirm you're not a bot". A probe that fails
+is cached for the same 60 seconds, so a YouTube Music outage is not hammered either.
+
 The last three fields exist to date and explain a yt-dlp breakage (spec section 3.6),
 typically "Sign in to confirm you're not a bot":
 
 | Field | Meaning |
 |---|---|
-| `js_runtime` | The JavaScript runtime yt-dlp would use for YouTube's player challenges, e.g. `"deno 2.5.1"`; `null` when yt-dlp finds none. A runtime too old for yt-dlp is still named, suffixed ` (unsupported)`. |
+| `js_runtime` | The JavaScript runtime yt-dlp would use for YouTube's player challenges, e.g. `"deno 2.9.7"`. The image ships deno, so this is `null` only if something is wrong. A runtime too old for yt-dlp is still named, suffixed ` (unsupported)`. |
 | `po_token_provider_active` | `true` only when a PO token provider plugin is registered with yt-dlp **and** reports itself available — installed-but-unusable counts as `false`. |
 | `last_successful_download_at` | Unix time the most recent download job finished with state `done`; `null` if none ever has. |
 
 `js_runtime` and `po_token_provider_active` are asked of yt-dlp itself, built with
 the download pipeline's own options, so they show what a download would really use.
 They make no network request. The probe costs about a second on the first call after
-a start (importing yt-dlp) and is then cached for five minutes. It relies on yt-dlp
-internals; if a yt-dlp update moves them, the container log shows
+a start (importing yt-dlp) and is then cached for five minutes; both TTLs and the
+cache they share live in `app/diagnostics.py`. The probe relies on yt-dlp
+internals, and if a yt-dlp update moves them the container log shows
 `JS runtime probe failed` or `PO token provider probe failed` and the fields read
 `null` / `false` — check the log before trusting a `null` there.
 
@@ -186,13 +193,15 @@ A healthy `/health`:
 {"ytdlp_version":"2026.8.19","ytmusicapi_version":"1.12.2",
  "music_free_bytes":283578765312,"youtube_music_reachable":true,
  "track_count":9,"album_count":8,"total_bytes_stored":35138452,
- "js_runtime":null,"po_token_provider_active":false,
+ "js_runtime":"deno 2.9.7","po_token_provider_active":false,
  "last_successful_download_at":1789497982}
 ```
 
-`js_runtime: null` and `po_token_provider_active: false` are the image as it is today:
-downloads work without either, but they are the first two things to look at when
-YouTube starts answering with a bot check.
+A `js_runtime` of `null` means deno is missing from the image or yt-dlp stopped
+seeing it — check `docker compose exec -T backend deno --version`.
+`po_token_provider_active: false` is the image as it is today: downloads work
+without a provider, but it is the next thing to look at when YouTube starts
+answering with a bot check.
 
 ## The yt-dlp smoke test
 
@@ -236,17 +245,34 @@ diagnosable — delete it by hand if you do not want it.
 pointing Navidrome at the same directory (spec section 3.7) will, and so will any
 cleanup from a non-root account.
 
-**yt-dlp now warns that a JavaScript runtime is required.** Current output: "No
-supported JavaScript runtime could be found ... YouTube extraction without a JS
-runtime has been deprecated, and some formats may be missing". Extraction of itag
-140 still works today. When it stops, the fix is a JS runtime (deno) in the image —
-a Dockerfile change and a new system dependency, so it was left out of phase 1a
-rather than added silently.
+## The JavaScript runtime
+
+yt-dlp needs a JavaScript runtime to solve YouTube's player challenges; without one
+it warns that "YouTube extraction without a JS runtime has been deprecated, and some
+formats may be missing". The image therefore carries **deno**, the runtime yt-dlp
+supports, unpacked into `/usr/local/bin/deno` from the official
+`deno-x86_64-unknown-linux-gnu.zip` release.
+
+It is pinned twice, by `ARG DENO_VERSION` and by `ARG DENO_ZIP_SHA256`: the binary
+comes from outside the distro's package signing, so an unverified "latest" would be
+neither reproducible nor checkable. To move to a new deno, bump both — the checksum
+is published next to the zip as `.sha256sum`. The build unpacks it with the Python
+already in the base image (no build-only apt packages) and runs `deno --version`,
+which fails the build if the binary is wrong. The binary is 96 MB, and that is
+what it adds to the image.
+
+The JavaScript yt-dlp feeds to deno ships as **yt-dlp-ejs**, pulled in by the
+`[default]` extra rather than pinned here: its version has to match what the
+installed yt-dlp pins, so letting the extra resolve it is what keeps the two in step.
+
+```powershell
+ssh YOUR_USER@YOUR_SERVER_IP "cd /opt/prisma && docker compose exec -T backend deno --version"
+```
 
 ## Why yt-dlp is updated at every container start
 
-`pip install -U yt-dlp` runs in `CMD`, before uvicorn. A pinned yt-dlp silently
-rots, so the tradeoff is deliberate: slightly slower starts and a dependency on
+`pip install -U 'yt-dlp[default]'` runs in `CMD`, before uvicorn. A pinned yt-dlp
+silently rots, so the tradeoff is deliberate: slightly slower starts and a dependency on
 outbound network at boot, in exchange for not waking up to a download pipeline that
 broke because a pin went stale. A failed update is logged and tolerated rather than
 fatal, and the version actually in use is always visible at `/health`.

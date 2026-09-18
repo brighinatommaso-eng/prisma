@@ -1,10 +1,13 @@
 # Phase 1a dependencies. Every entry is named in the design spec, section 3.1.
-# yt-dlp is deliberately unpinned: the container runs `pip install -U yt-dlp`
-# on startup (spec section 3.6), so pinning it here would be undone anyway.
+# yt-dlp is deliberately unpinned: the container runs
+# `pip install -U 'yt-dlp[default]'` on startup (spec section 3.6), so pinning
+# it here would be undone anyway. The [default] extra pulls yt-dlp-ejs, the
+# JavaScript the image's Deno runs against YouTube's player challenges; it is
+# named here too so an image whose startup self-update failed still has it.
 fastapi>=0.115
 uvicorn>=0.32
 ytmusicapi>=1.8
-yt-dlp
+yt-dlp[default]
 
 # Download pipeline: tag writing and cover palette (spec section 3.1).
 mutagen>=1.47
