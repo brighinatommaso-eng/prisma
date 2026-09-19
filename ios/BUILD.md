@@ -59,9 +59,10 @@ These come from Apple and apply per Apple ID, whichever tool does the signing.
    Write down **Build** and **Commit**: you will check them on the phone.
 4. Scroll to **Artifacts** at the bottom of the summary and download **`Prisma.ipa`**.
    It downloads as the `.ipa` itself, not a zip. Beside it are two artifacts you do
-   not need now but may need later: `Prisma.app.dSYM`, which is what makes a crash
-   report readable (see [Reading a crash report](#reading-a-crash-report)), and
-   `xcodebuild-log`, which you only need when a build fails.
+   not need now: `Prisma.app.dSYM`, which is what makes a crash report readable, and
+   `xcodebuild-log`, which you only need when a build fails. The same dSYM is also
+   attached to a **release**, which is the easier way to get it later — see
+   [Reading a crash report](#reading-a-crash-report).
    Use the browser for this. `gh run download` treats the `.ipa` as a zip and unpacks
    it into a `Payload/` folder, which Sideloadly cannot use.
 
@@ -214,18 +215,25 @@ uploads next to the `.ipa`.
 
 ### Get the matching dSYM
 
-1. Open the run that produced the build on the phone. *Build* at the bottom of the app's
-   Settings tab is the run number.
-2. Download the **`Prisma.app.dSYM`** artifact from that run. It downloads as a zip
-   containing `Prisma.app.dSYM`.
-3. Check it is the right one. Near the end of the `.ips` there is a **binary images**
-   list; the line for `Prisma` ends with a UUID. It must equal the **dSYM UUID** shown
-   in the run's summary table. If they differ, the phone is running a different build
-   from the one you downloaded, and the symbols will be wrong or refused.
+Every build attaches its debug symbols to a GitHub **release** tagged `build-<number>`.
+*Build*, at the bottom of the app's Settings tab, is that number.
 
-Artifacts expire after 30 days. A crash on an older build than that cannot be
-symbolicated at all, so grab the dSYM while the run is still there if a build is going
-to stay on the phone for a while.
+1. Open `https://github.com/brighinatommaso-eng/prisma/releases/tag/build-<number>`,
+   putting the build number from the phone in place of `<number>`.
+2. Download **`Prisma.app.dSYM.zip`** from that page. Unzipping it gives a
+   `Prisma.app.dSYM` folder.
+3. Check it is the right one. Near the end of the `.ips` there is a **binary images**
+   list; the line for `Prisma` ends with a UUID. It must equal the **UUID** in the
+   release description. If they differ, the phone is running a different build from
+   the one you downloaded, and the symbols will be wrong or refused.
+
+The release link needs no GitHub sign-in, so it can be passed to whoever is doing the
+symbolication along with the `.ips`, and it does not expire. The identical
+`Prisma.app.dSYM` artifact on the run itself does need a sign-in and is deleted after
+30 days; use it only if a release is somehow missing.
+
+Releases are marked as pre-releases and carry no `.ipa`. The app still comes from the
+run's `Prisma.ipa` artifact, as in [1.2](#12-download-the-build).
 
 ### What you can do on Windows
 
@@ -256,8 +264,8 @@ this guide will not pretend otherwise.
 
 So the options are:
 
-- **Send the `.ips` and the `Prisma.app.dSYM` zip to someone with a Mac.** On their
-  machine, for each frame in the `Prisma` image:
+- **Send the `.ips` and the release link to someone with a Mac.** They can download
+  the zip without an account. On their machine, for each frame in the `Prisma` image:
 
   ```
   atos -o Prisma.app.dSYM/Contents/Resources/DWARF/Prisma -arch arm64 -l 0 <imageOffset>
@@ -270,7 +278,8 @@ So the options are:
 
 The only macOS available to this project is the GitHub Actions runner, which is why the
 dSYM is checked there: the workflow proves on every build that a readable dSYM exists
-and matches the binary, so a crash is never lost to a missing or mismatched symbol file.
+and matches the binary, then publishes it, so a crash is never lost to a missing,
+mismatched or unreachable symbol file.
 
 ---
 
@@ -290,4 +299,5 @@ and matches the binary, so a crash is never lost to a missing or mismatched symb
 | SideStore refresh fails | Check LocalDevVPN is on and the phone is on Wi-Fi. If it still fails after an iOS update, regenerate the pairing file (2.4). |
 | *Build* or *Commit* on the phone do not match the run | You installed an older `.ipa`. Browsers keep earlier downloads as `Prisma (1).ipa` and similar. Delete old copies and download again. |
 | Prisma quits by itself while you use it | It crashed. Get the report and the matching symbols: [Reading a crash report](#reading-a-crash-report). |
-| The dSYM UUID does not match the crash report | The phone is running a different build from the run you downloaded. Check *Build* at the bottom of the app's Settings tab and open that run instead. |
+| The dSYM UUID does not match the crash report | The phone is running a different build from the one you downloaded. Check *Build* at the bottom of the app's Settings tab and open the `build-<number>` release for it instead. |
+| No release for that build number | The build predates releases being published, or its run failed before the release step. The run's `Prisma.app.dSYM` artifact is the same file, if it is less than 30 days old. |

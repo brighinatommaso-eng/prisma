@@ -114,6 +114,14 @@ private struct SearchField: View {
     }
 }
 
+/// A search result. Holds no `@State`: the one piece this row used to own, whether
+/// its thumbnail failed, now belongs to the thumbnail itself.
+///
+/// That matters because `localTrack` is a library row, and `RemoteImage` reports a
+/// failure whenever the network answers — unattended, with nothing else changing.
+/// A row that rendered again for that reason would rebuild `TrackRow` around a track
+/// the sync may have deleted in the meantime, which is the shape that crashed build
+/// 25 in `LocalCoverImage`. Nothing here renders again on its own any more.
 private struct SongRow: View {
     let song: SongResult
     let client: APIClient
@@ -122,14 +130,13 @@ private struct SongRow: View {
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
-    @State private var artworkError: APIError?
 
     var body: some View {
         let subtitle = [song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
         if let localTrack {
             // In the library: the shared track row, so a result already on the phone
             // plays on tap and one that is not starts its device download.
-            TrackRow(track: localTrack, subtitle: subtitle, extraProblem: artworkProblem) {
+            TrackRow(track: localTrack, subtitle: subtitle) {
                 thumbnail
             }
         } else {
@@ -171,28 +178,52 @@ private struct SongRow: View {
                 if let pending, pending.stage == .failed {
                     AcquisitionProblem(record: pending)
                 }
-                if let artworkProblem {
-                    ProblemBlock(error: artworkProblem)
-                }
             }
         }
     }
 
+    private var thumbnail: some View {
+        SearchThumbnail(client: client, reference: song.artworkURLSmall)
+    }
+}
+
+/// Prototype `.rthumb`: 46 pt, radius 10, with what went wrong with the image under
+/// it.
+///
+/// The artwork failure lives here, at the bottom of the row rather than at the top,
+/// because `RemoteImage` writes it from its own `.task`: whenever the network
+/// answers, with no parent involved and nothing else invalidated. A view that
+/// renders again for that reason must hold nothing from the store, and this one
+/// holds a client and a URL string.
+///
+/// That is why the message appears in the thumbnail's column instead of across the
+/// row: the row above holds a library track, so it cannot be the one to own the
+/// failure and print it.
+private struct SearchThumbnail: View {
+    let client: APIClient
+    let reference: String?
+
+    @State private var failure: APIError?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            RemoteImage(client: client, reference: reference, side: 46, failure: $failure)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            if let problem {
+                ProblemBlock(error: problem)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
     /// Search artwork comes from YouTube's image servers, not the Prisma backend, so a
     /// failure is about the internet connection rather than the server address.
-    private var artworkProblem: APIError? {
-        guard let artworkError else { return nil }
-        var problem = artworkError
-        problem.message = artworkError.kind == .transport
+    private var problem: APIError? {
+        guard let failure else { return nil }
+        var problem = failure
+        problem.message = failure.kind == .transport
             ? "La copertina di questo risultato non si è caricata: controlla la connessione a internet. Il brano si può comunque scaricare."
             : "La copertina di questo risultato non è un'immagine valida: il brano si può comunque scaricare."
         return problem
-    }
-
-    /// Prototype `.rthumb`: 46 pt, radius 10.
-    private var thumbnail: some View {
-        RemoteImage(client: client, reference: song.artworkURLSmall, side: 46, failure: $artworkError)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .padding(.vertical, 8)
     }
 }

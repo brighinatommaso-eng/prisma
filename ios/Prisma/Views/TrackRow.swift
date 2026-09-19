@@ -28,8 +28,6 @@ struct TrackRow<Leading: View, Trailing: View>: View {
     let subtitle: String?
     let subtitleLineLimit: Int
     let showsDuration: Bool
-    /// Problems from outside the track, e.g. artwork that failed to load.
-    let extraProblem: APIError?
     let placement: PlaylistPlacement?
     let play: (() -> Void)?
     let leading: Leading
@@ -45,7 +43,6 @@ struct TrackRow<Leading: View, Trailing: View>: View {
         subtitle: String? = nil,
         subtitleLineLimit: Int = 1,
         showsDuration: Bool = true,
-        extraProblem: APIError? = nil,
         placement: PlaylistPlacement? = nil,
         play: (() -> Void)? = nil,
         @ViewBuilder leading: () -> Leading,
@@ -55,7 +52,6 @@ struct TrackRow<Leading: View, Trailing: View>: View {
         self.subtitle = subtitle
         self.subtitleLineLimit = subtitleLineLimit
         self.showsDuration = showsDuration
-        self.extraProblem = extraProblem
         self.placement = placement
         self.play = play
         self.leading = leading()
@@ -95,7 +91,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
                 trailing
             }
 
-            TrackProblems(track: track, extraProblem: extraProblem)
+            TrackProblems(track: track)
         }
         .modifier(TrackMenu(track: track, placement: placement, play: { startPlayback() }))
     }
@@ -128,12 +124,11 @@ extension TrackRow where Trailing == TrackStateSlot {
     init(
         track: StoredTrack,
         subtitle: String? = nil,
-        extraProblem: APIError? = nil,
         placement: PlaylistPlacement? = nil,
         play: (() -> Void)? = nil,
         @ViewBuilder leading: () -> Leading
     ) {
-        self.init(track: track, subtitle: subtitle, extraProblem: extraProblem, placement: placement, play: play, leading: leading) {
+        self.init(track: track, subtitle: subtitle, placement: placement, play: play, leading: leading) {
             TrackStateSlot(track: track)
         }
     }
@@ -150,11 +145,10 @@ struct TrackStateSlot: View {
     }
 }
 
-/// A track's current problems: a deletion running or failed, a refused download, a
-/// failed one, and anything the row itself adds.
+/// A track's current problems: a deletion running or failed, a refused download,
+/// and a failed one.
 struct TrackProblems: View {
     let track: StoredTrack
-    var extraProblem: APIError?
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(TrackDeletion.self) private var deletion
@@ -178,9 +172,6 @@ struct TrackProblems: View {
         }
         if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
             ProblemBlock(PlainLanguage.message(for: track.failureCause))
-        }
-        if let extraProblem {
-            ProblemBlock(error: extraProblem)
         }
     }
 }
