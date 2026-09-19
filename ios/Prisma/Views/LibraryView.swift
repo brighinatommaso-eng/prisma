@@ -109,11 +109,11 @@ struct LibraryView: View {
                 .listRowSeparator(.hidden)
         }
 
-        ForEach(sortedAlbums) { album in
-            AlbumHeaderRow(album: album)
+        ForEach(shelves) { shelf in
+            AlbumHeaderRow(album: shelf.album, trackIDs: shelf.tracks.map(\.serverID))
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
-            ForEach(StoredTrack.albumOrder(album.tracks)) { track in
+            ForEach(shelf.tracks) { track in
                 TrackRow(track: track) {
                     EmptyView()
                 }
@@ -174,6 +174,42 @@ struct LibraryView: View {
         return "Ultima sincronizzazione: " + lastSyncAt.formatted(date: .abbreviated, time: .shortened) + "."
     }
 
+    // MARK: - What the list is made of
+
+    /// One album and the tracks shown under it.
+    private struct Shelf: Identifiable {
+        let album: StoredAlbum
+        let tracks: [StoredTrack]
+
+        var id: PersistentIdentifier { album.persistentModelID }
+    }
+
+    /// The albums in display order with their tracks, built by matching the two
+    /// queries against each other rather than by reading `album.tracks`.
+    ///
+    /// A to-many relationship is a cache on the album object: after the sync deletes
+    /// a track it can still hand that track back, and a row drawn for it reads a
+    /// StoredTrack the store no longer has. Both `@Query` results are maintained by
+    /// SwiftData and only ever contain rows that exist.
+    ///
+    /// Each track is placed by comparing its album reference with the queried albums,
+    /// which reads nothing from either object; an album that has itself been deleted
+    /// is simply not among them, so nothing is read from it either.
+    private var shelves: [Shelf] {
+        let sorted = sortedAlbums
+        var members: [ObjectIdentifier: [StoredTrack]] = [:]
+        let live = Set(sorted.map { ObjectIdentifier($0) })
+        for track in tracks {
+            guard let album = track.album else { continue }
+            let key = ObjectIdentifier(album)
+            guard live.contains(key) else { continue }
+            members[key, default: []].append(track)
+        }
+        return sorted.map { album in
+            Shelf(album: album, tracks: StoredTrack.albumOrder(members[ObjectIdentifier(album)] ?? []))
+        }
+    }
+
     private var sortedAlbums: [StoredAlbum] {
         albums.sorted {
             let byArtist = $0.artist.localizedStandardCompare($1.artist)
@@ -182,13 +218,18 @@ struct LibraryView: View {
         }
     }
 
+    /// Tracks with no album, and tracks whose album is no longer in the library.
     private var unlistedTracks: [StoredTrack] {
-        StoredTrack.albumOrder(tracks.filter { $0.album == nil })
+        let live = Set(albums.map { ObjectIdentifier($0) })
+        return StoredTrack.albumOrder(tracks.filter { track in
+            guard let album = track.album else { return true }
+            return !live.contains(ObjectIdentifier(album))
+        })
     }
 
     /// Every track in the order shown: albums, then tracks without an album.
     private var listedTracks: [StoredTrack] {
-        sortedAlbums.flatMap { StoredTrack.albumOrder($0.tracks) } + unlistedTracks
+        shelves.flatMap(\.tracks) + unlistedTracks
     }
 }
 
@@ -218,6 +259,8 @@ struct EditModeButton: View {
 /// album-wide actions of `CollectionMenu`.
 private struct AlbumHeaderRow: View {
     let album: StoredAlbum
+    /// The album's tracks as ids, for the header menu. See `CollectionMenu`.
+    let trackIDs: [String]
 
     @Environment(\.prismaInk) private var ink
     @State private var coverProblem: String?
@@ -244,7 +287,7 @@ private struct AlbumHeaderRow: View {
                 ProblemBlock(problem)
             }
         }
-        .modifier(CollectionMenu(members: { album.tracks }, name: album.title, problemKey: "album-\(album.serverID)"))
+        .modifier(CollectionMenu(trackIDs: trackIDs, name: album.title, problemKey: "album-\(album.serverID)"))
         .padding(.top, 22)
         .padding(.bottom, 4)
     }

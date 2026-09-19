@@ -580,6 +580,11 @@ final class AcquisitionCoordinator {
         }
     }
 
+    /// The other place where `isDeleted` still means something: a fetch made
+    /// between this coordinator's own `context.delete` and its save still lists the
+    /// record, and here that genuinely is "deleted, not yet saved". Everywhere a
+    /// deletion could already have been saved, the question is asked of the store
+    /// instead (`ModelLookup`).
     private func pendingRecord(_ videoID: String) -> PendingAcquisition? {
         allRecords().first { $0.videoID == videoID && !$0.isDeleted }
     }

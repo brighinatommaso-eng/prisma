@@ -24,6 +24,14 @@ final class TrackDeletion {
     /// row, the album or playlist key for a header. Shown until dismissed.
     private(set) var problems: [String: APIError] = [:]
 
+    /// Tracks the server has already deleted, whose rows the sync has not removed
+    /// yet. Not observed, so changing it renders nothing: its only job is to stop a
+    /// second Elimina dal server on a row that is about to disappear, which would
+    /// otherwise ask the server for a track it no longer has and show a 404 on a row
+    /// with a second left to live. Like a deletion already running, it makes the
+    /// action do nothing.
+    @ObservationIgnored private var awaitingRemoval: Set<String> = []
+
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let sync: LibrarySync
@@ -42,12 +50,17 @@ final class TrackDeletion {
     /// Deletes `tracks` from the server one at a time, then syncs once. Tracks
     /// already being deleted are skipped.
     ///
-    /// Only the id and the title of each track are kept: the work runs across
-    /// awaits, and a `StoredTrack` must not be carried over one that may remove it.
+    /// The caller has just read `tracks` out of the store, so they are real; only
+    /// the id and the title of each are kept, because the work runs across awaits
+    /// and a `StoredTrack` must not be carried over one that may remove it.
     func delete(_ tracks: [StoredTrack], reportingUnder key: String) {
         var seen = Set<String>()
         let targets = tracks
-            .filter { !$0.isDeleted && !inProgress.contains($0.serverID) && seen.insert($0.serverID).inserted }
+            .filter { track in
+                !inProgress.contains(track.serverID)
+                    && !awaitingRemoval.contains(track.serverID)
+                    && seen.insert(track.serverID).inserted
+            }
             .map { Target(id: $0.serverID, title: $0.title ?? "Senza titolo") }
         problems[key] = nil
         guard !targets.isEmpty else { return }
@@ -95,12 +108,14 @@ final class TrackDeletion {
         // to still have its track. The row keeps the user informed from here on by
         // disappearing.
         inProgress.subtract(ids)
+        awaitingRemoval.formUnion(deleted)
         if let firstFailure {
             problems[key] = Self.failure(firstFailure.error, title: firstFailure.title, failed: failed, of: targets.count)
         }
 
         guard !deleted.isEmpty else { return }
         let syncProblem = await syncAway(deleted)
+        awaitingRemoval.subtract(deleted)
         // syncAway reports only when the tracks are still in the library, so this
         // assignment can never make a row read a track the sync has just deleted.
         if firstFailure == nil, let syncProblem {

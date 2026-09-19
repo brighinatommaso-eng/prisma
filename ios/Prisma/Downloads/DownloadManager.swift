@@ -269,8 +269,11 @@ final class DownloadManager {
             let tasks = await session.allTasks
             let toRestart = runCheck(tasks: tasks, reason: reason)
             isChecking = false
-            for track in toRestart {
-                preflights[track.serverID] = nil
+            // Ids, not tracks: every restart awaits its own pre-flight, and a sync
+            // running meanwhile can delete any of the ones still waiting their turn.
+            for id in toRestart {
+                preflights[id] = nil
+                guard let track = track(id: id) else { continue }
                 let resuming = track.resumeData != nil && track.targetAddress == settings.savedAddress
                 await enqueue(
                     track,
@@ -285,8 +288,9 @@ final class DownloadManager {
         }
     }
 
-    /// Returns the tracks whose transfer was lost, to be restarted after this returns.
-    private func runCheck(tasks: [URLSessionTask], reason: String) -> [StoredTrack] {
+    /// Returns the ids of the tracks whose transfer was lost, to be restarted after
+    /// this returns.
+    private func runCheck(tasks: [URLSessionTask], reason: String) -> [String] {
         let live = tasks.filter { $0.state == .running || $0.state == .suspended }
         for task in live where task.state == .suspended {
             task.resume()
@@ -322,6 +326,7 @@ final class DownloadManager {
         }
         toRestart.sort { ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast) }
         let restarted = toRestart.count
+        let restartIDs = toRestart.map(\.serverID)
 
         var missing = 0
         for track in tracks where track.downloadState == .downloaded {
@@ -355,7 +360,7 @@ final class DownloadManager {
             notice("Controllo dei trasferimenti (\(reason)): " + summary.joined(separator: "; ") + ".")
         }
         save("recording the transfer check")
-        return toRestart
+        return restartIDs
     }
 
     /// Adopts verified files an interrupted transfer finished writing, and deletes
@@ -656,6 +661,17 @@ final class DownloadManager {
         let wasQueued = Set(queued.map(\.serverID))
         let candidates = (queued + revivable)
             .sorted { ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast) }
+        let candidateIDs = candidates.map(\.serverID)
+        // Counted now, while every track is certainly still there: the loop below
+        // awaits a pre-flight for each candidate and the summary is written after it.
+        var leftAloneByCause: [String: Int] = [:]
+        for track in leftAlone {
+            let reason = track.failureCause?.notRevivedReason
+                ?? "l'errore risale a una versione dell'app che non ne registrava la causa"
+            leftAloneByCause[reason, default: 0] += 1
+        }
+        let leftAloneCount = leftAlone.count
+        let runningCount = running.count
 
         // Stop every old transfer before checking any, so none keeps retrying the
         // old address while the others wait their turn. Every candidate is marked
@@ -679,14 +695,21 @@ final class DownloadManager {
         var failedAgain = 0
         var skipped = 0
         var unreachable: APIError?
-        for track in candidates {
-            preflights[track.serverID] = nil
-            let fromQueue = wasQueued.contains(track.serverID)
-            // Changed meanwhile: cancelled, retried or dismissed by hand, or removed by a sync.
+        // By id: each turn of this loop awaits a pre-flight, and a sync running
+        // meanwhile can delete a track that is still waiting its turn.
+        for id in candidateIDs {
+            preflights[id] = nil
+            let fromQueue = wasQueued.contains(id)
+            // Changed meanwhile: cancelled, retried or dismissed by hand, or removed
+            // by a sync, which is the case where the track is simply no longer there.
+            guard let track = track(id: id) else {
+                skipped += 1
+                continue
+            }
             let unchanged = fromQueue
                 ? track.downloadState == .queued
                 : track.downloadState == .failed && (track.failureCause?.isAddressRelated ?? false)
-            guard !track.isDeleted, unchanged else {
+            guard unchanged else {
                 skipped += 1
                 continue
             }
@@ -709,15 +732,20 @@ final class DownloadManager {
                 keepQueuePosition: true,
                 failureLead: "The server address changed to \(new), and retrying this download against it failed."
             )
-            if track.downloadState == .queued {
+            // Read back again: the pre-flight above awaited, so the track may have
+            // been deleted while it ran.
+            switch self.track(id: id)?.downloadState {
+            case .queued:
                 if fromQueue { requeued += 1 } else { revived += 1 }
-            } else {
+            case nil:
+                skipped += 1
+            default:
                 failedAgain += 1
             }
         }
 
         var lines = ["Indirizzo del server cambiato da \(previous.isEmpty ? "nessuno" : previous) a \(new)."]
-        if !candidates.isEmpty {
+        if !candidateIDs.isEmpty {
             var parts: [String] = []
             if !queued.isEmpty { parts.append("\(queued.count) in coda") }
             if !revivable.isEmpty { parts.append("\(revivable.count) non riusciti perché il server era irraggiungibile") }
@@ -728,26 +756,20 @@ final class DownloadManager {
             if skipped > 0 { line += ", \(skipped) saltati perché modificati o rimossi nel frattempo" }
             lines.append(line + ".")
         }
-        if !leftAlone.isEmpty {
-            var byCause: [String: Int] = [:]
-            for track in leftAlone {
-                let reason = track.failureCause?.notRevivedReason
-                    ?? "l'errore risale a una versione dell'app che non ne registrava la causa"
-                byCause[reason, default: 0] += 1
-            }
-            let detail = byCause
+        if leftAloneCount > 0 {
+            let detail = leftAloneByCause
                 .sorted { $0.value > $1.value }
                 .map { "\($0.value): \($0.key)" }
                 .joined(separator: "; ")
-            lines.append("\(leftAlone.count) download non riusciti restano come sono, perché un cambio di indirizzo non li risolve; si possono riprovare a mano. Motivi: " + detail + ".")
+            lines.append("\(leftAloneCount) download non riusciti restano come sono, perché un cambio di indirizzo non li risolve; si possono riprovare a mano. Motivi: " + detail + ".")
         }
-        if !running.isEmpty {
-            lines.append("\(running.count) trasferimenti in corso finiscono sull'indirizzo precedente: stavano già ricevendo dati e ogni file viene comunque verificato. Se uno non riesce, Riprova usa il nuovo indirizzo.")
+        if runningCount > 0 {
+            lines.append("\(runningCount) trasferimenti in corso finiscono sull'indirizzo precedente: stavano già ricevendo dati e ogni file viene comunque verificato. Se uno non riesce, Riprova usa il nuovo indirizzo.")
         }
         if discardedResume > 0 {
             lines.append("\(discardedResume) download non riusciti o annullati ripartiranno dall'inizio con Riprova, perché i dati per riprenderli valevano per il vecchio indirizzo.")
         }
-        if candidates.isEmpty && leftAlone.isEmpty && running.isEmpty && discardedResume == 0 {
+        if candidateIDs.isEmpty && leftAloneCount == 0 && runningCount == 0 && discardedResume == 0 {
             lines.append("Nessun download interessato.")
         }
         notice(lines.joined(separator: "\n"))

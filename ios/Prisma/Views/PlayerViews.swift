@@ -205,8 +205,10 @@ struct FullPlayerView: View {
             QueueSheet()
         }
         .sheet(isPresented: $addingToPlaylist) {
-            if let track = playback.currentTrack {
-                AddToPlaylistSheet(track: track)
+            // The id, which the engine holds anyway: the sheet outlives the track it
+            // was opened for, and resolves it itself.
+            if let id = playback.currentTrackID {
+                AddToPlaylistSheet(trackID: id)
             }
         }
     }

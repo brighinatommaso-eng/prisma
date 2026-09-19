@@ -99,12 +99,14 @@ struct CoverArt: View {
 /// The 2×2 cover of a playlist, from the first four distinct albums in playlist
 /// order. With fewer albums the covers repeat across the grid.
 struct PlaylistMosaic: View {
-    let playlist: Playlist
+    /// The playlist's entries as the caller's query lists them, never
+    /// `playlist.entries`. See `PlaylistStore.ordered(_:of:)`.
+    let entries: [PlaylistEntry]
     let side: CGFloat
     let cornerRadius: CGFloat
 
     var body: some View {
-        let albums = Self.distinctAlbums(in: playlist)
+        let albums = Self.distinctAlbums(in: entries)
         let cell = side / 2
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -133,11 +135,13 @@ struct PlaylistMosaic: View {
         }
     }
 
-    static func distinctAlbums(in playlist: Playlist) -> [StoredAlbum] {
-        var seen = Set<Int>()
+    /// Albums are told apart by identity rather than by `serverID`, so choosing
+    /// which four to draw reads nothing from them.
+    static func distinctAlbums(in entries: [PlaylistEntry]) -> [StoredAlbum] {
+        var seen = Set<ObjectIdentifier>()
         var result: [StoredAlbum] = []
-        for entry in PlaylistStore.orderedEntries(of: playlist) {
-            guard let album = entry.track?.album, !album.isDeleted, seen.insert(album.serverID).inserted else { continue }
+        for entry in entries {
+            guard let album = entry.track?.album, seen.insert(ObjectIdentifier(album)).inserted else { continue }
             result.append(album)
             if result.count == 4 { break }
         }

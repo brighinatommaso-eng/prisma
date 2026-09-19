@@ -140,8 +140,11 @@ final class PlaybackEngine {
             )
             return
         }
+        // From the store, not from `album.tracks`: a to-many relationship is a
+        // cache on the album, and after a deletion it can still name a track the
+        // store no longer has, which would put a dead id in the queue.
         let albumTracks = track.album.map { album in
-            StoredTrack.albumOrder(album.tracks.filter { member in !member.isDeleted })
+            StoredTrack.albumOrder(ModelLookup.members(of: album, in: context))
         } ?? [track]
         let start = albumTracks.firstIndex { $0.serverID == track.serverID } ?? 0
         var ids = albumTracks[start...].filter { $0.downloadState == .downloaded }.map(\.serverID)
@@ -172,7 +175,8 @@ final class PlaybackEngine {
         }
         var ids: [String] = []
         var startIndex: Int?
-        for (offset, track) in tracks.enumerated() where !track.isDeleted && track.downloadState == .downloaded {
+        // `tracks` was read from the store by the caller at the moment of the tap.
+        for (offset, track) in tracks.enumerated() where track.downloadState == .downloaded {
             if offset == startOffset {
                 startIndex = ids.count
             }

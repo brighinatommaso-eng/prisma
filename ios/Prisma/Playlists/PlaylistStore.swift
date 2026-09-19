@@ -24,11 +24,31 @@ final class PlaylistStore {
 
     // MARK: - Ordering
 
-    /// A playlist's entries in the user's order.
-    static func orderedEntries(of playlist: Playlist) -> [PlaylistEntry] {
-        playlist.entries
-            .filter { !$0.isDeleted }
+    /// The entries of `playlist`, in the user's order, picked out of `all`.
+    ///
+    /// `all` is a `@Query` result or a fetch, never `playlist.entries`: a to-many
+    /// relationship is a cache on the playlist object, and after the sync deletes a
+    /// track it can still list the entry that went with it. Membership is decided by
+    /// comparing references, which reads nothing from either object.
+    static func ordered(_ all: [PlaylistEntry], of playlist: Playlist) -> [PlaylistEntry] {
+        let wanted = ObjectIdentifier(playlist)
+        return all
+            .filter { entry in entry.playlist.map { ObjectIdentifier($0) == wanted } ?? false }
             .sorted { $0.position < $1.position }
+    }
+
+    /// The same, read from the store now. For actions, which run long after the body
+    /// that drew their button.
+    func entries(of playlist: Playlist) -> [PlaylistEntry] {
+        let all: [PlaylistEntry]
+        do {
+            all = try context.fetch(FetchDescriptor<PlaylistEntry>())
+        } catch {
+            lastError = .storage("Could not read the playlist's tracks", location: nil, error: error,
+                                 message: "Impossibile leggere i brani della playlist sul telefono: riavvia l'app; se si ripete, controlla lo spazio libero.")
+            return []
+        }
+        return Self.ordered(all, of: playlist)
     }
 
     // MARK: - Playlists
@@ -86,7 +106,7 @@ final class PlaylistStore {
     // MARK: - Entries
 
     func add(_ track: StoredTrack, to playlist: Playlist) {
-        let next = (Self.orderedEntries(of: playlist).map(\.position).max() ?? -1) + 1
+        let next = (entries(of: playlist).map(\.position).max() ?? -1) + 1
         let entry = PlaylistEntry(position: next, playlist: playlist, track: track)
         context.insert(entry)
         playlist.updatedAt = Date()
@@ -99,7 +119,7 @@ final class PlaylistStore {
         for entry in entries {
             context.delete(entry)
         }
-        renumber(Self.orderedEntries(of: playlist).filter { entry in !entries.contains { $0 === entry } })
+        renumber(self.entries(of: playlist).filter { entry in !entries.contains { $0 === entry } })
         playlist.updatedAt = Date()
         save("removing tracks from “\(playlist.name)”")
     }
@@ -151,7 +171,7 @@ final class PlaylistStore {
         var seen = Set<String>()
         var started = 0
         var busy = 0
-        for entry in Self.orderedEntries(of: playlist) {
+        for entry in entries(of: playlist) {
             guard let track = entry.track, seen.insert(track.serverID).inserted else { continue }
             switch track.downloadState {
             case .notDownloaded, .failed, .cancelled:
@@ -174,13 +194,13 @@ final class PlaylistStore {
 
     /// Plays the playlist from the entry at `index` in its displayed order.
     func play(_ playlist: Playlist, fromEntryAt index: Int) {
-        let entries = Self.orderedEntries(of: playlist)
-        guard entries.indices.contains(index), entries[index].track != nil else {
+        let listed = entries(of: playlist)
+        guard listed.indices.contains(index), listed[index].track != nil else {
             lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
             return
         }
-        let tracks = entries.compactMap(\.track)
-        let offset = entries[..<index].filter { $0.track != nil }.count
+        let tracks = listed.compactMap(\.track)
+        let offset = listed[..<index].filter { $0.track != nil }.count
         playback.play(playlistTracks: tracks, startingAt: offset)
     }
 

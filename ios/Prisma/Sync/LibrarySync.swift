@@ -228,6 +228,13 @@ final class LibrarySync {
             guard let album = albumsByID[id] else { continue }
             // Tracks the payload moved elsewhere already point at their new album;
             // what is still attached belongs to the deleted album and goes with it.
+            //
+            // One of the two places where `isDeleted` still means something:
+            // these tracks were deleted a few lines above, in this same context,
+            // and the save has not happened yet. After a save a deleted object
+            // reads back as not deleted and then answers nothing at all, which is
+            // why nothing outside an open, unsaved context asks it; everything
+            // else reads the store (`ModelLookup`).
             for track in album.tracks where !track.isDeleted && !listedTrackIDs.contains(track.serverID) {
                 deleteTrack(track, changes: &changes)
             }
