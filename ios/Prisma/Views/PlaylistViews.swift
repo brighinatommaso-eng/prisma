@@ -185,7 +185,7 @@ private struct PlaylistSummaryRow: View {
     var body: some View {
         let tracks = entries.compactMap(\.track)
         HStack(spacing: 13) {
-            PlaylistMosaic(entries: entries, side: 62, cornerRadius: 14)
+            PlaylistMosaic(covers: AlbumCover.distinct(in: entries), side: 62, cornerRadius: 14)
                 .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
             VStack(alignment: .leading, spacing: 3) {
                 Text(playlist.name)
@@ -322,7 +322,7 @@ struct PlaylistDetailView: View {
     private func header(entries: [PlaylistEntry], playable: [Int]) -> some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                PlaylistMosaic(entries: entries, side: 160, cornerRadius: 20)
+                PlaylistMosaic(covers: AlbumCover.distinct(in: entries), side: 160, cornerRadius: 20)
                     .shadow(color: .black.opacity(0.6), radius: 23, y: 18)
                     .padding(.top, 20)
                 Text(playlist.name)

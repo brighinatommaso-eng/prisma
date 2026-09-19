@@ -11,6 +11,8 @@
 #   - the .dSYM is uploaded beside the .ipa and its UUID is asserted to match
 #     the shipped binary, because a crash report from the phone cannot be read
 #     without the debug symbols of the exact build that produced it.
+#   - the same .dSYM is attached to a release tagged by build number, so it can
+#     be fetched without credentials when a crash needs reading.
 #
 # Scripts avoid bash-4-only syntax so they behave the same whichever bash the
 # runner resolves (macOS ships 3.2).
@@ -22,7 +24,10 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # write, so the dSYM can also be attached to a release: a release asset on a
+  # public repository downloads without a GitHub sign-in, and a workflow
+  # artifact does not.
+  contents: write
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -282,6 +287,64 @@ jobs:
           # Kept as long as the .ipa: a crash on an installed build must still be
           # able to find the symbols of that build.
           retention-days: 30
+
+      - name: Publish the dSYM as a release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The artifact above needs a signed-in GitHub session to download, so every
+          # symbolication would be a round trip through whoever owns the account. A
+          # release asset on a public repository is a plain URL that needs no
+          # credentials, so the dSYM can be fetched directly.
+          #
+          # Runs on every branch, not only main: a dispatched build is how a fix gets
+          # onto the phone, and that is exactly the build likely to crash.
+          tag="build-$GITHUB_RUN_NUMBER"
+          asset="$DSYM_DIR/Prisma.app.dSYM.zip"
+          notes="$RUNNER_TEMP/release-notes.md"
+
+          {
+            echo "Debug symbols for build **$GITHUB_RUN_NUMBER** (\`$SHORT_SHA\`, branch \`$GITHUB_REF_NAME\`)."
+            echo
+            echo "dSYM UUID \`$DSYM_UUID\`. It must equal the UUID on the \`Prisma\` line of a crash"
+            echo "report's binary image list; if it does not, the phone is running a different build."
+            echo
+            echo "The app itself is the \`Prisma.ipa\` artifact on the run, not here."
+            echo "Symbolication is described in \`ios/BUILD.md\`."
+          } > "$notes"
+
+          # A re-run keeps the same run number, so the tag can already exist. The
+          # asset is replaced in place rather than the release being recreated: the
+          # download URL stays the same and a build never has two different dSYMs.
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $tag already exists; replacing its asset."
+            gh release upload "$tag" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+          else
+            gh release create "$tag" "$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Build $GITHUB_RUN_NUMBER" \
+              --notes-file "$notes" \
+              --prerelease
+          fi
+
+          page="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url --jq '.url')"
+          download="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Prisma.app.dSYM.zip"
+          echo "Release page: $page"
+          echo "Direct download: $download"
+          {
+            echo
+            echo "### Debug symbols"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release | $page |"
+            echo "| dSYM | $download |"
+            echo "| UUID | \`$DSYM_UUID\` |"
+            echo
+            echo "The release link needs no GitHub sign-in, unlike the artifact above."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload xcodebuild log
         if: always()

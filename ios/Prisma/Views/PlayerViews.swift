@@ -55,7 +55,7 @@ struct MiniPlayerView: View {
                 HStack(spacing: 4) {
                     Button(action: openPlayer) {
                         HStack(spacing: 11) {
-                            CoverArt(album: track.album, side: 42, cornerRadius: 10)
+                            CoverArt(cover: AlbumCover(of: track), side: 42, cornerRadius: 10)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(track.title ?? "Senza titolo")
                                     .font(.footnote.weight(.semibold))
@@ -275,7 +275,7 @@ struct FullPlayerView: View {
         let side = max(120, min(width, height * 0.45))
 
         // Prototype `.part`: large, radius 24, deep shadow.
-        CoverArt(album: track.album, side: side, cornerRadius: 24)
+        CoverArt(cover: AlbumCover(of: track), side: side, cornerRadius: 24)
             .shadow(color: .black.opacity(0.7), radius: 32, y: 24)
             .padding(.top, 22)
 

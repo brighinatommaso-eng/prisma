@@ -110,7 +110,7 @@ struct LibraryView: View {
         }
 
         ForEach(shelves) { shelf in
-            AlbumHeaderRow(album: shelf.album, trackIDs: shelf.tracks.map(\.serverID))
+            AlbumHeaderRow(heading: AlbumHeading(shelf.album), trackIDs: shelf.tracks.map(\.serverID))
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(shelf.tracks) { track in
@@ -254,11 +254,35 @@ struct EditModeButton: View {
     }
 }
 
+/// An album header as plain values, read from the album by the screen that holds it.
+///
+/// The header keeps `@State` for the cover problem, and the cover view writes that
+/// state from its own `.task` — which is a moment nothing else invalidated. The
+/// header therefore renders again on its own, so like the cover it holds no album.
+struct AlbumHeading {
+    let serverID: Int
+    let title: String
+    let artist: String
+    let year: Int?
+    let cover: AlbumCover
+    /// The last cover download failed; the next sync tries again.
+    let coverFailed: Bool
+
+    init(_ album: StoredAlbum) {
+        serverID = album.serverID
+        title = album.title
+        artist = album.artist
+        year = album.year
+        cover = AlbumCover(album)
+        coverFailed = album.coverError != nil
+    }
+}
+
 /// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
 /// download or cannot be read says so under the header. Long press offers the
 /// album-wide actions of `CollectionMenu`.
 private struct AlbumHeaderRow: View {
-    let album: StoredAlbum
+    let heading: AlbumHeading
     /// The album's tracks as ids, for the header menu. See `CollectionMenu`.
     let trackIDs: [String]
 
@@ -268,15 +292,15 @@ private struct AlbumHeaderRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 13) {
-                LocalCoverImage(album: album, side: 62, problem: $coverProblem)
+                LocalCoverImage(cover: heading.cover, side: 62, problem: $coverProblem)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
                     .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(album.title)
+                    Text(heading.title)
                         .font(.headline)
                         .foregroundStyle(ink.primary)
                         .lineLimit(2)
-                    Text([album.artist, album.year.map { String($0) }].compactMap { $0 }.joined(separator: " · "))
+                    Text([heading.artist, heading.year.map { String($0) }].compactMap { $0 }.joined(separator: " · "))
                         .font(.caption)
                         .foregroundStyle(ink.secondary)
                         .lineLimit(1)
@@ -287,7 +311,7 @@ private struct AlbumHeaderRow: View {
                 ProblemBlock(problem)
             }
         }
-        .modifier(CollectionMenu(trackIDs: trackIDs, name: album.title, problemKey: "album-\(album.serverID)"))
+        .modifier(CollectionMenu(trackIDs: trackIDs, name: heading.title, problemKey: "album-\(heading.serverID)"))
         .padding(.top, 22)
         .padding(.bottom, 4)
     }
@@ -296,7 +320,7 @@ private struct AlbumHeaderRow: View {
         if let coverProblem {
             return coverProblem
         }
-        if album.coverError != nil {
+        if heading.coverFailed {
             return "La copertina di questo album non è stata scaricata: viene ritentata a ogni sincronizzazione; se resta così, controlla che il server abbia la copertina."
         }
         return nil

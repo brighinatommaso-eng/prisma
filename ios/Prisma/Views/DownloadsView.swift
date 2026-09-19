@@ -61,7 +61,9 @@ struct DownloadsView: View {
                     .prismaRow()
             }
             ForEach(matching) { track in
-                DownloadRow(track: track)
+                // The album is read here, where the query has just handed the track
+                // over, and the row is given values.
+                DownloadRow(track: track, cover: AlbumCover(of: track), artist: track.album?.artist)
                     .prismaRow()
             }
         }
@@ -124,6 +126,8 @@ struct DownloadsView: View {
 /// tap, long press, swipes and problems are the same as on every other screen.
 private struct DownloadRow: View {
     let track: StoredTrack
+    let cover: AlbumCover
+    let artist: String?
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(\.prismaInk) private var ink
@@ -145,9 +149,9 @@ private struct DownloadRow: View {
         }
         switch track.downloadState {
         case .queued, .downloading:
-            return ["Sul telefono", track.album?.artist].compactMap { $0 }.joined(separator: " · ")
+            return ["Sul telefono", artist].compactMap { $0 }.joined(separator: " · ")
         default:
-            return track.album?.artist ?? ""
+            return artist ?? ""
         }
     }
 
@@ -155,7 +159,7 @@ private struct DownloadRow: View {
     /// queued.
     private var artwork: some View {
         ZStack {
-            CoverArt(album: track.album, side: 44, cornerRadius: 10)
+            CoverArt(cover: cover, side: 44, cornerRadius: 10)
             if downloads.preflights[track.serverID] != nil || track.downloadState == .downloading || track.downloadState == .queued {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.45))
