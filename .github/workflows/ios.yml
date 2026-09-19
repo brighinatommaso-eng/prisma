@@ -7,7 +7,10 @@
 #   - on failure, a final step extracts the error lines and annotates them;
 #   - the finished .ipa is unpacked and its Info.plist and binary are asserted,
 #     so "green" means the artifact is actually installable, not just that
-#     xcodebuild exited 0.
+#     xcodebuild exited 0;
+#   - the .dSYM is uploaded beside the .ipa and its UUID is asserted to match
+#     the shipped binary, because a crash report from the phone cannot be read
+#     without the debug symbols of the exact build that produced it.
 #
 # Scripts avoid bash-4-only syntax so they behave the same whichever bash the
 # runner resolves (macOS ships 3.2).
@@ -63,6 +66,7 @@ jobs:
             echo "DERIVED_DATA=$RUNNER_TEMP/DerivedData"
             echo "BUILD_LOG=$RUNNER_TEMP/xcodebuild.log"
             echo "IPA_DIR=$RUNNER_TEMP/ipa"
+            echo "DSYM_DIR=$RUNNER_TEMP/dsym"
             echo "SHORT_SHA=$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
           } >> "$GITHUB_ENV"
 
@@ -135,6 +139,7 @@ jobs:
             -derivedDataPath "$DERIVED_DATA" \
             -hideShellScriptEnvironment \
             CODE_SIGNING_ALLOWED=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf-with-dsym \
             CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
             PRISMA_COMMIT_SHA="$SHORT_SHA" \
             2>&1 | tee "$BUILD_LOG"
@@ -153,6 +158,40 @@ jobs:
           zip -qryX Prisma.ipa Payload
           rm -rf Payload
           ls -l Prisma.ipa
+
+      - name: Package and check Prisma.app.dSYM
+        run: |
+          # A crash report names each binary by UUID. Symbolication only works with
+          # the dSYM carrying that same UUID, so the match is asserted here rather
+          # than discovered weeks later with an .ips in hand and no way to read it.
+          dsym="$ARCHIVE/dSYMs/Prisma.app.dSYM"
+          dwarf="$dsym/Contents/Resources/DWARF/Prisma"
+          if [ ! -f "$dwarf" ]; then
+            echo "::error title=No dSYM in archive::$dwarf not found, so a crash in this build could not be read. The archive's dSYMs directory follows."
+            ls -la "$ARCHIVE/dSYMs" || echo "(no dSYMs directory at all)"
+            exit 1
+          fi
+
+          echo "::group::UUIDs"
+          dwarfdump --uuid "$ARCHIVE/Products/Applications/Prisma.app/Prisma"
+          dwarfdump --uuid "$dwarf"
+          echo "::endgroup::"
+
+          uuid_of() { dwarfdump --uuid "$1" | awk '{ print $2 }' | sort -u | tr '\n' ' '; }
+          app_uuid="$(uuid_of "$ARCHIVE/Products/Applications/Prisma.app/Prisma")"
+          dsym_uuid="$(uuid_of "$dwarf")"
+          if [ "$app_uuid" != "$dsym_uuid" ]; then
+            echo "::error title=dSYM does not match the app::app UUID '$app_uuid' but dSYM UUID '$dsym_uuid'. A crash report from this build could not be symbolicated with this dSYM."
+            exit 1
+          fi
+          echo "ok  dSYM UUID $dsym_uuid matches the shipped binary"
+
+          # A .dSYM is a directory, so it is zipped: the artifact then keeps the
+          # bundle structure that dwarfdump and atos expect.
+          mkdir -p "$DSYM_DIR"
+          ( cd "$ARCHIVE/dSYMs" && zip -qry "$DSYM_DIR/Prisma.app.dSYM.zip" Prisma.app.dSYM )
+          ls -l "$DSYM_DIR/Prisma.app.dSYM.zip"
+          echo "DSYM_UUID=$dsym_uuid" >> "$GITHUB_ENV"
 
       - name: Verify Prisma.ipa
         run: |
@@ -219,6 +258,7 @@ jobs:
             echo "| Minimum iOS | \`$minos\` |"
             echo "| Toolchain | Xcode \`$XCODE_VERSION\`, SDK \`$(key DTSDKName)\` |"
             echo "| Size | $(du -h "$IPA_DIR/Prisma.ipa" | cut -f1) |"
+            echo "| dSYM UUID | \`$DSYM_UUID\` |"
             echo
             echo "Unsigned. Sign and install with Sideloadly: see \`ios/BUILD.md\`."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -231,6 +271,16 @@ jobs:
           # wrapping it. With archive: false the artifact is named after the file.
           archive: false
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Prisma.app.dSYM
+        uses: actions/upload-artifact@v7
+        with:
+          name: Prisma.app.dSYM
+          path: ${{ runner.temp }}/dsym/Prisma.app.dSYM.zip
+          if-no-files-found: error
+          # Kept as long as the .ipa: a crash on an installed build must still be
+          # able to find the symbols of that build.
           retention-days: 30
 
       - name: Upload xcodebuild log

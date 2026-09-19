@@ -58,8 +58,10 @@ These come from Apple and apply per Apple ID, whichever tool does the signing.
 3. The run's **summary** shows a *Prisma.ipa* table with Version, Build and Commit.
    Write down **Build** and **Commit**: you will check them on the phone.
 4. Scroll to **Artifacts** at the bottom of the summary and download **`Prisma.ipa`**.
-   It downloads as the `.ipa` itself, not a zip. There is also an `xcodebuild-log`
-   artifact, which you only need when a build fails.
+   It downloads as the `.ipa` itself, not a zip. Beside it are two artifacts you do
+   not need now but may need later: `Prisma.app.dSYM`, which is what makes a crash
+   report readable (see [Reading a crash report](#reading-a-crash-report)), and
+   `xcodebuild-log`, which you only need when a build fails.
    Use the browser for this. `gh run download` treats the `.ipa` as a zip and unpacks
    it into a `Payload/` folder, which Sideloadly cannot use.
 
@@ -195,6 +197,83 @@ shows the new run number.
 
 ---
 
+## Reading a crash report
+
+When Prisma quits by itself, iOS writes a crash report on the phone. It is useful only
+if it can be **symbolicated**: turned from addresses into function names and line
+numbers. That needs the `.dSYM` of the exact build that crashed, which every run
+uploads next to the `.ipa`.
+
+### Get the crash report off the phone
+
+1. On the iPhone: Settings → **Privacy & Security** → **Analytics & Improvements** →
+   **Analytics Data**.
+2. Scroll to the entries beginning `Prisma-`, newest last. The name ends in `.ips`.
+3. Open it, tap the share button, and send it to the PC (AirDrop is not available on
+   Windows; email or a Files/iCloud copy works).
+
+### Get the matching dSYM
+
+1. Open the run that produced the build on the phone. *Build* at the bottom of the app's
+   Settings tab is the run number.
+2. Download the **`Prisma.app.dSYM`** artifact from that run. It downloads as a zip
+   containing `Prisma.app.dSYM`.
+3. Check it is the right one. Near the end of the `.ips` there is a **binary images**
+   list; the line for `Prisma` ends with a UUID. It must equal the **dSYM UUID** shown
+   in the run's summary table. If they differ, the phone is running a different build
+   from the one you downloaded, and the symbols will be wrong or refused.
+
+Artifacts expire after 30 days. A crash on an older build than that cannot be
+symbolicated at all, so grab the dSYM while the run is still there if a build is going
+to stay on the phone for a while.
+
+### What you can do on Windows
+
+The `.ips` is a text file: a one-line JSON header, then a JSON body. Open it in any
+editor. Without a Mac you can read, and it is often enough to place the fault:
+
+- **`exception`** — `EXC_BREAKPOINT` is a deliberate trap, which for this app usually
+  means a Swift runtime failure (a force-unwrap, a precondition, or SwiftData refusing
+  to answer for a deleted object), not memory corruption.
+- **`faultingThread`** and that thread's `frames` — each frame has `imageIndex` and
+  `imageOffset`. `imageOffset` is already the offset inside that binary, so you do not
+  have to subtract load addresses yourself.
+- **`usedImages`** — maps each `imageIndex` to a binary name and UUID. Frames whose
+  image is `Prisma` are the app's own code; frames in `SwiftUI`, `SwiftData` or
+  `UIKitCore` are system code, and Apple's symbols for those are what iOS already
+  filled in.
+- The **system frames that are already symbolicated** carry a lot of information on
+  their own. `GraphHost.updatePreferences` means the fault happened while SwiftUI was
+  rendering; `GraphHost.flushTransactions` under `_UIHostingView.beginTransaction`
+  means it happened while committing a change rather than during a render pass.
+
+### What you cannot do on Windows
+
+**Turning a `Prisma` frame's `imageOffset` into a function name requires macOS.** The
+tools that read the DWARF inside a `.dSYM` — `atos`, `dwarfdump`, `symbolicatecrash` —
+ship with Xcode and have no Windows build. There is no stock-Windows equivalent, and
+this guide will not pretend otherwise.
+
+So the options are:
+
+- **Send the `.ips` and the `Prisma.app.dSYM` zip to someone with a Mac.** On their
+  machine, for each frame in the `Prisma` image:
+
+  ```
+  atos -o Prisma.app.dSYM/Contents/Resources/DWARF/Prisma -arch arm64 -l 0 <imageOffset>
+  ```
+
+  `-l 0` is correct because `imageOffset` is already relative to the image.
+- **Send the unsymbolicated `.ips` anyway.** It still names the crashing thread, the
+  exception, and every system frame, which is frequently enough to identify the code
+  path. Say which build number it came from.
+
+The only macOS available to this project is the GitHub Actions runner, which is why the
+dSYM is checked there: the workflow proves on every build that a readable dSYM exists
+and matches the binary, so a crash is never lost to a missing or mismatched symbol file.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -210,3 +289,5 @@ shows the new run number.
 | Prisma opened last week but not today | The 7-day certificate expired. See 2.4. |
 | SideStore refresh fails | Check LocalDevVPN is on and the phone is on Wi-Fi. If it still fails after an iOS update, regenerate the pairing file (2.4). |
 | *Build* or *Commit* on the phone do not match the run | You installed an older `.ipa`. Browsers keep earlier downloads as `Prisma (1).ipa` and similar. Delete old copies and download again. |
+| Prisma quits by itself while you use it | It crashed. Get the report and the matching symbols: [Reading a crash report](#reading-a-crash-report). |
+| The dSYM UUID does not match the crash report | The phone is running a different build from the run you downloaded. Check *Build* at the bottom of the app's Settings tab and open that run instead. |
