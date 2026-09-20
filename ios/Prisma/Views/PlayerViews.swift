@@ -110,6 +110,9 @@ struct MiniPlayerView: View {
                 .padding(.leading, 11)
                 .padding(.trailing, 4)
 
+                if playback.isBuffering {
+                    bufferingLine
+                }
                 if playback.lastError != nil {
                     errorLine
                 }
@@ -127,6 +130,17 @@ struct MiniPlayerView: View {
                 .padding(.horizontal, 13)
                 .padding(.bottom, 6)
         }
+    }
+
+    /// A stream waiting for the server. It cannot stay up: `PlaybackEngine`'s
+    /// streaming deadline ends the wait, in audio or in a sentence, within fifteen
+    /// seconds.
+    private var bufferingLine: some View {
+        Label("In attesa dell'audio dal server…", systemImage: "antenna.radiowaves.left.and.right")
+            .font(.caption.weight(.medium))
+            .foregroundStyle(ink.secondary)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .padding(.horizontal, 12)
     }
 
     private var errorLine: some View {
@@ -185,7 +199,7 @@ struct FullPlayerView: View {
                         nowPlaying(track, width: proxy.size.width - 52, height: proxy.size.height)
                     } else {
                         topBar(source: nil)
-                        Text("Non c'è niente in riproduzione. Tocca un brano scaricato in Libreria.")
+                        Text("Non c'è niente in riproduzione. Tocca un brano in Libreria: se è sul telefono parte subito, se è solo sul server parte in streaming quando il server risponde.")
                             .font(.subheadline)
                             .foregroundStyle(ink.secondary)
                             .multilineTextAlignment(.center)
@@ -302,6 +316,19 @@ struct FullPlayerView: View {
                 .padding(.bottom, -6)
         }
         .padding(.top, 28)
+
+        // Where this track's audio is coming from, because it changes what happens
+        // if the network goes: a file keeps playing, a stream does not.
+        if playback.isStreaming {
+            Label(
+                playback.isBuffering ? "In attesa dell'audio dal server…" : "In streaming dal server",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+            .font(.caption.weight(.medium))
+            .foregroundStyle(ink.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 14)
+        }
 
         SeekBar(elapsed: playback.elapsed, duration: playback.duration) { seconds in
             playback.seek(to: seconds)
@@ -519,18 +546,24 @@ private struct SeekBar: View {
 /// The play queue in order, the current track marked by the equaliser.
 private struct QueueSheet: View {
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.dismiss) private var dismiss
     @Query private var tracks: [StoredTrack]
 
     var body: some View {
         // The one place this sheet reads the store.
         let rows = Projection.queue(ids: playback.queue, tracks: tracks)
+        let server = ServerState(reachability.isReachable)
         NavigationStack {
             List {
                 if rows.isEmpty {
                     Text("La coda è vuota.")
                 }
                 ForEach(rows) { row in
+                    // A queue keeps its tracks when the server goes; what changes
+                    // is which of them can play, so the ones that will be passed
+                    // over say so rather than disappearing.
+                    let skipped = row.skippedReason(server)
                     HStack(spacing: 12) {
                         Text("\(row.id + 1)")
                             .font(.caption.monospacedDigit())
@@ -539,7 +572,7 @@ private struct QueueSheet: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(row.title)
                                 .lineLimit(1)
-                            Text(row.artist)
+                            Text(skipped ?? (row.source == .onServer ? "In streaming · " + row.artist : row.artist))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -550,6 +583,7 @@ private struct QueueSheet: View {
                         }
                     }
                     .frame(minHeight: 44)
+                    .opacity(skipped == nil ? 1 : 0.5)
                 }
             }
             .navigationTitle("Coda")

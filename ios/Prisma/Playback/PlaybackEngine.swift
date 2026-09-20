@@ -520,7 +520,7 @@ final class PlaybackEngine {
             if let currentIndex {
                 load(index: currentIndex, position: elapsed, autoplay: true)
             } else {
-                message = "Non c'è niente da riprodurre: tocca un brano scaricato in Libreria."
+                message = "Non c'è niente da riprodurre: tocca un brano in Libreria."
             }
             return
         }
