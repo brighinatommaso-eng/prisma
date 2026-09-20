@@ -103,6 +103,10 @@ struct PlaylistsContent: View {
     @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var entries: [PlaylistEntry]
+    /// A slot may name a track that has no library row yet, so the summary resolves
+    /// it the same way the playlist's own screen does.
+    @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var creating = false
     @State private var newName = ""
@@ -111,7 +115,7 @@ struct PlaylistsContent: View {
 
     var body: some View {
         // The one place this filter reads the store.
-        let summaries = Projection.playlistSummaries(playlists, entries: entries)
+        let summaries = Projection.playlistSummaries(playlists, entries: entries, tracks: tracks, favourites: favourites)
 
         Button {
             newName = ""
@@ -224,14 +228,22 @@ struct PlaylistDetailView: View {
     @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var allEntries: [PlaylistEntry]
+    /// A slot added from Cerca has no library row until its track is acquired, and
+    /// until then it is its favourite that knows the title: both are read here, once.
+    @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var renaming = false
     @State private var renameText = ""
     @State private var editMode: EditMode = .inactive
+    @State private var addingTracks = false
 
     var body: some View {
         // The one place this screen reads the store.
-        let data = Projection.playlist(id: playlistID, playlists: playlists, entries: allEntries)
+        let data = Projection.playlist(
+            id: playlistID, playlists: playlists, entries: allEntries,
+            tracks: tracks, favourites: favourites
+        )
 
         List {
             if let data {
@@ -247,6 +259,14 @@ struct PlaylistDetailView: View {
                 EditModeButton(editMode: $editMode)
             }
             ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    addingTracks = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Aggiungi brani")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
                         renameText = data?.name ?? name
@@ -259,6 +279,11 @@ struct PlaylistDetailView: View {
                 }
                 .accessibilityLabel("Altre azioni")
             }
+        }
+        .sheet(isPresented: $addingTracks) {
+            // By id: the sheet stays up on its own while this screen changes behind
+            // it, and says so if the playlist is deleted meanwhile.
+            AddTracksToPlaylistSheet(playlistID: playlistID)
         }
         .alert("Rinomina playlist", isPresented: $renaming) {
             TextField("Nome", text: $renameText)
@@ -307,7 +332,11 @@ struct PlaylistDetailView: View {
                             .frame(width: 18, alignment: .leading)
                     }
                 } else {
-                    MissingEntryRow(playlistID: data.id, entryID: row.entryID)
+                    MissingEntryRow(
+                        playlistID: data.id,
+                        entryID: row.entryID,
+                        reason: row.missing ?? .leftTheLibrary
+                    )
                 }
             }
             .prismaRow()
@@ -316,12 +345,14 @@ struct PlaylistDetailView: View {
             move(rows: data.rows, from: source, to: destination)
         }
 
-        if data.missingCount > 0 {
+        // Two different kinds of missing, and only one of them is a download this
+        // screen can start: the server has to have the file.
+        if data.downloadableCount > 0 {
             Button {
                 guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
                 store.downloadMissing(in: playlist)
             } label: {
-                Text(data.missingCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(data.missingCount) brani mancanti")
+                Text(data.downloadableCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(data.downloadableCount) brani mancanti")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(ink.accentText)
                     .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
@@ -329,6 +360,16 @@ struct PlaylistDetailView: View {
             }
             .buttonStyle(.plain)
             .prismaRow()
+        }
+
+        if data.notAcquiredCount > 0 {
+            Text(data.notAcquiredCount == 1
+                 ? "1 brano non è né sul telefono né sul server: aprilo nei Preferiti e scegli dove scaricarlo."
+                 : "\(data.notAcquiredCount) brani non sono né sul telefono né sul server: aprili nei Preferiti e scegli dove scaricarli.")
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 8)
+                .prismaRow()
         }
     }
 
@@ -397,11 +438,14 @@ struct PlaylistDetailView: View {
     }
 }
 
-/// An entry whose track has left the library. Not a track row: there is no track
-/// left to act on, only the entry to remove.
+/// A slot with nothing left to show. Not a track row: there is no track to act on,
+/// only the slot to remove. `reason` says which of the two ways it happened — the
+/// library row went, or the slot names a video id that is in neither the library nor
+/// Preferiti.
 private struct MissingEntryRow: View {
     let playlistID: UUID
     let entryID: UUID
+    let reason: MissingEntryReason
 
     @Environment(PlaylistStore.self) private var store
     @Environment(\.modelContext) private var context
@@ -409,7 +453,7 @@ private struct MissingEntryRow: View {
 
     var body: some View {
         HStack {
-            Text("Brano non più in libreria")
+            Text(reason.text)
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
             Spacer(minLength: 0)
