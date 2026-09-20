@@ -315,8 +315,17 @@ final class PlaylistStore {
     /// Plays the playlist from the entry at `index` in its displayed order.
     func play(_ playlist: Playlist, fromEntryAt index: Int) {
         let listed = entries(of: playlist)
-        guard listed.indices.contains(index), listed[index].track != nil else {
-            lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
+        guard listed.indices.contains(index) else {
+            lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in questa playlist: riapri la schermata e riprova.")
+            return
+        }
+        // Told apart, because they need different things of the user: a slot whose
+        // library row has gone can only be removed, while one added da Cerca has
+        // simply never been downloaded anywhere yet.
+        guard listed[index].track != nil else {
+            lastError = listed[index].videoID == nil
+                ? .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
+                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è ancora stato scaricato né sul telefono né sul server: aprilo nei Preferiti e scegli dove scaricarlo.")
             return
         }
         let tracks = listed.compactMap(\.track)
