@@ -249,15 +249,6 @@ final class PlaylistStore {
         ModelLookup.track(draft.videoID, in: context)?.favouritedAt = now
     }
 
-    /// Adds the favourite and saves. For the plus in Cerca, which downloads nothing.
-    func addToFavourites(_ draft: FavouriteDraft) {
-        guard storedFavourite(draft.videoID) == nil else { return }
-        addFavourite(draft)
-        if save("adding “\(draft.title ?? draft.videoID)” to the favourites") {
-            notice = "“\(draft.title ?? draft.videoID)” aggiunto ai preferiti."
-        }
-    }
-
     private func storedFavourite(_ videoID: String) -> FavouriteTrack? {
         ModelLookup.favourite(videoID, in: context)
     }
@@ -294,7 +285,20 @@ final class PlaylistStore {
         let already = Set(existingFavouriteIDs())
         var added = 0
         let now = Date()
-        for track in tracks where !already.contains(track.serverID) {
+        // Preferiti is newest first, and every one of these becomes a favourite in
+        // the same instant, so the order is given rather than left to whatever the
+        // fetch happened to return: artist, then album, then the album's own
+        // numbering. One second apart, so the list reads that way and reads the same
+        // way after every launch.
+        let ordered = tracks.sorted { left, right in
+            let byArtist = (left.album?.artist ?? "").localizedStandardCompare(right.album?.artist ?? "")
+            if byArtist != .orderedSame { return byArtist == .orderedAscending }
+            let byAlbum = (left.album?.title ?? "").localizedStandardCompare(right.album?.title ?? "")
+            if byAlbum != .orderedSame { return byAlbum == .orderedAscending }
+            if left.trackNo != right.trackNo { return (left.trackNo ?? .max) < (right.trackNo ?? .max) }
+            return (left.title ?? "").localizedStandardCompare(right.title ?? "") == .orderedAscending
+        }
+        for (offset, track) in ordered.enumerated() where !already.contains(track.serverID) {
             context.insert(FavouriteTrack(
                 videoID: track.serverID,
                 title: track.title,
@@ -302,7 +306,7 @@ final class PlaylistStore {
                 albumName: track.album?.title,
                 artworkURL: nil,
                 durationS: track.durationS,
-                addedAt: track.favouritedAt ?? now
+                addedAt: now.addingTimeInterval(-Double(offset))
             ))
             added += 1
         }

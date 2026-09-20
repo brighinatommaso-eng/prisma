@@ -36,20 +36,60 @@ struct AlbumCover: Equatable {
     }
 }
 
-/// An album header: cover, title, artist and year, and whether its cover failed.
-struct AlbumHeading: Identifiable, Equatable {
-    /// The album's server id, which is also its problem key.
-    let id: Int
-    let title: String
-    let artist: String
-    let year: Int?
-    let cover: AlbumCover
-    /// The last cover download failed; the next sync tries again.
-    let coverFailed: Bool
+/// What the app has of a track, and therefore what its row may offer.
+///
+/// A row is not only a library track any more: Preferiti lists favourites, and a
+/// favourite may exist with no track on the server and none on the phone. Rather
+/// than a second row component with a second menu, the one row carries this and
+/// reads its actions off it.
+enum TrackPresence: String, Equatable, Sendable {
+    /// A library row exists and the server still lists the track.
+    case inLibrary
+    /// A library row exists, and a sync confirmed the server let go of its copy
+    /// because this phone asked for the only one. Whatever is here is all there is.
+    case phoneOnly
+    /// No library row at all: a favourite added from Cerca with the plus, whose
+    /// track is on neither the server nor the phone.
+    case favouriteOnly
+}
+
+/// The three states a Preferiti row tells apart, and the words for each.
+///
+/// Streaming does not exist yet, so two of the three cannot be played, and each
+/// says why in its own terms rather than sharing one vague sentence.
+enum FavouriteState: Equatable, Sendable {
+    /// The file is on this phone: it plays.
+    case onPhone
+    /// The server has it and this phone does not.
+    case onServer
+    /// Neither the server nor this phone has it.
+    case notAcquired
+
+    /// The row's subtitle prefix, so the state is legible without tapping.
+    var label: String {
+        switch self {
+        case .onPhone: return "Sul telefono"
+        case .onServer: return "Sul server"
+        case .notAcquired: return "Non ancora scaricato"
+        }
+    }
+
+    /// Why the track will not play, in full, or nil when it will.
+    func reason(title: String) -> String? {
+        switch self {
+        case .onPhone:
+            return nil
+        case .onServer:
+            return "“\(title)” è sul server ma non su questo telefono, e Prisma non riproduce ancora in streaming: scaricalo sul telefono per ascoltarlo."
+        case .notAcquired:
+            return "“\(title)” non è ancora stato scaricato: non è né sul server né su questo telefono. Scegli dove scaricarlo per poterlo ascoltare."
+        }
+    }
 }
 
 /// Everything a track row, its state icon, its problems, its menu and its swipes
-/// show. `id` is the track's server id, which every action carries.
+/// show. `id` is the track's server id — which is the YouTube video id, and so also
+/// the id of its favourite — and every action carries it.
 struct TrackRowData: Identifiable, Equatable {
     let id: String
     /// Already resolved, so no view has to decide what an untitled track is called.
@@ -66,30 +106,61 @@ struct TrackRowData: Identifiable, Equatable {
     let failureCause: FailureCause?
     let isFavourite: Bool
     let cover: AlbumCover
+    /// Absolute, from search. Only a favourite with no track has one: a library
+    /// track shows its album's cover from disk instead.
+    let artworkURL: String?
+    let presence: TrackPresence
+    /// The chain running for this track right now, when one is. Only Preferiti
+    /// fills it in; every other screen has its own place for acquisitions.
+    let acquisition: AcquisitionData?
     /// Identifies the running transfer, so the progress ring can find its progress.
     let downloadToken: String?
-}
 
-/// One album and the rows under it.
-struct ShelfData: Identifiable, Equatable {
-    let heading: AlbumHeading
-    let tracks: [TrackRowData]
+    /// Which of the three Preferiti states this row is in.
+    ///
+    /// The file decides first: a track on the phone plays, whatever the server has
+    /// since done. Otherwise a library row the server still lists is "sul server",
+    /// and everything else — a claimed copy the server has dropped and the phone no
+    /// longer holds, or a favourite with no track at all — is "non acquisito".
+    var favouriteState: FavouriteState {
+        if downloadState == .downloaded { return .onPhone }
+        switch presence {
+        case .inLibrary: return .onServer
+        case .phoneOnly, .favouriteOnly: return .notAcquired
+        }
+    }
 
-    var id: Int { heading.id }
-    var trackIDs: [String] { tracks.map(\.id) }
-}
+    var isPlayable: Bool { downloadState == .downloaded }
 
-/// The Library tab's albums filter.
-struct LibraryData: Equatable {
-    let shelves: [ShelfData]
-    /// Tracks with no album, or whose album is no longer in the library.
-    let unlisted: [TrackRowData]
-    /// From the sync record, for the line at the bottom of the list.
-    let lastSyncAt: Date?
+    /// Playlists, Elimina dal server and the device download all need a library row.
+    var hasLibraryRow: Bool { presence != .favouriteOnly }
 
-    /// Every track in the order shown: albums, then tracks without an album.
-    var listed: [TrackRowData] { shelves.flatMap(\.tracks) + unlisted }
-    var isEmpty: Bool { shelves.isEmpty && unlisted.isEmpty }
+    /// A transfer or a chain is under way, so the row offers no new one.
+    var isBusy: Bool {
+        downloadState == .queued || downloadState == .downloading || (acquisition?.isActive ?? false)
+    }
+
+    var favouriteDraft: FavouriteDraft {
+        FavouriteDraft(
+            videoID: id,
+            title: title,
+            artist: artist,
+            albumName: albumTitle,
+            artworkURL: artworkURL,
+            durationS: durationS
+        )
+    }
+
+    var acquisitionRequest: AcquisitionRequest {
+        AcquisitionRequest(
+            videoID: id,
+            title: title,
+            artist: artist,
+            albumName: albumTitle,
+            durationS: durationS,
+            artworkURL: artworkURL
+        )
+    }
 }
 
 /// One slot of a playlist. `track` is nil when the track has left the library and
@@ -154,6 +225,7 @@ struct AcquisitionData: Identifiable, Equatable {
     let title: String
     let artworkURL: String?
     let stage: AcquisitionStage
+    let destination: AcquisitionDestination
     let serverJobState: String?
     let serverProgress: Double?
     let failureMessage: String?
@@ -175,11 +247,13 @@ struct DownloadsData: Equatable {
     var isEmpty: Bool { tracks.isEmpty && acquisitions.isEmpty }
 }
 
-/// What Search needs to decide, per result, whether it is in the library or being
-/// acquired.
+/// What Search needs to decide, per result, whether it is in the library, already a
+/// favourite, or being acquired. Keyed by video id, which every one of the three
+/// shares.
 struct SearchIndex: Equatable {
     let tracks: [String: TrackRowData]
     let acquisitions: [String: AcquisitionData]
+    let favourites: Set<String>
 }
 
 /// One line of the play queue.
@@ -206,18 +280,7 @@ enum Projection {
         return AlbumCover(palette: album.palette, fileName: album.coverFileName, savedAt: album.coverSavedAt)
     }
 
-    static func heading(of album: StoredAlbum) -> AlbumHeading {
-        AlbumHeading(
-            id: album.serverID,
-            title: album.title,
-            artist: album.artist,
-            year: album.year,
-            cover: cover(of: album),
-            coverFailed: album.coverError != nil
-        )
-    }
-
-    static func row(of track: StoredTrack) -> TrackRowData {
+    static func row(of track: StoredTrack, acquisition: AcquisitionData? = nil) -> TrackRowData {
         let album = track.album
         return TrackRowData(
             id: track.serverID,
@@ -231,7 +294,33 @@ enum Projection {
             failureCause: track.failureCause,
             isFavourite: track.isFavourite,
             cover: cover(of: album),
+            artworkURL: nil,
+            presence: track.serverDroppedAt == nil ? .inLibrary : .phoneOnly,
+            acquisition: acquisition,
             downloadToken: track.downloadToken
+        )
+    }
+
+    /// A favourite with no track behind it: nothing has been downloaded anywhere,
+    /// so everything the row shows comes from what search returned when the plus
+    /// was tapped.
+    static func row(of favourite: FavouriteTrack, acquisition: AcquisitionData? = nil) -> TrackRowData {
+        TrackRowData(
+            id: favourite.videoID,
+            title: favourite.title ?? "Senza titolo",
+            artist: favourite.artist,
+            albumTitle: favourite.albumName,
+            albumID: nil,
+            trackNo: nil,
+            durationS: favourite.durationS,
+            downloadState: .notDownloaded,
+            failureCause: nil,
+            isFavourite: true,
+            cover: .none,
+            artworkURL: favourite.artworkURL,
+            presence: .favouriteOnly,
+            acquisition: acquisition,
+            downloadToken: nil
         )
     }
 
@@ -241,6 +330,7 @@ enum Projection {
             title: record.title ?? "Senza titolo",
             artworkURL: record.artworkURL,
             stage: record.stage,
+            destination: record.destination,
             serverJobState: record.serverJobState,
             serverProgress: record.serverProgress,
             failureMessage: record.failureMessage,
@@ -280,43 +370,31 @@ enum Projection {
 
     // MARK: Screens
 
-    /// Libreria, albums filter.
+    /// Libreria, Preferiti: the collection, newest favourite first.
     ///
-    /// Tracks are placed under their album by comparing references with the queried
-    /// albums, which reads nothing from either; an album the sync has deleted is not
-    /// among them, so it is never read. Both lists come from queries, so neither can
-    /// contain a row that has gone.
-    static func library(albums: [StoredAlbum], tracks: [StoredTrack], records: [SyncRecord]) -> LibraryData {
-        let sorted = albums.sorted {
-            let byArtist = $0.artist.localizedStandardCompare($1.artist)
-            if byArtist != .orderedSame { return byArtist == .orderedAscending }
-            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-        }
-        let live = Set(sorted.map { ObjectIdentifier($0) })
-
-        var members: [ObjectIdentifier: [TrackRowData]] = [:]
-        var unlisted: [TrackRowData] = []
-        for track in tracks {
-            let data = row(of: track)
-            if let album = track.album, live.contains(ObjectIdentifier(album)) {
-                members[ObjectIdentifier(album), default: []].append(data)
-            } else {
-                unlisted.append(data)
+    /// Driven by the favourites, not by the library: a favourite may have no track
+    /// anywhere, and must still be a row. The library and the acquisitions are only
+    /// looked up by video id, which reads a string from each and nothing else, so a
+    /// favourite whose track the sync deleted a moment ago simply finds nothing and
+    /// becomes a "non acquisito" row.
+    static func favourites(
+        favourites: [FavouriteTrack],
+        tracks: [StoredTrack],
+        acquisitions: [PendingAcquisition]
+    ) -> [TrackRowData] {
+        let byID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+        let pending = Dictionary(
+            acquisitions.map { ($0.videoID, acquisition($0)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return favourites
+            .sorted { $0.addedAt > $1.addedAt }
+            .map { favourite in
+                if let track = byID[favourite.videoID] {
+                    return row(of: track, acquisition: pending[favourite.videoID])
+                }
+                return row(of: favourite, acquisition: pending[favourite.videoID])
             }
-        }
-
-        let shelves = sorted.map { album in
-            ShelfData(heading: heading(of: album), tracks: albumOrder(members[ObjectIdentifier(album)] ?? []))
-        }
-        return LibraryData(shelves: shelves, unlisted: albumOrder(unlisted), lastSyncAt: records.first?.lastSyncAt)
-    }
-
-    /// Libreria, Preferiti filter: newest favourite first.
-    static func favourites(_ tracks: [StoredTrack]) -> [TrackRowData] {
-        tracks
-            .filter { $0.favouritedAt != nil }
-            .sorted { ($0.favouritedAt ?? .distantPast) > ($1.favouritedAt ?? .distantPast) }
-            .map(row(of:))
     }
 
     /// Libreria, Playlist filter.
@@ -326,7 +404,7 @@ enum Projection {
             PlaylistSummaryData(
                 id: playlist.id,
                 name: playlist.name,
-                tracks: (byPlaylist[ObjectIdentifier(playlist)] ?? []).compactMap { $0.track.map(row(of:)) }
+                tracks: (byPlaylist[ObjectIdentifier(playlist)] ?? []).compactMap { entry in entry.track.map { row(of: $0) } }
             )
         }
     }
@@ -338,7 +416,7 @@ enum Projection {
         return PlaylistData(
             id: playlist.id,
             name: playlist.name,
-            rows: ordered.map { PlaylistRowData(entryID: $0.id, track: $0.track.map(row(of:))) }
+            rows: ordered.map { entry in PlaylistRowData(entryID: entry.id, track: entry.track.map { row(of: $0) }) }
         )
     }
 
@@ -361,11 +439,17 @@ enum Projection {
                 holdsTrack: listed.contains { $0.track?.serverID == trackID }
             )
         }
-        return AddToPlaylistData(track: track.map(row(of:)), albumLine: albumLine, targets: targets)
+        return AddToPlaylistData(track: track.map { row(of: $0) }, albumLine: albumLine, targets: targets)
     }
 
     /// The Downloads tab: device downloads first by state, then by when they were
     /// asked for, with the acquisitions that have not reached the library yet.
+    ///
+    /// An acquisition whose device download has started is left out: the track's own
+    /// row is already showing that transfer, and listing both would be two rows for
+    /// one download. A Telefono acquisition outlives its handoff — it still has the
+    /// server's copy to delete — and that last step is its own row again, because
+    /// nothing else says it is happening.
     static func downloads(tracks: [StoredTrack], acquisitions: [PendingAcquisition]) -> DownloadsData {
         let ordered = tracks.sorted {
             // Downloading before queued, then by when they were asked for.
@@ -374,15 +458,26 @@ enum Projection {
             }
             return ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast)
         }
-        return DownloadsData(tracks: ordered.map(row(of:)), acquisitions: acquisitions.map(acquisition))
+        let rows = ordered.map { row(of: $0) }
+        let transferring: Set<DownloadState> = [.queued, .downloading, .downloaded]
+        let started = Set(rows.filter { transferring.contains($0.downloadState) }.map(\.id))
+        let records = acquisitions
+            .map { acquisition($0) }
+            .filter { $0.stage != .handingOff || !started.contains($0.id) }
+        return DownloadsData(tracks: rows, acquisitions: records)
     }
 
-    /// Cerca: what a result needs to know about the library and about what is
-    /// already being acquired, by video id.
-    static func search(tracks: [StoredTrack], acquisitions: [PendingAcquisition]) -> SearchIndex {
+    /// Cerca: what a result needs to know about the library, about Preferiti and
+    /// about what is already being acquired, by video id.
+    static func search(
+        tracks: [StoredTrack],
+        favourites: [FavouriteTrack],
+        acquisitions: [PendingAcquisition]
+    ) -> SearchIndex {
         SearchIndex(
             tracks: Dictionary(tracks.map { ($0.serverID, row(of: $0)) }, uniquingKeysWith: { first, _ in first }),
-            acquisitions: Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first })
+            acquisitions: Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first }),
+            favourites: Set(favourites.map(\.videoID))
         )
     }
 

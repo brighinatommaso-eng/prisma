@@ -11,10 +11,12 @@ struct SearchView: View {
     @Query private var libraryTracks: [StoredTrack]
     /// Results already being acquired, so a second tap cannot queue them again.
     @Query private var acquisitions: [PendingAcquisition]
+    /// Preferiti, so the plus knows whether it would add or remove.
+    @Query private var favourites: [FavouriteTrack]
 
     var body: some View {
         // The one place this screen reads the store.
-        let index = Projection.search(tracks: libraryTracks, acquisitions: acquisitions)
+        let index = Projection.search(tracks: libraryTracks, favourites: favourites, acquisitions: acquisitions)
 
         List {
             SearchField(query: $model.query) {
@@ -55,8 +57,14 @@ struct SearchView: View {
                     // Indexed rather than keyed by video_id: nothing guarantees
                     // the results contain no duplicates.
                     ForEach(Array(songs.enumerated()), id: \.offset) { _, song in
-                        SongRow(song: song, client: results.client, localTrack: index.tracks[song.videoID], pending: index.acquisitions[song.videoID])
-                            .prismaRow()
+                        SongRow(
+                            song: song,
+                            client: results.client,
+                            localTrack: index.tracks[song.videoID],
+                            pending: index.acquisitions[song.videoID],
+                            isFavourite: index.favourites.contains(song.videoID)
+                        )
+                        .prismaRow()
                     }
                 }
             }
@@ -115,72 +123,121 @@ private struct SearchField: View {
     }
 }
 
-/// A search result. Holds no `@State`: the one piece this row used to own, whether
-/// its thumbnail failed, now belongs to the thumbnail itself.
+/// A search result: the plus, which adds it to Preferiti and downloads nothing, and
+/// the download button, which asks where the copy should go and then acquires it.
 ///
-/// That matters because `localTrack` is a library row, and `RemoteImage` reports a
-/// failure whenever the network answers — unattended, with nothing else changing.
-/// A row that rendered again for that reason would rebuild `TrackRow` around a track
-/// the sync may have deleted in the meantime, which is the shape that crashed build
-/// 25 in `LocalCoverImage`. Nothing here renders again on its own any more.
+/// The only `@State` is the destination sheet, and it changes on a tap and never on
+/// its own. That matters because `RemoteImage` reports a failure whenever the
+/// network answers, unattended and with nothing else changing; the one piece that
+/// would re-render for that reason is the thumbnail, which owns the failure itself
+/// and holds a client and a URL string. Nothing here re-renders because the network
+/// spoke.
 private struct SongRow: View {
     let song: SongResult
     let client: APIClient
     let localTrack: TrackRowData?
     let pending: AcquisitionData?
+    let isFavourite: Bool
 
-    @Environment(AcquisitionCoordinator.self) private var acquisitions
+    @Environment(PlaylistStore.self) private var store
     @Environment(\.prismaInk) private var ink
+
+    /// By value, so it stays up while the library changes behind it.
+    @State private var destination: AcquisitionRequest?
 
     var body: some View {
         let subtitle = [song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
-        if let localTrack {
-            // In the library: the shared track row, so a result already on the phone
-            // plays on tap and one that is not starts its device download.
-            TrackRow(data: localTrack, subtitle: subtitle) {
-                thumbnail
-            }
-        } else {
-            // Not in the library: tapping acquires it through the server, and never
-            // plays. No long-press menu: every item acts on a library track.
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 10) {
-                    Button {
-                        acquisitions.acquire(song)
-                    } label: {
-                        HStack(spacing: 13) {
-                            thumbnail
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(song.title ?? "Senza titolo")
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(ink.primary)
-                                    .lineLimit(1)
-                                Text(pending.map { AcquisitionText.phase(of: $0, pollFailures: acquisitions.pollFailures) } ?? subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(ink.secondary)
-                                    .lineLimit(1)
-                            }
-                            Spacer(minLength: 0)
-                            Text(Formatting.trackTime(song.durationS))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(ink.secondary)
-                        }
-                        .frame(minHeight: 62)
-                        .contentShape(Rectangle())
+        Group {
+            if let localTrack {
+                // In the library: the shared track row, so a result already on the
+                // phone plays on tap and the long press offers everything it offers
+                // elsewhere. The plus sits beside the usual state icon.
+                TrackRow(data: localTrack, subtitle: subtitle, showsDuration: false) {
+                    thumbnail
+                } trailing: {
+                    HStack(spacing: 0) {
+                        plus
+                        TrackStateSlot(data: localTrack)
                     }
-                    .buttonStyle(.plain)
-                    // Not disabled while pending, which would dim the row; acquire()
-                    // ignores a track already being acquired.
-                    .accessibilityHint(pending == nil ? "Scarica il brano sul server e poi sul telefono" : "")
-
-                    AcquisitionStateIcon(song: song, record: pending)
-                        .padding(.trailing, -10)
                 }
-                if let pending, pending.stage == .failed {
-                    AcquisitionProblem(record: pending)
+            } else {
+                // Not in the library: tapping asks where to keep it, and never plays.
+                // No long-press menu: every item there acts on a library track.
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 0) {
+                        Button {
+                            destination = request
+                        } label: {
+                            HStack(spacing: 13) {
+                                thumbnail
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(song.title ?? "Senza titolo")
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(ink.primary)
+                                        .lineLimit(1)
+                                    Text(pending.map { AcquisitionText.phase(of: $0) } ?? subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(ink.secondary)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .frame(minHeight: 62)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(pending == nil ? "Scegli dove scaricare il brano" : "")
+
+                        plus
+                        AcquisitionStateIcon(record: pending) { destination = request }
+                            .padding(.trailing, -10)
+                    }
+                    if let pending, pending.stage == .failed {
+                        AcquisitionProblem(record: pending)
+                    }
                 }
             }
         }
+        .sheet(item: $destination) { request in
+            DestinationSheet(request: request, reason: nil)
+        }
+    }
+
+    /// Adds the result to Preferiti immediately, and downloads nothing.
+    private var plus: some View {
+        Button {
+            store.toggleFavourite(draft)
+        } label: {
+            Image(systemName: isFavourite ? "heart.fill" : "plus")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(isFavourite ? ink.favourite : ink.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(isFavourite ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti")
+    }
+
+    private var draft: FavouriteDraft {
+        FavouriteDraft(
+            videoID: song.videoID,
+            title: song.title,
+            artist: song.artist,
+            albumName: song.album,
+            artworkURL: song.artworkURLSmall ?? song.artworkURL,
+            durationS: song.durationS
+        )
+    }
+
+    private var request: AcquisitionRequest {
+        AcquisitionRequest(
+            videoID: song.videoID,
+            title: song.title,
+            artist: song.artist,
+            albumName: song.album,
+            durationS: song.durationS,
+            artworkURL: song.artworkURLSmall ?? song.artworkURL
+        )
     }
 
     private var thumbnail: some View {

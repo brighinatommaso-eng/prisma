@@ -23,6 +23,8 @@ enum AcquisitionText {
             return "Libreria · sincronizzazione…"
         case .handingOff:
             return "Sul telefono · avvio del download…"
+        case .deletingFromServer:
+            return "Sul telefono · rimozione della copia sul server…"
         case .failed:
             return record.failurePhase ?? "Non riuscito"
         }
@@ -38,8 +40,10 @@ enum AcquisitionText {
 /// The state slot of a search result that is not in the library: an arrow to
 /// acquire it, the chain's progress while it runs, retry once it failed.
 struct AcquisitionStateIcon: View {
-    let song: SongResult
     let record: AcquisitionData?
+    /// Opens the destination choice. The row owns the sheet, because the sheet
+    /// outlives this slot and must not be torn down by a redraw of it.
+    let onDownload: () -> Void
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -68,14 +72,12 @@ struct AcquisitionStateIcon: View {
                 case .onServer:
                     ProgressRing(fraction: record.serverProgress, color: ink.accent, side: 18)
                         .accessibilityLabel(AcquisitionText.phase(of: record))
-                case .requesting, .syncing, .handingOff:
+                case .requesting, .syncing, .handingOff, .deletingFromServer:
                     ProgressRing(fraction: nil, color: ink.accent, side: 18)
                         .accessibilityLabel(AcquisitionText.phase(of: record))
                 }
             } else {
-                Button {
-                    acquisitions.acquire(song)
-                } label: {
+                Button(action: onDownload) {
                     Image(systemName: "arrow.down.to.line")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(ink.secondary)
@@ -83,7 +85,7 @@ struct AcquisitionStateIcon: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Scarica sul server e sul telefono")
+                .accessibilityLabel("Scarica: scegli dove tenerlo")
             }
         }
         .frame(width: 44, height: 44)
@@ -222,5 +224,94 @@ struct AcquisitionRow: View {
         } catch {
             return nil
         }
+    }
+}
+
+// MARK: - Where to keep it
+
+/// The choice made before anything is fetched: Telefono, Server or Entrambi.
+///
+/// Opened from the download button in Cerca and from a Preferiti row that is not on
+/// the phone, and told apart by `reason`: from Preferiti it also says why the track
+/// will not play, which is the answer to the tap that opened it.
+///
+/// Holds an `AcquisitionRequest` and a string, both values. The sheet stays up on
+/// its own while the library changes underneath it, and the coordinator reads the
+/// store back when a destination is tapped.
+struct DestinationSheet: View {
+    let request: AcquisitionRequest
+    /// Why the track cannot be played right now, or nil when nothing was expected
+    /// to play yet.
+    let reason: String?
+
+    @Environment(AcquisitionCoordinator.self) private var acquisitions
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(request.title ?? "Senza titolo")
+                            .font(.headline)
+                        if let line = subtitle {
+                            Text(line)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        if let reason {
+                            Text(reason)
+                                .font(.footnote)
+                                .padding(.top, 6)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section {
+                    ForEach(AcquisitionDestination.allCases) { destination in
+                        Button {
+                            acquisitions.acquire(request, destination: destination)
+                            dismiss()
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: destination.symbol)
+                                    .font(.system(size: 17))
+                                    .frame(width: 26)
+                                    .padding(.top, 2)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(destination.label)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(destination.explanation)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .frame(minHeight: 50)
+                            .contentShape(Rectangle())
+                        }
+                    }
+                } header: {
+                    Text("Dove tenerlo").textCase(nil)
+                } footer: {
+                    Text("Il brano viene aggiunto ai preferiti in ogni caso, anche se il download non riesce.")
+                }
+            }
+            .navigationTitle("Scarica")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var subtitle: String? {
+        let line = [request.artist, request.albumName].compactMap { $0 }.joined(separator: " · ")
+        return line.isEmpty ? nil : line
     }
 }

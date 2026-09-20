@@ -2,43 +2,43 @@ import Foundation
 import SwiftData
 import SwiftUI
 
-/// Library filters. Playlists and Favourites live inside the Library tab rather than
-/// in a fifth tab.
+/// The two halves of the Library tab.
+///
+/// There is no album segment: albums are still what a cover and an artist name come
+/// from, but they are not browsed. Preferiti is the collection, and a track reaches
+/// it from Cerca or from the library it was already in.
 enum LibraryFilter: String, CaseIterable, Identifiable {
-    case albums
-    case playlists
     case favourites
+    case playlists
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .albums: return "Album"
-        case .playlists: return "Playlist"
         case .favourites: return "Preferiti"
+        case .playlists: return "Playlist"
         }
     }
 }
 
-/// A heart that toggles the track's favourite flag, with the whole `hitSize` area
-/// tappable (a plain button otherwise responds only on the drawn glyph).
+/// A heart that adds the track to Preferiti or takes it out, with the whole
+/// `hitSize` area tappable (a plain button otherwise responds only on the drawn
+/// glyph).
 ///
-/// Drawn from the value its screen projected, toggled on the track the store has when
-/// it is tapped.
+/// Takes a draft rather than an id: a favourite is keyed by the video id and needs
+/// no track, so this works on a search result that is in no library at all.
 struct FavouriteButton: View {
-    let trackID: String
+    let draft: FavouriteDraft
     let isFavourite: Bool
     var hitSize = CGSize(width: 44, height: 44)
     var glyphSize: CGFloat = 19
 
     @Environment(PlaylistStore.self) private var store
-    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
         Button {
-            guard let track = ModelLookup.track(trackID, in: context) else { return }
-            store.toggleFavourite(track)
+            store.toggleFavourite(draft)
         } label: {
             Image(systemName: isFavourite ? "heart.fill" : "heart")
                 .font(.system(size: glyphSize, weight: .medium))
@@ -535,26 +535,38 @@ struct AddToPlaylistSheet: View {
     }
 }
 
-// MARK: - Favourites filter
+// MARK: - Preferiti
 
+/// Preferiti: the collection. A flat list of tracks, newest favourite first, with no
+/// album grouping — each row's icon is the cover of the album its track belongs to.
+///
+/// A favourite is in one of three states and the row says which: on the phone, where
+/// it plays; on the server, where it cannot be played because Prisma does not stream
+/// yet; and not acquired, where it is on neither. The last two are still real rows
+/// with a real title, because a favourite added from Cerca with the plus downloads
+/// nothing.
 struct FavouritesContent: View {
     @Environment(\.prismaInk) private var ink
+    @Query private var favourites: [FavouriteTrack]
     @Query private var tracks: [StoredTrack]
+    @Query private var acquisitions: [PendingAcquisition]
 
     var body: some View {
         // The one place this filter reads the store.
-        let favourites = Projection.favourites(tracks)
+        let rows = Projection.favourites(favourites: favourites, tracks: tracks, acquisitions: acquisitions)
 
-        if !favourites.isEmpty {
-            PlayShuffleButtons(tracks: favourites, sourceName: "Preferiti")
+        if !rows.isEmpty {
+            PlayShuffleButtons(tracks: rows, sourceName: "Preferiti")
                 .padding(.top, 12)
                 .padding(.bottom, 6)
                 .prismaRow()
                 .listRowSeparator(.hidden)
         }
 
-        if favourites.isEmpty {
-            Text("Nessun preferito. Scorri verso destra su un brano, oppure tienilo premuto, per aggiungerlo.")
+        PlaylistStoreMessages()
+
+        if rows.isEmpty {
+            Text("Nessun preferito. Cerca un brano e tocca + per aggiungerlo qui, oppure la freccia per scaricarlo subito.")
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
                 .padding(.vertical, 16)
@@ -562,15 +574,187 @@ struct FavouritesContent: View {
                 .listRowSeparator(.hidden)
         }
 
-        ForEach(favourites) { track in
-            TrackRow(data: track, subtitle: track.artist) {
-                Image(systemName: "heart.fill")
-                    .font(.system(size: 15))
-                    .foregroundStyle(ink.favourite)
-                    .frame(width: 18)
-                    .accessibilityLabel("Preferito")
+        ForEach(rows) { row in
+            FavouriteRow(data: row)
+                .prismaRow()
+        }
+
+        if !rows.isEmpty {
+            Text(Self.summary(of: rows))
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
+    }
+
+    /// How the collection is spread over the three states, counted from the values
+    /// the projection produced.
+    static func summary(of rows: [TrackRowData]) -> String {
+        let onPhone = rows.filter { $0.favouriteState == .onPhone }.count
+        let onServer = rows.filter { $0.favouriteState == .onServer }.count
+        let missing = rows.filter { $0.favouriteState == .notAcquired }.count
+        var parts = [Formatting.trackCount(rows.count) + " nei preferiti"]
+        if onPhone > 0 { parts.append("\(onPhone) sul telefono") }
+        if onServer > 0 { parts.append("\(onServer) solo sul server") }
+        if missing > 0 { parts.append("\(missing) non ancora scaricati") }
+        return parts.joined(separator: " · ") + "."
+    }
+}
+
+/// One favourite. The shared track row, so the long press, the swipes and the
+/// problems are the same as everywhere else; what this screen chooses is the artwork
+/// with its state on it, the line under the title, and a trailing slot that asks
+/// where a missing track should go rather than starting a download on its own.
+private struct FavouriteRow: View {
+    let data: TrackRowData
+
+    @Environment(AcquisitionCoordinator.self) private var acquisitions
+
+    var body: some View {
+        TrackRow(
+            data: data,
+            subtitle: subtitle,
+            subtitleLineLimit: 2,
+            choosesDestination: true
+        ) {
+            FavouriteArtwork(data: data)
+        } trailing: {
+            FavouriteStateSlot(data: data)
+        }
+    }
+
+    /// The state first, then the artist, so the three kinds of row read apart at a
+    /// glance and not only by their icon.
+    private var subtitle: String {
+        if let record = data.acquisition, record.isActive {
+            return AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures)
+        }
+        switch data.downloadState {
+        case .queued:
+            return "Sul telefono · in coda"
+        case .downloading:
+            return "Sul telefono · download in corso"
+        case .notDownloaded, .downloaded, .failed, .cancelled:
+            break
+        }
+        let lead: String?
+        switch data.favouriteState {
+        case .onPhone: lead = nil
+        case .onServer: lead = "Sul server"
+        case .notAcquired: lead = "Non ancora scaricato"
+        }
+        return [lead, data.artist].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+/// The 46 pt artwork of a favourite, with what the app actually has drawn on it: a
+/// full-strength cover for a track on the phone, a dimmed one with a drive badge for
+/// one only the server has, and a dimmed placeholder with a dashed ring for one that
+/// is nowhere yet.
+///
+/// A favourite with no track has no album and so no local cover, only the artwork
+/// URL search returned, which is loaded the way Cerca loads its thumbnails.
+private struct FavouriteArtwork: View {
+    let data: TrackRowData
+
+    @Environment(AppSettings.self) private var settings
+    @Environment(\.prismaInk) private var ink
+    /// Read by nothing: the row reports its own problems, and a missing thumbnail
+    /// is already visible as the placeholder. `RemoteImage` needs somewhere to put it.
+    @State private var artworkError: APIError?
+
+    private let side: CGFloat = 46
+
+    var body: some View {
+        ZStack {
+            if let url = data.artworkURL, let client = artworkClient {
+                RemoteImage(client: client, reference: url, side: side, failure: $artworkError)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                CoverArt(cover: data.cover, side: side, cornerRadius: 10)
             }
-            .prismaRow()
+        }
+        .opacity(data.favouriteState == .onPhone ? 1 : 0.5)
+        .overlay(alignment: .bottomTrailing) {
+            badge
+        }
+        .frame(width: side, height: side)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        switch data.favouriteState {
+        case .onPhone:
+            EmptyView()
+        case .onServer:
+            symbol("externaldrive.fill")
+        case .notAcquired:
+            symbol("circle.dashed")
+        }
+    }
+
+    private func symbol(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.white.opacity(0.95))
+            .frame(width: 18, height: 18)
+            .background(Color.black.opacity(0.65), in: Circle())
+            .offset(x: 4, y: 4)
+    }
+
+    /// Artwork only; without a usable address the placeholder is drawn and the
+    /// address problem is reported by whatever tries to use the server.
+    private var artworkClient: APIClient? {
+        try? settings.makeClient()
+    }
+}
+
+/// The trailing slot of a favourite: the chain's progress while one runs, the
+/// standard transfer icon while a device download does, and otherwise a download
+/// arrow that asks where the copy should go instead of starting one.
+private struct FavouriteStateSlot: View {
+    let data: TrackRowData
+
+    @Environment(AcquisitionCoordinator.self) private var acquisitions
+    @Environment(\.prismaInk) private var ink
+    /// Its own sheet, by value: it is opened from this button and stays up while the
+    /// row behind it changes.
+    @State private var destination: AcquisitionRequest?
+
+    var body: some View {
+        content
+            .sheet(item: $destination) { request in
+                DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title))
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let record = data.acquisition, record.isActive {
+            ProgressRing(fraction: record.stage == .onServer ? record.serverProgress : nil, color: ink.accent, side: 18)
+                .frame(width: 44, height: 44)
+                .accessibilityLabel(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))
+        } else if data.isPlayable || data.isBusy || (data.downloadState == .failed && data.presence == .inLibrary) {
+            // On the phone, arriving, or a device download to retry: the icon every
+            // other screen shows, doing what it does everywhere.
+            TrackStateSlot(data: data)
+        } else {
+            Button {
+                destination = data.acquisitionRequest
+            } label: {
+                Image(systemName: "arrow.down.to.line")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(ink.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Scarica: scegli dove tenerlo")
+            .padding(.trailing, -10)
         }
     }
 }

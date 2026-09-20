@@ -11,14 +11,19 @@ struct PlaylistPlacement: Equatable {
     let entryID: UUID
 }
 
-/// The one row for a library track, on every screen: Libreria, Preferiti, playlists,
-/// Cerca and Download. The prototype's `.trk`: leading slot, title and subtitle,
-/// duration, and the trailing state slot, with any problem in plain language under it.
+/// The one row for a track, on every screen: Preferiti, playlists, Cerca and
+/// Download. The prototype's `.trk`: leading slot, title and subtitle, duration, and
+/// the trailing state slot, with any problem in plain language under it.
 ///
 /// Takes a `TrackRowData`, never a `StoredTrack`: its screen read the store once and
-/// handed down values (see `Projection`). Tapping plays the track when its file is on
-/// the phone, and starts its download when it is not; both read the track back by id
-/// at the moment of the tap.
+/// handed down values (see `Projection`). The row may not have a library track at
+/// all — a favourite added from Cerca has none — which is what `TrackRowData
+/// .presence` says, and what decides here whether tapping plays, downloads, or
+/// explains. Whatever it does, it reads the track back by id at the moment of the tap.
+///
+/// `choosesDestination` is Preferiti: there a track that is not on the phone is not
+/// simply downloaded, because the user picks where the copy goes, and a track that
+/// cannot be played says why instead of doing nothing.
 ///
 /// The long-press menu and the swipes come from `TrackMenu`, so every screen offers
 /// the same actions. A screen chooses only what the row shows (leading and trailing
@@ -30,6 +35,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
     let subtitleLineLimit: Int
     let showsDuration: Bool
     let placement: PlaylistPlacement?
+    let choosesDestination: Bool
     let play: (() -> Void)?
     let leading: Leading
     let trailing: Trailing
@@ -40,12 +46,17 @@ struct TrackRow<Leading: View, Trailing: View>: View {
     @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
+    /// The destination sheet, by value: it stays up by itself while the library
+    /// changes behind it.
+    @State private var destination: AcquisitionRequest?
+
     init(
         data: TrackRowData,
         subtitle: String? = nil,
         subtitleLineLimit: Int = 1,
         showsDuration: Bool = true,
         placement: PlaylistPlacement? = nil,
+        choosesDestination: Bool = false,
         play: (() -> Void)? = nil,
         @ViewBuilder leading: () -> Leading,
         @ViewBuilder trailing: () -> Trailing
@@ -55,6 +66,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
         self.subtitleLineLimit = subtitleLineLimit
         self.showsDuration = showsDuration
         self.placement = placement
+        self.choosesDestination = choosesDestination
         self.play = play
         self.leading = leading()
         self.trailing = trailing()
@@ -95,18 +107,36 @@ struct TrackRow<Leading: View, Trailing: View>: View {
 
             TrackProblems(data: data)
         }
-        .modifier(TrackMenu(data: data, placement: placement, play: { startPlayback() }))
+        .modifier(TrackMenu(
+            data: data,
+            placement: placement,
+            play: { startPlayback() },
+            chooseDestination: choosesDestination ? { destination = data.acquisitionRequest } : nil
+        ))
+        .sheet(item: $destination) { request in
+            DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title))
+        }
     }
 
     private func tap() {
-        switch data.downloadState {
-        case .downloaded:
+        if data.isPlayable {
             startPlayback()
+            return
+        }
+        if choosesDestination {
+            // Preferiti: a row that will not play opens the choice, whose header is
+            // the answer to the tap. A transfer already under way says so itself.
+            guard !data.isBusy, downloads.preflights[data.id] == nil else { return }
+            destination = data.acquisitionRequest
+            return
+        }
+        switch data.downloadState {
         case .notDownloaded, .cancelled, .failed:
-            guard downloads.preflights[data.id] == nil,
+            guard data.presence == .inLibrary,
+                  downloads.preflights[data.id] == nil,
                   let track = ModelLookup.track(data.id, in: context) else { return }
             downloads.download(track)
-        case .queued, .downloading:
+        case .queued, .downloading, .downloaded:
             break
         }
     }
@@ -128,10 +158,18 @@ extension TrackRow where Trailing == TrackStateSlot {
         data: TrackRowData,
         subtitle: String? = nil,
         placement: PlaylistPlacement? = nil,
+        choosesDestination: Bool = false,
         play: (() -> Void)? = nil,
         @ViewBuilder leading: () -> Leading
     ) {
-        self.init(data: data, subtitle: subtitle, placement: placement, play: play, leading: leading) {
+        self.init(
+            data: data,
+            subtitle: subtitle,
+            placement: placement,
+            choosesDestination: choosesDestination,
+            play: play,
+            leading: leading
+        ) {
             TrackStateSlot(data: data)
         }
     }
@@ -185,11 +223,16 @@ struct TrackProblems: View {
 /// right now is listed; nothing is shown disabled.
 ///
 /// - Riproduci, Aggiungi alla coda: the file is on the phone.
-/// - Aggiungi a playlist…, Preferito / Rimuovi dai preferiti: always (the row is a
-///   library track). Rimuovi dalla playlist: the row is inside a playlist.
-/// - Scarica sul telefono: not on the phone, not queued or downloading, and no
-///   server check running. Rimuovi dal telefono: the file is on the phone.
-/// - Elimina dal server: always, unless its deletion is already running.
+/// - Aggiungi a playlist…: there is a library track to point an entry at.
+///   Preferito / Rimuovi dai preferiti: always, because a favourite needs no track.
+///   Rimuovi dalla playlist: the row is inside a playlist.
+/// - Scarica…: Preferiti, where the destination is chosen first. Scarica sul
+///   telefono elsewhere: the server has it, it is not on the phone, nothing is
+///   queued or downloading and no server check is running. Rimuovi dal telefono:
+///   the file is on the phone.
+/// - Elimina dal server: the server still has the track, and its deletion is not
+///   already running. A track the server has already dropped, or one that was never
+///   there, has nothing to delete.
 ///
 /// What is listed comes from the values the row was given. What each item does is
 /// read back from the store by id when it is tapped, because a menu is opened, and a
@@ -200,6 +243,8 @@ struct TrackMenu: ViewModifier {
     let data: TrackRowData
     let placement: PlaylistPlacement?
     let play: () -> Void
+    /// Preferiti opens the destination choice instead of starting a download here.
+    let chooseDestination: (() -> Void)?
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlaybackEngine.self) private var playback
@@ -232,8 +277,9 @@ struct TrackMenu: ViewModifier {
 
     @ViewBuilder
     private var menuItems: some View {
-        let onPhone = data.downloadState == .downloaded
+        let onPhone = data.isPlayable
         let canDownload = TrackAvailability.canDownload(data, downloads: downloads)
+        let canChoose = chooseDestination != nil && !onPhone && !data.isBusy
 
         if onPhone {
             Section {
@@ -250,10 +296,12 @@ struct TrackMenu: ViewModifier {
         }
 
         Section {
-            Button {
-                addingToPlaylist = true
-            } label: {
-                Label("Aggiungi a playlist…", systemImage: "text.badge.plus")
+            if data.hasLibraryRow {
+                Button {
+                    addingToPlaylist = true
+                } label: {
+                    Label("Aggiungi a playlist…", systemImage: "text.badge.plus")
+                }
             }
             if let placement {
                 Button(role: .destructive) {
@@ -265,9 +313,13 @@ struct TrackMenu: ViewModifier {
             favouriteButton
         }
 
-        if canDownload || onPhone {
+        if canChoose || canDownload || onPhone {
             Section {
-                if canDownload {
+                if let chooseDestination, canChoose {
+                    Button(action: chooseDestination) {
+                        Label("Scarica…", systemImage: "arrow.down.to.line")
+                    }
+                } else if canDownload {
                     Button {
                         download()
                     } label: {
@@ -284,7 +336,7 @@ struct TrackMenu: ViewModifier {
             }
         }
 
-        if !deletion.inProgress.contains(data.id) {
+        if data.presence == .inLibrary, !deletion.inProgress.contains(data.id) {
             Section {
                 Button(role: .destructive) {
                     confirmDeleteFromServer()
@@ -295,10 +347,11 @@ struct TrackMenu: ViewModifier {
         }
     }
 
+    /// Favouriting needs no track: the collection is keyed by the video id, and the
+    /// row carries everything a new favourite is made of.
     private var favouriteButton: some View {
         Button {
-            guard let track = ModelLookup.track(data.id, in: context) else { return }
-            store.toggleFavourite(track)
+            store.toggleFavourite(data.favouriteDraft)
         } label: {
             Label(data.isFavourite ? "Rimuovi dai preferiti" : "Preferito",
                   systemImage: data.isFavourite ? "heart.slash" : "heart")
@@ -349,9 +402,15 @@ struct TrackMenu: ViewModifier {
         let id = data.id
         let downloads = self.downloads
         let context = self.context
+        // A phone-only track has no copy anywhere else: the file here is the whole
+        // track, and the row says so rather than promising it can be downloaded again
+        // as it is. It can be fetched again, but from YouTube, through the server.
+        let message = data.presence == .phoneOnly
+            ? "Questa è l’unica copia: il server non ha più questo brano, perché lo avevi scaricato solo sul telefono. Eliminando il file resta il preferito, e per riascoltarlo il brano va fatto riscaricare dal server."
+            : "Il file audio viene eliminato da questo iPhone. Il brano resta in libreria, nelle playlist e nei preferiti: per riascoltarlo va scaricato di nuovo."
         confirmation = DestructiveConfirmation(
             title: "Rimuovere “\(data.title)” dal telefono?",
-            message: "Il file audio viene eliminato da questo iPhone. Il brano resta in libreria, nelle playlist e nei preferiti: per riascoltarlo va scaricato di nuovo.",
+            message: message,
             button: "Rimuovi dal telefono"
         ) {
             guard let track = ModelLookup.track(id, in: context), track.downloadState == .downloaded else { return }
@@ -480,9 +539,16 @@ struct CollectionMenu: ViewModifier {
     private func confirmRemoveFromPhone(_ ids: [String]) {
         let downloads = self.downloads
         let context = self.context
+        // Counted from the values, so the warning names how many of these files are
+        // the only copy there is.
+        let onlyCopies = members.filter { ids.contains($0.id) && $0.presence == .phoneOnly }.count
+        let warning = onlyCopies == 0 ? ""
+            : onlyCopies == 1
+                ? " Di 1 brano questa è l’unica copia: il server non ce l’ha più, e per riaverlo va fatto riscaricare dal server."
+                : " Di \(onlyCopies) brani questa è l’unica copia: il server non ce li ha più, e per riaverli vanno fatti riscaricare dal server."
         confirmation = DestructiveConfirmation(
             title: ids.count == 1 ? "Rimuovere 1 brano dal telefono?" : "Rimuovere \(ids.count) brani dal telefono?",
-            message: "I file audio di “\(name)” vengono eliminati da questo iPhone. I brani restano in libreria, nelle playlist e nei preferiti: per riascoltarli vanno scaricati di nuovo.",
+            message: "I file audio di “\(name)” vengono eliminati da questo iPhone. I brani restano in libreria, nelle playlist e nei preferiti: per riascoltarli vanno scaricati di nuovo." + warning,
             button: "Rimuovi dal telefono"
         ) {
             for track in ModelLookup.tracks(ids, in: context) where track.downloadState == .downloaded {
@@ -509,7 +575,13 @@ struct CollectionMenu: ViewModifier {
 
 enum TrackAvailability {
     /// On the server but not on the phone, with nothing already under way.
+    ///
+    /// The device download fetches GET /tracks/{id}/file, so it needs a track the
+    /// server still has: a favourite with no library row, and a track whose only
+    /// copy is here because the server dropped it, both have to go through the
+    /// server first and are not offered a download that would only 404.
     static func canDownload(_ data: TrackRowData, downloads: DownloadManager) -> Bool {
+        guard data.presence == .inLibrary else { return false }
         switch data.downloadState {
         case .notDownloaded, .failed, .cancelled:
             return downloads.preflights[data.id] == nil

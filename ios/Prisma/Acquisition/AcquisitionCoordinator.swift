@@ -609,11 +609,9 @@ final class AcquisitionCoordinator {
             // The file left the phone while this was waiting, e.g. Rimuovi dal
             // telefono. There is nothing to take ownership of, so the server keeps
             // its copy and the track stays available there.
-            if let track = storedTrack(videoID) {
-                track.phoneOnlySince = nil
-            }
+            storedTrack(videoID)?.phoneOnlySince = nil
             finish(record)
-            save("leaving the server's copy of " + L + name + R + " in place")
+            save("leaving the server's copy of “\(name)” in place")
             return
         }
 
@@ -629,7 +627,7 @@ final class AcquisitionCoordinator {
             track.phoneOnlySince = Date()
         }
         record.deletionAttempts += 1
-        guard save("claiming the only copy of " + L + name + R) else { return }
+        guard save("claiming the only copy of “\(name)”") else { return }
 
         do {
             _ = try await client.deleteTrack(trackID: videoID)
@@ -640,7 +638,7 @@ final class AcquisitionCoordinator {
             if apiError.httpStatus == 404 {
                 // The server does not have it, which is where this step was going.
                 finish(current)
-                save("recording that the server no longer has " + L + name + R)
+                save("recording that the server no longer has “\(name)”")
                 return
             }
             if apiError.httpStatus == 409, current.deletionAttempts < Self.maxDeletionAttempts {
@@ -657,7 +655,7 @@ final class AcquisitionCoordinator {
 
         guard let done = pendingRecord(videoID) else { return }
         finish(done)
-        save("recording that the server deleted its copy of " + L + name + R)
+        save("recording that the server deleted its copy of “\(name)”")
     }
 
     // MARK: - Helpers

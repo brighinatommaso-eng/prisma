@@ -52,7 +52,7 @@ struct MiniPlayerView: View {
     var body: some View {
         // The one place this view reads the store: the engine's fetch, projected
         // before anything below it sees the result.
-        if let track = playback.currentTrack.map(Projection.row(of:)) {
+        if let track = playback.currentTrack.map({ Projection.row(of: $0) }) {
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
                     Button(action: openPlayer) {
@@ -76,7 +76,7 @@ struct MiniPlayerView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Apre il player")
 
-                    FavouriteButton(trackID: track.id, isFavourite: track.isFavourite,
+                    FavouriteButton(draft: track.favouriteDraft, isFavourite: track.isFavourite,
                                     hitSize: CGSize(width: 44, height: 46), glyphSize: 17)
 
                     // Each control is its own button with the whole square as its hit
@@ -175,7 +175,7 @@ struct FullPlayerView: View {
 
     var body: some View {
         // The one place this screen reads the store.
-        let track = playback.currentTrack.map(Projection.row(of:))
+        let track = playback.currentTrack.map { Projection.row(of: $0) }
 
         GeometryReader { proxy in
             ScrollView {
@@ -298,7 +298,7 @@ struct FullPlayerView: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            FavouriteButton(trackID: track.id, isFavourite: track.isFavourite, glyphSize: 23)
+            FavouriteButton(draft: track.favouriteDraft, isFavourite: track.isFavourite, glyphSize: 23)
                 .padding(.bottom, -6)
         }
         .padding(.top, 28)

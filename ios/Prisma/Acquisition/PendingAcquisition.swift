@@ -56,8 +56,11 @@ enum AcquisitionDestination: String, CaseIterable, Identifiable, Sendable {
 /// Plain values. Built where a row is drawn — from a search result, or from a
 /// favourite that has no track — and carried into a sheet and a button that act on
 /// it much later, so it holds no model object.
-struct AcquisitionRequest: Equatable, Sendable {
+struct AcquisitionRequest: Identifiable, Equatable, Sendable {
     let videoID: String
+
+    /// The video id: one sheet per track, and the same track reopens the same sheet.
+    var id: String { videoID }
     let title: String?
     let artist: String?
     let albumName: String?

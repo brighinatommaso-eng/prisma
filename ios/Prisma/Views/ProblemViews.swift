@@ -186,29 +186,48 @@ struct DownloadStateIcon: View {
                     .foregroundStyle(ink.secondary)
                     .accessibilityLabel("In coda")
             case .notDownloaded, .cancelled:
-                Button {
-                    download()
-                } label: {
-                    Image(systemName: "arrow.down.to.line")
+                if data.presence == .inLibrary {
+                    Button {
+                        download()
+                    } label: {
+                        Image(systemName: "arrow.down.to.line")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(ink.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Scarica")
+                } else {
+                    // The server has no file to serve for this track, so there is no
+                    // download to offer here: Preferiti asks the server for it again,
+                    // with a destination, and shows the same dashed ring while it is
+                    // nowhere.
+                    Image(systemName: "circle.dashed")
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(ink.secondary)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                        .accessibilityLabel("Non scaricato: scaricalo dai Preferiti")
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Scarica")
             case .failed:
-                Button {
-                    download()
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(ink.favourite)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
+                if data.presence == .inLibrary {
+                    Button {
+                        download()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(ink.favourite)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Download non riuscito. Riprova")
+                } else {
+                    // Retrying would ask the server for a file it no longer has.
+                    Image(systemName: "circle.dashed")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(ink.secondary)
+                        .accessibilityLabel("Non scaricato: scaricalo dai Preferiti")
                 }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Download non riuscito. Riprova")
             }
         }
     }

@@ -2,26 +2,32 @@ import Foundation
 import SwiftData
 import SwiftUI
 
-/// Renders the library stored on this iPhone. Opening it makes no network call;
-/// only Sync and pull-to-refresh talk to the server.
+/// The Library tab: Preferiti and Playlist. Opening it makes no network call; only
+/// Sync and pull-to-refresh talk to the server.
+///
+/// There is no album screen any more. Albums are still stored, and still supply the
+/// cover and the artist name a row shows, but the collection the user browses is
+/// Preferiti, which is a flat list of tracks and can hold one the server has never
+/// heard of.
+///
+/// This screen reads the store only for the sync record; both filters read what they
+/// need themselves, each in one place (see `Projection`).
 struct LibraryView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(LibrarySync.self) private var sync
     @Environment(\.prismaInk) private var ink
 
-    @Query private var albums: [StoredAlbum]
-    @Query private var tracks: [StoredTrack]
     @Query private var records: [SyncRecord]
 
     @State private var confirmingFullResync = false
-    @State private var filter: LibraryFilter = .albums
+    @State private var filter: LibraryFilter = .favourites
     /// Owned here rather than by the system EditButton, whose labels would follow the
     /// app's English development region.
     @State private var editMode: EditMode = .inactive
 
     var body: some View {
-        // The one place this screen reads the store. Everything below is values.
-        let data = Projection.library(albums: albums, tracks: tracks, records: records)
+        // The one place this screen reads the store.
+        let lastSyncAt = records.first?.lastSyncAt
 
         List {
             FilterChips(options: LibraryFilter.allCases, selection: $filter) { $0.label }
@@ -29,14 +35,22 @@ struct LibraryView: View {
                 .prismaRow()
                 .listRowSeparator(.hidden)
 
+            syncStatus
+
             switch filter {
-            case .albums:
-                albumsContent(data)
-            case .playlists:
-                PlaylistsContent()
             case .favourites:
                 FavouritesContent()
+            case .playlists:
+                PlaylistsContent()
             }
+
+            Text(lastSyncLine(lastSyncAt))
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
+                .prismaRow()
+                .listRowSeparator(.hidden)
         }
         .prismaList()
         .environment(\.editMode, $editMode)
@@ -81,76 +95,24 @@ struct LibraryView: View {
             }
             Button("Annulla", role: .cancel) {}
         } message: {
-            Text("Scarica di nuovo l'intero catalogo. Album e brani che il server non elenca più vengono rimossi da questo iPhone, insieme ai file scaricati.")
+            Text("Scarica di nuovo l'intero catalogo. Brani che il server non elenca più vengono rimossi da questo iPhone, insieme ai file scaricati — tranne quelli di cui questo telefono ha chiesto l'unica copia, che restano. I preferiti non si perdono mai: un brano rimosso resta nell'elenco e si può riscaricare.")
         }
     }
 
-    // MARK: - Albums
-
-    @ViewBuilder
-    private func albumsContent(_ data: LibraryData) -> some View {
-        let listed = data.listed
-
-        if !listed.isEmpty {
-            PlayShuffleButtons(tracks: listed, sourceName: "Libreria")
-                .padding(.top, 12)
-                .padding(.bottom, 6)
-                .prismaRow()
-                .listRowSeparator(.hidden)
-        }
-
-        syncStatus
-
-        if data.isEmpty {
-            Text(settings.savedAddress.isEmpty
-                 ? "La libreria è vuota. Imposta l'indirizzo del server in Impostazioni, poi trascina verso il basso per sincronizzare."
-                 : "La libreria è vuota. Trascina verso il basso per sincronizzare, oppure cerca un brano in Cerca.")
-                .font(.subheadline)
-                .foregroundStyle(ink.secondary)
-                .padding(.vertical, 16)
-                .prismaRow()
-                .listRowSeparator(.hidden)
-        }
-
-        ForEach(data.shelves) { shelf in
-            AlbumHeaderRow(heading: shelf.heading, tracks: shelf.tracks)
-                .prismaRow()
-                .listRowSeparator(.hidden, edges: .top)
-            ForEach(shelf.tracks) { track in
-                TrackRow(data: track) {
-                    EmptyView()
-                }
-                .prismaRow()
-            }
-        }
-
-        if !data.unlisted.isEmpty {
-            SectionLabel("Brani senza album")
-                .prismaRow()
-                .listRowSeparator(.hidden, edges: .top)
-            ForEach(data.unlisted) { track in
-                TrackRow(data: track) {
-                    EmptyView()
-                }
-                .prismaRow()
-            }
-        }
-
-        Text(lastSyncLine(data.lastSyncAt))
-            .font(.caption)
-            .foregroundStyle(ink.secondary)
-            .padding(.top, 20)
-            .padding(.bottom, 12)
-            .prismaRow()
-            .listRowSeparator(.hidden)
-    }
-
-    /// Only what needs attention: a sync running or failed.
+    /// Only what needs attention: a sync running or failed, and an address that has
+    /// never been set.
     @ViewBuilder
     private var syncStatus: some View {
         switch sync.status {
         case .idle, .succeeded:
-            EmptyView()
+            if settings.savedAddress.isEmpty {
+                Text("Nessun indirizzo del server impostato: impostalo in Impostazioni per cercare e scaricare brani.")
+                    .font(.subheadline)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.vertical, 12)
+                    .prismaRow()
+                    .listRowSeparator(.hidden)
+            }
         case .syncing:
             HStack(spacing: 10) {
                 ProgressView()
@@ -195,54 +157,5 @@ struct EditModeButton: View {
                 editMode = editMode.isEditing ? .inactive : .active
             }
         }
-    }
-}
-
-/// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
-/// download or cannot be read says so under the header. Long press offers the
-/// album-wide actions of `CollectionMenu`.
-private struct AlbumHeaderRow: View {
-    let heading: AlbumHeading
-    /// The album's tracks, for the header menu. See `CollectionMenu`.
-    let tracks: [TrackRowData]
-
-    @Environment(\.prismaInk) private var ink
-    @State private var coverProblem: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 13) {
-                LocalCoverImage(cover: heading.cover, side: 62, problem: $coverProblem)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                    .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(heading.title)
-                        .font(.headline)
-                        .foregroundStyle(ink.primary)
-                        .lineLimit(2)
-                    Text([heading.artist, heading.year.map { String($0) }].compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(ink.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            if let problem = problemText {
-                ProblemBlock(problem)
-            }
-        }
-        .modifier(CollectionMenu(tracks: tracks, name: heading.title, problemKey: "album-\(heading.id)"))
-        .padding(.top, 22)
-        .padding(.bottom, 4)
-    }
-
-    private var problemText: String? {
-        if let coverProblem {
-            return coverProblem
-        }
-        if heading.coverFailed {
-            return "La copertina di questo album non è stata scaricata: viene ritentata a ogni sincronizzazione; se resta così, controlla che il server abbia la copertina."
-        }
-        return nil
     }
 }
