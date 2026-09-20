@@ -948,7 +948,7 @@ final class PlaybackEngine {
     // MARK: - The streaming deadline
 
     /// Why a stream is being waited on, which decides the sentence if it runs out.
-    private enum StreamWait {
+    private enum StreamWait: Sendable {
         case starting
         case stalled
     }
@@ -967,10 +967,13 @@ final class PlaybackEngine {
         }
         streamWatchdog?.cancel()
         let waiting = ObjectIdentifier(item)
-        streamWatchdog = Task { [weak self] in
+        streamWatchdog = Task {
+            // Sleeping is cancellable, so disarming really does stop it rather than
+            // leaving a late alarm to go off over the next track.
             try? await Task.sleep(for: .seconds(Self.streamDeadline))
-            guard !Task.isCancelled, let self else { return }
-            self.streamDeadlineExpired(for: waiting, reason: reason)
+            guard !Task.isCancelled else { return }
+            streamWatchdog = nil
+            streamDeadlineExpired(for: waiting, reason: reason)
         }
     }
 
@@ -1107,6 +1110,11 @@ final class PlaybackEngine {
         elapsed = 0
         if wantsToPlay {
             player.play()
+            if isStreaming {
+                // Repeating a stream asks the server for the file from the start
+                // again, which is a new wait and gets its own deadline.
+                armStreamWatchdog(reason: .starting)
+            }
         }
         updateNowPlaying(position: 0)
     }

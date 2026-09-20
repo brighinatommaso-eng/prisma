@@ -15,7 +15,8 @@ import Observation
 /// back to the foreground, the server address was saved, or a stream just failed.
 /// Between events the last answer stands, and inside `freshFor` seconds of a
 /// completed probe an unforced request is answered from that answer instead of
-/// asking again. A probe already running is joined rather than duplicated.
+/// asking again, and a request arriving while one is already in flight is dropped
+/// rather than duplicating it.
 ///
 /// The interface never waits on it. Screens read `isReachable` as it is, and
 /// playback treats "not yet known" as "try, and let the attempt say" — which is why
@@ -38,6 +39,9 @@ final class ServerReachability {
 
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private var current: Task<Void, Never>?
+    /// Bumped whenever a probe is started or thrown away, so a late answer from a
+    /// superseded one is recognised and dropped.
+    @ObservationIgnored private var probeGeneration = 0
     @ObservationIgnored private var monitor: NWPathMonitor?
     /// The last path iOS described, so a repeated identical update is not an event.
     @ObservationIgnored private var lastPathSummary: String?
@@ -71,9 +75,7 @@ final class ServerReachability {
         guard summary != lastPathSummary else { return }
         lastPathSummary = summary
         guard satisfied else {
-            current?.cancel()
-            current = nil
-            isProbing = false
+            discardProbe()
             settle(
                 reachable: false,
                 problem: APIError(
@@ -98,9 +100,7 @@ final class ServerReachability {
     /// A different server address was saved: the previous answer was about a
     /// different server and means nothing now.
     func addressChanged() {
-        current?.cancel()
-        current = nil
-        isProbing = false
+        discardProbe()
         isReachable = nil
         checkedAt = nil
         lastProblem = nil
@@ -122,50 +122,48 @@ final class ServerReachability {
 
     /// Asks the server, unless a recent answer still stands or a probe is already
     /// running. Returns immediately; the answer arrives in `isReachable`.
+    ///
+    /// `force` is for the events that make the previous answer meaningless — a
+    /// different network, a different address, a stream that just contradicted it,
+    /// or the user asking. Everything else respects `freshFor`.
     func probe(force: Bool) {
-        _ = start(force: force)
-    }
-
-    /// The same, for a caller that wants to wait for the answer — Impostazioni, and
-    /// playback deciding whether a tap can stream.
-    func probeAndWait(force: Bool) async {
-        await start(force: force).value
-    }
-
-    @discardableResult
-    private func start(force: Bool) -> Task<Void, Never> {
-        if let current {
-            return current
-        }
-        if !force, let checkedAt, Date().timeIntervalSince(checkedAt) < Self.freshFor {
-            return Task {}
-        }
+        if current != nil { return }
+        if !force, let checkedAt, Date().timeIntervalSince(checkedAt) < Self.freshFor { return }
+        probeGeneration += 1
+        let generation = probeGeneration
         isProbing = true
-        let task = Task {
-            await run()
+        current = Task {
+            await run(generation: generation)
+            // A probe discarded while it was in flight must not clear the one that
+            // replaced it.
+            guard generation == probeGeneration else { return }
             isProbing = false
             current = nil
         }
-        current = task
-        return task
     }
 
-    private func run() async {
-        let client: APIClient
+    /// Throws away whatever is in flight: it was asking about a different server,
+    /// or over a network that has gone.
+    private func discardProbe() {
+        probeGeneration += 1
+        current?.cancel()
+        current = nil
+        isProbing = false
+    }
+
+    private func run(generation: Int) async {
         do {
-            client = try settings.makeClient()
-        } catch {
-            settle(reachable: false, problem: .from(error))
-            return
-        }
-        do {
+            let client = try settings.makeClient()
             _ = try await client.ping()
+            guard generation == probeGeneration else { return }
             settle(reachable: true, problem: nil)
-        } catch is CancellationError {
-            // A cancelled probe answers nothing: the event that cancelled it is
-            // starting its own.
         } catch {
-            settle(reachable: false, problem: .from(error))
+            let problem = APIError.from(error)
+            // A cancelled or superseded probe answers nothing: whatever replaced it
+            // is asking its own question, and recording "cancelled" as an answer
+            // would make the interface flicker for no reason.
+            guard generation == probeGeneration, !problem.isCancellation, !Task.isCancelled else { return }
+            settle(reachable: false, problem: problem)
         }
     }
 
