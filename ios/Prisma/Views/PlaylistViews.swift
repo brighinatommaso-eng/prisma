@@ -22,8 +22,12 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
 
 /// A heart that toggles the track's favourite flag, with the whole `hitSize` area
 /// tappable (a plain button otherwise responds only on the drawn glyph).
+///
+/// Drawn from the value its screen projected, toggled on the track the store has when
+/// it is tapped.
 struct FavouriteButton: View {
-    let track: StoredTrack
+    let trackID: String
+    let isFavourite: Bool
     var hitSize = CGSize(width: 44, height: 44)
     var glyphSize: CGFloat = 19
 
@@ -32,21 +36,18 @@ struct FavouriteButton: View {
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        // The heart is drawn from the track the caller just read, and toggled on the
-        // one the store has when it is tapped, which may be later.
-        let id = track.serverID
         Button {
-            guard let track = ModelLookup.track(id, in: context) else { return }
+            guard let track = ModelLookup.track(trackID, in: context) else { return }
             store.toggleFavourite(track)
         } label: {
-            Image(systemName: track.isFavourite ? "heart.fill" : "heart")
+            Image(systemName: isFavourite ? "heart.fill" : "heart")
                 .font(.system(size: glyphSize, weight: .medium))
-                .foregroundStyle(track.isFavourite ? ink.favourite : ink.secondary)
+                .foregroundStyle(isFavourite ? ink.favourite : ink.secondary)
                 .frame(width: hitSize.width, height: hitSize.height)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(track.isFavourite ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti")
+        .accessibilityLabel(isFavourite ? "Rimuovi dai preferiti" : "Aggiungi ai preferiti")
     }
 }
 
@@ -98,18 +99,20 @@ struct DismissLink: View {
 
 struct PlaylistsContent: View {
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
-    /// Every entry, so each summary row is drawn from the query rather than from
-    /// `playlist.entries`. See `PlaylistStore.ordered(_:of:)`.
     @Query private var entries: [PlaylistEntry]
 
     @State private var creating = false
     @State private var newName = ""
-    @State private var renaming: Playlist?
+    @State private var renaming: PlaylistSummaryData?
     @State private var renameText = ""
 
     var body: some View {
+        // The one place this filter reads the store.
+        let summaries = Projection.playlistSummaries(playlists, entries: entries)
+
         Button {
             newName = ""
             creating = true
@@ -135,8 +138,8 @@ struct PlaylistsContent: View {
         )) {
             TextField("Nome", text: $renameText)
             Button("Rinomina") {
-                if let renaming {
-                    store.rename(renaming, to: renameText)
+                if let renaming, let playlist = ModelLookup.playlist(renaming.id, in: context) {
+                    store.rename(playlist, to: renameText)
                 }
             }
             Button("Annulla", role: .cancel) {}
@@ -144,7 +147,7 @@ struct PlaylistsContent: View {
 
         PlaylistStoreMessages()
 
-        if playlists.isEmpty {
+        if summaries.isEmpty {
             Text("Nessuna playlist. Tocca Nuova playlist per crearne una.")
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
@@ -152,47 +155,50 @@ struct PlaylistsContent: View {
                 .prismaRow()
         }
 
-        ForEach(playlists) { playlist in
+        ForEach(summaries) { summary in
             NavigationLink {
-                PlaylistDetailView(playlist: playlist)
+                PlaylistDetailView(playlistID: summary.id, name: summary.name)
             } label: {
-                PlaylistSummaryRow(playlist: playlist, entries: PlaylistStore.ordered(entries, of: playlist))
+                PlaylistSummaryRow(summary: summary)
             }
             .swipeActions(edge: .trailing) {
                 Button("Elimina", role: .destructive) {
-                    store.delete([playlist])
+                    store.delete(ModelLookup.playlists([summary.id], in: context))
                 }
                 Button("Rinomina") {
-                    renameText = playlist.name
-                    renaming = playlist
+                    renameText = summary.name
+                    renaming = summary
                 }
             }
             .prismaRow()
         }
         // No onDelete: its edit-mode button would read "Delete". Swipe offers Elimina.
         .onMove { source, destination in
-            store.movePlaylists(playlists, from: source, to: destination)
+            // The offsets belong to the list as projected, so the resolved playlists
+            // must still be that same list; if one has gone the list is about to be
+            // drawn again and the drop is simply not applied.
+            let resolved = ModelLookup.playlists(summaries.map(\.id), in: context)
+            guard resolved.count == summaries.count else { return }
+            store.movePlaylists(resolved, from: source, to: destination)
         }
     }
 }
 
 private struct PlaylistSummaryRow: View {
-    let playlist: Playlist
-    let entries: [PlaylistEntry]
+    let summary: PlaylistSummaryData
 
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        let tracks = entries.compactMap(\.track)
         HStack(spacing: 13) {
-            PlaylistMosaic(covers: AlbumCover.distinct(in: entries), side: 62, cornerRadius: 14)
+            PlaylistMosaic(covers: summary.covers, side: 62, cornerRadius: 14)
                 .shadow(color: .black.opacity(0.45), radius: 11, y: 8)
             VStack(alignment: .leading, spacing: 3) {
-                Text(playlist.name)
+                Text(summary.name)
                     .font(.headline)
                     .foregroundStyle(ink.primary)
                     .lineLimit(2)
-                Text(Formatting.trackSummary(tracks))
+                Text(Formatting.trackSummary(summary.tracks))
                     .font(.caption)
                     .foregroundStyle(ink.secondary)
             }
@@ -205,15 +211,17 @@ private struct PlaylistSummaryRow: View {
 // MARK: - Playlist detail
 
 struct PlaylistDetailView: View {
-    let playlist: Playlist
+    let playlistID: UUID
+    /// The name the list screen knew when it pushed this, so the title is right even
+    /// in the moment before the first projection.
+    let name: String
 
     @Environment(PlaylistStore.self) private var store
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
-    /// The rows come from the query, never from `playlist.entries`: deleting a track
-    /// from the server deletes its entries, and a relationship array can still list
-    /// one afterwards. See `PlaylistStore.ordered(_:of:)`.
+    @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var allEntries: [PlaylistEntry]
 
     @State private var renaming = false
@@ -221,72 +229,17 @@ struct PlaylistDetailView: View {
     @State private var editMode: EditMode = .inactive
 
     var body: some View {
-        let entries = PlaylistStore.ordered(allEntries, of: playlist)
-        let missingCount = Set(entries.compactMap { entry -> String? in
-            guard let track = entry.track, track.downloadState != .downloaded else { return nil }
-            return track.serverID
-        }).count
-        let playable = entries.indices.filter { entries[$0].track?.downloadState == .downloaded }
+        // The one place this screen reads the store.
+        let data = Projection.playlist(id: playlistID, playlists: playlists, entries: allEntries)
 
         List {
-            header(entries: entries, playable: playable)
-                .prismaRow()
-                .listRowSeparator(.hidden, edges: .top)
-
-            PlaylistStoreMessages()
-
-            if entries.isEmpty {
-                Text("Questa playlist è vuota. Aggiungi brani da Libreria o Cerca tenendo premuto su un brano.")
-                    .font(.subheadline)
-                    .foregroundStyle(ink.secondary)
-                    .padding(.vertical, 12)
-                    .prismaRow()
-            }
-
-            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                Group {
-                    if let track = entry.track {
-                        TrackRow(
-                            track: track,
-                            subtitle: track.album?.artist,
-                            placement: PlaylistPlacement(playlist: playlist, entryID: entry.id),
-                            play: {
-                                presenter.sourceName = playlist.name
-                                store.play(playlist, fromEntryAt: index)
-                            }
-                        ) {
-                            Text("\(index + 1)")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(ink.secondary)
-                                .frame(width: 18, alignment: .leading)
-                        }
-                    } else {
-                        MissingEntryRow(playlist: playlist, entryID: entry.id)
-                    }
-                }
-                .prismaRow()
-            }
-            .onMove { source, destination in
-                store.moveEntries(in: playlist, ordered: entries, from: source, to: destination)
-            }
-
-            if missingCount > 0 {
-                Button {
-                    store.downloadMissing(in: playlist)
-                } label: {
-                    Text(missingCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(missingCount) brani mancanti")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(ink.accentText)
-                        .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .prismaRow()
+            if let data {
+                content(data)
             }
         }
         .prismaList()
         .environment(\.editMode, $editMode)
-        .navigationTitle(playlist.name)
+        .navigationTitle(data?.name ?? name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -295,7 +248,7 @@ struct PlaylistDetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
-                        renameText = playlist.name
+                        renameText = data?.name ?? name
                         renaming = true
                     } label: {
                         Label("Rinomina…", systemImage: "pencil")
@@ -308,7 +261,10 @@ struct PlaylistDetailView: View {
         }
         .alert("Rinomina playlist", isPresented: $renaming) {
             TextField("Nome", text: $renameText)
-            Button("Rinomina") { store.rename(playlist, to: renameText) }
+            Button("Rinomina") {
+                guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+                store.rename(playlist, to: renameText)
+            }
             Button("Annulla", role: .cancel) {}
         }
         // Pushed inside a tab, so it needs the mini player inset itself.
@@ -316,59 +272,131 @@ struct PlaylistDetailView: View {
         .themedScreenBackground()
     }
 
+    @ViewBuilder
+    private func content(_ data: PlaylistData) -> some View {
+        header(data)
+            .prismaRow()
+            .listRowSeparator(.hidden, edges: .top)
+
+        PlaylistStoreMessages()
+
+        if data.rows.isEmpty {
+            Text("Questa playlist è vuota. Aggiungi brani da Libreria o Cerca tenendo premuto su un brano.")
+                .font(.subheadline)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 12)
+                .prismaRow()
+        }
+
+        ForEach(Array(data.rows.enumerated()), id: \.element.id) { index, row in
+            Group {
+                if let track = row.track {
+                    TrackRow(
+                        data: track,
+                        subtitle: track.artist,
+                        placement: PlaylistPlacement(playlistID: data.id, entryID: row.entryID),
+                        play: {
+                            presenter.sourceName = data.name
+                            play(fromEntryAt: index)
+                        }
+                    ) {
+                        Text("\(index + 1)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(ink.secondary)
+                            .frame(width: 18, alignment: .leading)
+                    }
+                } else {
+                    MissingEntryRow(playlistID: data.id, entryID: row.entryID)
+                }
+            }
+            .prismaRow()
+        }
+        .onMove { source, destination in
+            move(rows: data.rows, from: source, to: destination)
+        }
+
+        if data.missingCount > 0 {
+            Button {
+                guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+                store.downloadMissing(in: playlist)
+            } label: {
+                Text(data.missingCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(data.missingCount) brani mancanti")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(ink.accentText)
+                    .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .prismaRow()
+        }
+    }
+
     /// Mosaic, name, "N brani · N min", then Riproduci and Casuale side by side.
     /// Long press on the mosaic and name offers the playlist-wide actions of
     /// `CollectionMenu`; the buttons keep their own press.
-    private func header(entries: [PlaylistEntry], playable: [Int]) -> some View {
+    private func header(_ data: PlaylistData) -> some View {
         VStack(spacing: 0) {
             VStack(spacing: 0) {
-                PlaylistMosaic(covers: AlbumCover.distinct(in: entries), side: 160, cornerRadius: 20)
+                PlaylistMosaic(covers: data.covers, side: 160, cornerRadius: 20)
                     .shadow(color: .black.opacity(0.6), radius: 23, y: 18)
                     .padding(.top, 20)
-                Text(playlist.name)
+                Text(data.name)
                     .font(.title.weight(.heavy))
                     .foregroundStyle(ink.primary)
                     .multilineTextAlignment(.center)
                     .padding(.top, 18)
-                Text(Formatting.trackSummary(entries.compactMap(\.track)))
+                Text(Formatting.trackSummary(data.tracks))
                     .font(.footnote)
                     .foregroundStyle(ink.secondary)
                     .padding(.top, 5)
             }
             .frame(maxWidth: .infinity)
             .modifier(CollectionMenu(
-                trackIDs: entries.compactMap { $0.track?.serverID },
-                name: playlist.name,
-                problemKey: "playlist-\(playlist.id.uuidString)"
+                tracks: data.tracks,
+                name: data.name,
+                problemKey: "playlist-\(data.id.uuidString)"
             ))
 
-            PlayShufflePair(isEnabled: !playable.isEmpty) {
-                guard let first = playable.first else { return }
+            PlayShufflePair(isEnabled: !data.playable.isEmpty) {
+                guard let first = data.playable.first else { return }
                 // Riproduci plays in playlist order, even if shuffle was left on.
                 playback.setShuffle(false)
-                presenter.sourceName = playlist.name
-                store.play(playlist, fromEntryAt: first)
+                presenter.sourceName = data.name
+                play(fromEntryAt: first)
             } onShuffle: {
                 // Starts shuffled: shuffle on first, so the new queue is built
                 // shuffled from a random downloaded entry.
-                guard let start = playable.randomElement() else { return }
+                guard let start = data.playable.randomElement() else { return }
                 playback.setShuffle(true)
-                presenter.sourceName = playlist.name
-                store.play(playlist, fromEntryAt: start)
+                presenter.sourceName = data.name
+                play(fromEntryAt: start)
             }
             .padding(.top, 20)
         }
         .frame(maxWidth: .infinity)
         .padding(.bottom, 22)
     }
+
+    private func play(fromEntryAt index: Int) {
+        guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+        store.play(playlist, fromEntryAt: index)
+    }
+
+    private func move(rows: [PlaylistRowData], from source: IndexSet, to destination: Int) {
+        // The offsets belong to the list as projected, so the resolved entries must
+        // still be that same list; if one has gone the list is about to be drawn
+        // again and the drop is simply not applied.
+        guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+        let resolved = ModelLookup.playlistEntries(rows.map(\.entryID), in: context)
+        guard resolved.count == rows.count else { return }
+        store.moveEntries(in: playlist, ordered: resolved, from: source, to: destination)
+    }
 }
 
 /// An entry whose track has left the library. Not a track row: there is no track
 /// left to act on, only the entry to remove.
 private struct MissingEntryRow: View {
-    let playlist: Playlist
-    /// By id, like every other action on a row: this one exists because its track
-    /// has already gone, and its own entry can go at any moment too.
+    let playlistID: UUID
     let entryID: UUID
 
     @Environment(PlaylistStore.self) private var store
@@ -400,7 +428,8 @@ private struct MissingEntryRow: View {
     }
 
     private func remove() {
-        guard let entry = ModelLookup.playlistEntry(entryID, in: context) else { return }
+        guard let playlist = ModelLookup.playlist(playlistID, in: context),
+              let entry = ModelLookup.playlistEntry(entryID, in: context) else { return }
         store.remove([entry], from: playlist)
     }
 }
@@ -409,11 +438,12 @@ private struct MissingEntryRow: View {
 
 /// Adds a track to a playlist. A track may be added to the same playlist again.
 struct AddToPlaylistSheet: View {
-    /// The track by id, resolved from the query on every body: this sheet stays open
-    /// by itself, so the row it was opened from can be deleted underneath it.
+    /// The track by id: this sheet stays open by itself, so the row it was opened
+    /// from can be deleted underneath it.
     let trackID: String
 
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var tracks: [StoredTrack]
@@ -422,10 +452,13 @@ struct AddToPlaylistSheet: View {
     @State private var newName = ""
 
     var body: some View {
+        // The one place this sheet reads the store.
+        let data = Projection.addToPlaylist(trackID: trackID, tracks: tracks, playlists: playlists, entries: entries)
+
         NavigationStack {
             List {
-                if let track = tracks.first(where: { $0.serverID == trackID }) {
-                    content(track)
+                if let track = data.track {
+                    content(track, albumLine: data.albumLine, targets: data.targets)
                 } else {
                     Section {
                         Text("Questo brano non è più in libreria, quindi non si può aggiungere a una playlist.")
@@ -443,11 +476,11 @@ struct AddToPlaylistSheet: View {
     }
 
     @ViewBuilder
-    private func content(_ track: StoredTrack) -> some View {
+    private func content(_ track: TrackRowData, albumLine: String?, targets: [PlaylistTargetData]) -> some View {
         Section {
-            Text(track.title ?? "Senza titolo")
-            if let album = track.album {
-                Text("\(album.artist) · \(album.title)")
+            Text(track.title)
+            if let albumLine {
+                Text(albumLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -456,30 +489,27 @@ struct AddToPlaylistSheet: View {
         Section {
             TextField("Nome della playlist", text: $newName)
             Button("Crea e aggiungi") {
-                if let playlist = store.createPlaylist(named: newName) {
-                    store.add(track, to: playlist)
-                    dismiss()
-                }
+                guard let stored = ModelLookup.track(trackID, in: context),
+                      let playlist = store.createPlaylist(named: newName) else { return }
+                store.add(stored, to: playlist)
+                dismiss()
             }
         } header: {
             Text("Nuova playlist").textCase(nil)
         }
 
         Section {
-            if playlists.isEmpty {
+            if targets.isEmpty {
                 Text("Nessuna playlist.")
             }
-            ForEach(playlists) { playlist in
+            ForEach(targets) { target in
                 Button {
-                    store.add(track, to: playlist)
-                    dismiss()
+                    add(to: target.id)
                 } label: {
-                    let listed = PlaylistStore.ordered(entries, of: playlist)
-                    let contains = listed.contains { $0.track === track }
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(playlist.name)
-                        Text(Formatting.trackCount(listed.count)
-                             + (contains ? " · contiene già questo brano, verrà aggiunto di nuovo" : ""))
+                        Text(target.name)
+                        Text(Formatting.trackCount(target.entryCount)
+                             + (target.holdsTrack ? " · contiene già questo brano, verrà aggiunto di nuovo" : ""))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -496,6 +526,13 @@ struct AddToPlaylistSheet: View {
             }
         }
     }
+
+    private func add(to playlistID: UUID) {
+        guard let stored = ModelLookup.track(trackID, in: context),
+              let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+        store.add(stored, to: playlist)
+        dismiss()
+    }
 }
 
 // MARK: - Favourites filter
@@ -505,9 +542,8 @@ struct FavouritesContent: View {
     @Query private var tracks: [StoredTrack]
 
     var body: some View {
-        let favourites = tracks
-            .filter { $0.favouritedAt != nil }
-            .sorted { ($0.favouritedAt ?? .distantPast) > ($1.favouritedAt ?? .distantPast) }
+        // The one place this filter reads the store.
+        let favourites = Projection.favourites(tracks)
 
         if !favourites.isEmpty {
             PlayShuffleButtons(tracks: favourites, sourceName: "Preferiti")
@@ -527,7 +563,7 @@ struct FavouritesContent: View {
         }
 
         ForEach(favourites) { track in
-            TrackRow(track: track, subtitle: track.album?.artist) {
+            TrackRow(data: track, subtitle: track.artist) {
                 Image(systemName: "heart.fill")
                     .font(.system(size: 15))
                     .foregroundStyle(ink.favourite)
@@ -583,7 +619,7 @@ struct PlayShufflePair: View {
 /// first; Casuale turns shuffle on first, so the queue is built shuffled from a
 /// random one.
 struct PlayShuffleButtons: View {
-    let tracks: [StoredTrack]
+    let tracks: [TrackRowData]
     let sourceName: String
 
     @Environment(PlaybackEngine.self) private var playback
@@ -593,9 +629,8 @@ struct PlayShuffleButtons: View {
     var body: some View {
         let playable = tracks.indices.filter { tracks[$0].downloadState == .downloaded }
         // The buttons are tapped long after this body, so their closures keep the
-        // ids and read the tracks back then. `tracks` itself is only used to decide,
-        // now, whether there is anything to play.
-        let ids = tracks.map(\.serverID)
+        // ids and read the tracks back then.
+        let ids = tracks.map(\.id)
         PlayShufflePair(isEnabled: !playable.isEmpty) {
             let live = ModelLookup.tracks(ids, in: context)
             guard let first = live.firstIndex(where: { $0.downloadState == .downloaded }) else { return }

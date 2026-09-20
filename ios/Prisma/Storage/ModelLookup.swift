@@ -55,11 +55,42 @@ enum ModelLookup {
     /// The playlist entry with this id, or nil if the track it pointed at left the
     /// library and took it with it.
     static func playlistEntry(_ id: UUID, in context: ModelContext) -> PlaylistEntry? {
+        playlistEntries([id], in: context).first
+    }
+
+    /// The playlist entries with these ids, in the order of `ids`, without the ones
+    /// that have gone.
+    static func playlistEntries(_ ids: [UUID], in context: ModelContext) -> [PlaylistEntry] {
+        guard !ids.isEmpty else { return [] }
+        let wanted = Set(ids)
+        let found: [PlaylistEntry]
         do {
-            return try context.fetch(FetchDescriptor<PlaylistEntry>()).first { $0.id == id }
+            found = try context.fetch(FetchDescriptor<PlaylistEntry>()).filter { wanted.contains($0.id) }
         } catch {
-            return nil
+            return []
         }
+        let byID = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byID[$0] }
+    }
+
+    /// The playlist with this id, or nil if it has been deleted.
+    static func playlist(_ id: UUID, in context: ModelContext) -> Playlist? {
+        playlists([id], in: context).first
+    }
+
+    /// The playlists with these ids, in the order of `ids`, without the ones that
+    /// have gone.
+    static func playlists(_ ids: [UUID], in context: ModelContext) -> [Playlist] {
+        guard !ids.isEmpty else { return [] }
+        let wanted = Set(ids)
+        let found: [Playlist]
+        do {
+            found = try context.fetch(FetchDescriptor<Playlist>()).filter { wanted.contains($0.id) }
+        } catch {
+            return []
+        }
+        let byID = Dictionary(found.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return ids.compactMap { byID[$0] }
     }
 
     /// Every track currently belonging to `album`, read from the store rather than

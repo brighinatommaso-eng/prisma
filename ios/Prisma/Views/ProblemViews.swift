@@ -151,10 +151,11 @@ struct ProblemBlock: View {
 /// downloaded, a dimmed arrow when not, a ring while downloading. No words; the
 /// accessibility label says the state.
 struct DownloadStateIcon: View {
-    let track: StoredTrack
+    let data: TrackRowData
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlaybackEngine.self) private var playback
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
@@ -165,20 +166,20 @@ struct DownloadStateIcon: View {
 
     @ViewBuilder
     private var content: some View {
-        if playback.currentTrackID == track.serverID {
+        if playback.currentTrackID == data.id {
             EqualizerBars(isAnimating: playback.isPlaying)
-        } else if downloads.preflights[track.serverID] != nil {
+        } else if downloads.preflights[data.id] != nil {
             ProgressRing(fraction: nil, color: ink.accent, side: 18)
                 .accessibilityLabel("Verifica del server in corso")
         } else {
-            switch track.downloadState {
+            switch data.downloadState {
             case .downloaded:
                 Image(systemName: "checkmark")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(ink.accent)
                     .accessibilityLabel("Scaricato")
             case .downloading:
-                ProgressRing(fraction: DownloadProgress.fraction(of: track, in: downloads), color: ink.accent, side: 18)
+                ProgressRing(fraction: DownloadProgress.fraction(of: data, in: downloads), color: ink.accent, side: 18)
             case .queued:
                 Image(systemName: "clock")
                     .font(.system(size: 15, weight: .medium))
@@ -186,7 +187,7 @@ struct DownloadStateIcon: View {
                     .accessibilityLabel("In coda")
             case .notDownloaded, .cancelled:
                 Button {
-                    downloads.download(track)
+                    download()
                 } label: {
                     Image(systemName: "arrow.down.to.line")
                         .font(.system(size: 15, weight: .medium))
@@ -198,7 +199,7 @@ struct DownloadStateIcon: View {
                 .accessibilityLabel("Scarica")
             case .failed:
                 Button {
-                    downloads.download(track)
+                    download()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 15, weight: .semibold))
@@ -213,10 +214,19 @@ struct DownloadStateIcon: View {
     }
 }
 
+extension DownloadStateIcon {
+    /// The arrow and the retry button act on the track the store has now, read back
+    /// by id: the icon was drawn from values, possibly a moment ago.
+    fileprivate func download() {
+        guard let track = ModelLookup.track(data.id, in: context) else { return }
+        downloads.download(track)
+    }
+}
+
 enum DownloadProgress {
     /// 0...1 once iOS has reported the expected size, nil before.
-    static func fraction(of track: StoredTrack, in downloads: DownloadManager) -> Double? {
-        guard let token = track.downloadToken, let progress = downloads.progress[token], progress.expected > 0 else {
+    static func fraction(of data: TrackRowData, in downloads: DownloadManager) -> Double? {
+        guard let token = data.downloadToken, let progress = downloads.progress[token], progress.expected > 0 else {
             return nil
         }
         return min(1, Double(progress.received) / Double(progress.expected))

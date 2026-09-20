@@ -3,68 +3,6 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// An album's cover as plain values: the palette behind the placeholder, the name
-/// of the saved image file, and when it was saved.
-///
-/// Read once by whoever still holds the album — a screen whose `@Query` has just
-/// handed it over, or a row that has just been given the track — and passed down
-/// from there.
-///
-/// The cover views keep `@State` and run a `.task`, so they render again on their
-/// own, at a moment no parent chose and nothing else invalidated. Build 25 crashed
-/// exactly there: `LocalCoverImage.body` read `album.palette` through a track whose
-/// album the sync had removed, while writing the image it had just loaded. A view
-/// holding nothing but values cannot be invalidated by a deletion, so it is given
-/// values.
-struct AlbumCover: Equatable {
-    let palette: [String]?
-    let fileName: String?
-    let savedAt: Date?
-
-    /// No album, or an album with no cover: the neutral tile.
-    static let none = AlbumCover(palette: nil, fileName: nil, savedAt: nil)
-
-    init(palette: [String]?, fileName: String?, savedAt: Date?) {
-        self.palette = palette
-        self.fileName = fileName
-        self.savedAt = savedAt
-    }
-
-    /// From an album the caller has just taken out of a query.
-    init(_ album: StoredAlbum) {
-        self.init(palette: album.palette, fileName: album.coverFileName, savedAt: album.coverSavedAt)
-    }
-
-    /// From the album a track belongs to. The relationship is read here, in the body
-    /// of whoever was handed the track, and never inside the view that draws it.
-    init(of track: StoredTrack) {
-        if let album = track.album {
-            self.init(album)
-        } else {
-            self.init(palette: nil, fileName: nil, savedAt: nil)
-        }
-    }
-
-    /// Changes whenever a new cover file is saved, so the image reloads.
-    var loadKey: String {
-        "\(fileName ?? "-")|\(savedAt?.timeIntervalSince1970 ?? 0)"
-    }
-
-    /// The covers of the first four distinct albums in `entries`, for a mosaic.
-    /// Albums are told apart by identity, so choosing which four reads nothing
-    /// beyond the values kept here.
-    static func distinct(in entries: [PlaylistEntry]) -> [AlbumCover] {
-        var seen = Set<ObjectIdentifier>()
-        var result: [AlbumCover] = []
-        for entry in entries {
-            guard let album = entry.track?.album, seen.insert(ObjectIdentifier(album)).inserted else { continue }
-            result.append(AlbumCover(album))
-            if result.count == 4 { break }
-        }
-        return result
-    }
-}
-
 /// An album cover read from Application Support/Artwork. Never touches the network.
 /// Without a file it draws a neutral tile with a note glyph; an unreadable file is
 /// reported through `problem`.

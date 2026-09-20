@@ -7,7 +7,7 @@ import SwiftUI
 enum AcquisitionText {
     /// `pollFailures`: failed polls in a row, so a row waiting on the server says the
     /// server is not answering while the coordinator retries.
-    static func phase(of record: PendingAcquisition, pollFailures: Int = 0) -> String {
+    static func phase(of record: AcquisitionData, pollFailures: Int = 0) -> String {
         switch record.stage {
         case .requesting:
             return "Sul server · invio della richiesta…"
@@ -24,11 +24,11 @@ enum AcquisitionText {
         case .handingOff:
             return "Sul telefono · avvio del download…"
         case .failed:
-            return record.failure?.phase ?? "Non riuscito"
+            return record.failurePhase ?? "Non riuscito"
         }
     }
 
-    static func serverPercent(of record: PendingAcquisition) -> Int? {
+    static func serverPercent(of record: AcquisitionData) -> Int? {
         guard record.stage == .onServer, record.serverJobState == ServerJob.State.running.rawValue,
               let progress = record.serverProgress else { return nil }
         return Int((progress * 100).rounded())
@@ -39,7 +39,7 @@ enum AcquisitionText {
 /// acquire it, the chain's progress while it runs, retry once it failed.
 struct AcquisitionStateIcon: View {
     let song: SongResult
-    let record: PendingAcquisition?
+    let record: AcquisitionData?
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -50,7 +50,7 @@ struct AcquisitionStateIcon: View {
                 switch record.stage {
                 case .failed:
                     Button {
-                        acquisitions.retry(videoID: record.videoID)
+                        acquisitions.retry(videoID: record.id)
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 15, weight: .semibold))
@@ -93,7 +93,7 @@ struct AcquisitionStateIcon: View {
 /// A failed acquisition: what failed and what to check, Riprova and Rimuovi, and
 /// nothing else: the message carries the cause.
 struct AcquisitionProblem: View {
-    let record: PendingAcquisition
+    let record: AcquisitionData
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -112,8 +112,8 @@ struct AcquisitionProblem: View {
             .padding(.top, 6)
 
             HStack(spacing: 20) {
-                link("Riprova") { acquisitions.retry(videoID: record.videoID) }
-                link("Rimuovi") { acquisitions.remove(videoID: record.videoID) }
+                link("Riprova") { acquisitions.retry(videoID: record.id) }
+                link("Rimuovi") { acquisitions.remove(videoID: record.id) }
                 Spacer(minLength: 0)
             }
         }
@@ -148,7 +148,7 @@ struct AcquisitionCoordinatorError: View {
 /// The Downloads row of a track still in the server phase, or failed before it
 /// reached the library. Same layout as a device download row.
 struct AcquisitionRow: View {
-    let record: PendingAcquisition
+    let record: AcquisitionData
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(AppSettings.self) private var settings
@@ -160,7 +160,7 @@ struct AcquisitionRow: View {
             HStack(spacing: 12) {
                 artwork
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(record.title ?? "Senza titolo")
+                    Text(record.title)
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(ink.primary)
                         .lineLimit(1)

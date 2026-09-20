@@ -20,6 +20,9 @@ struct LibraryView: View {
     @State private var editMode: EditMode = .inactive
 
     var body: some View {
+        // The one place this screen reads the store. Everything below is values.
+        let data = Projection.library(albums: albums, tracks: tracks, records: records)
+
         List {
             FilterChips(options: LibraryFilter.allCases, selection: $filter) { $0.label }
                 .padding(.top, 4)
@@ -28,7 +31,7 @@ struct LibraryView: View {
 
             switch filter {
             case .albums:
-                albumsContent
+                albumsContent(data)
             case .playlists:
                 PlaylistsContent()
             case .favourites:
@@ -85,8 +88,8 @@ struct LibraryView: View {
     // MARK: - Albums
 
     @ViewBuilder
-    private var albumsContent: some View {
-        let listed = listedTracks
+    private func albumsContent(_ data: LibraryData) -> some View {
+        let listed = data.listed
 
         if !listed.isEmpty {
             PlayShuffleButtons(tracks: listed, sourceName: "Libreria")
@@ -98,7 +101,7 @@ struct LibraryView: View {
 
         syncStatus
 
-        if albums.isEmpty && tracks.isEmpty {
+        if data.isEmpty {
             Text(settings.savedAddress.isEmpty
                  ? "La libreria è vuota. Imposta l'indirizzo del server in Impostazioni, poi trascina verso il basso per sincronizzare."
                  : "La libreria è vuota. Trascina verso il basso per sincronizzare, oppure cerca un brano in Cerca.")
@@ -109,32 +112,31 @@ struct LibraryView: View {
                 .listRowSeparator(.hidden)
         }
 
-        ForEach(shelves) { shelf in
-            AlbumHeaderRow(heading: AlbumHeading(shelf.album), trackIDs: shelf.tracks.map(\.serverID))
+        ForEach(data.shelves) { shelf in
+            AlbumHeaderRow(heading: shelf.heading, tracks: shelf.tracks)
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
             ForEach(shelf.tracks) { track in
-                TrackRow(track: track) {
+                TrackRow(data: track) {
                     EmptyView()
                 }
                 .prismaRow()
             }
         }
 
-        let unlisted = unlistedTracks
-        if !unlisted.isEmpty {
+        if !data.unlisted.isEmpty {
             SectionLabel("Brani senza album")
                 .prismaRow()
                 .listRowSeparator(.hidden, edges: .top)
-            ForEach(unlisted) { track in
-                TrackRow(track: track) {
+            ForEach(data.unlisted) { track in
+                TrackRow(data: track) {
                     EmptyView()
                 }
                 .prismaRow()
             }
         }
 
-        Text(lastSyncLine)
+        Text(lastSyncLine(data.lastSyncAt))
             .font(.caption)
             .foregroundStyle(ink.secondary)
             .padding(.top, 20)
@@ -167,69 +169,11 @@ struct LibraryView: View {
         }
     }
 
-    private var lastSyncLine: String {
-        guard let lastSyncAt = records.first?.lastSyncAt else {
+    private func lastSyncLine(_ lastSyncAt: Date?) -> String {
+        guard let lastSyncAt else {
             return "Mai sincronizzata: trascina verso il basso per scaricare il catalogo dal server."
         }
         return "Ultima sincronizzazione: " + lastSyncAt.formatted(date: .abbreviated, time: .shortened) + "."
-    }
-
-    // MARK: - What the list is made of
-
-    /// One album and the tracks shown under it.
-    private struct Shelf: Identifiable {
-        let album: StoredAlbum
-        let tracks: [StoredTrack]
-
-        var id: PersistentIdentifier { album.persistentModelID }
-    }
-
-    /// The albums in display order with their tracks, built by matching the two
-    /// queries against each other rather than by reading `album.tracks`.
-    ///
-    /// A to-many relationship is a cache on the album object: after the sync deletes
-    /// a track it can still hand that track back, and a row drawn for it reads a
-    /// StoredTrack the store no longer has. Both `@Query` results are maintained by
-    /// SwiftData and only ever contain rows that exist.
-    ///
-    /// Each track is placed by comparing its album reference with the queried albums,
-    /// which reads nothing from either object; an album that has itself been deleted
-    /// is simply not among them, so nothing is read from it either.
-    private var shelves: [Shelf] {
-        let sorted = sortedAlbums
-        var members: [ObjectIdentifier: [StoredTrack]] = [:]
-        let live = Set(sorted.map { ObjectIdentifier($0) })
-        for track in tracks {
-            guard let album = track.album else { continue }
-            let key = ObjectIdentifier(album)
-            guard live.contains(key) else { continue }
-            members[key, default: []].append(track)
-        }
-        return sorted.map { album in
-            Shelf(album: album, tracks: StoredTrack.albumOrder(members[ObjectIdentifier(album)] ?? []))
-        }
-    }
-
-    private var sortedAlbums: [StoredAlbum] {
-        albums.sorted {
-            let byArtist = $0.artist.localizedStandardCompare($1.artist)
-            if byArtist != .orderedSame { return byArtist == .orderedAscending }
-            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-        }
-    }
-
-    /// Tracks with no album, and tracks whose album is no longer in the library.
-    private var unlistedTracks: [StoredTrack] {
-        let live = Set(albums.map { ObjectIdentifier($0) })
-        return StoredTrack.albumOrder(tracks.filter { track in
-            guard let album = track.album else { return true }
-            return !live.contains(ObjectIdentifier(album))
-        })
-    }
-
-    /// Every track in the order shown: albums, then tracks without an album.
-    private var listedTracks: [StoredTrack] {
-        shelves.flatMap(\.tracks) + unlistedTracks
     }
 }
 
@@ -254,37 +198,13 @@ struct EditModeButton: View {
     }
 }
 
-/// An album header as plain values, read from the album by the screen that holds it.
-///
-/// The header keeps `@State` for the cover problem, and the cover view writes that
-/// state from its own `.task` — which is a moment nothing else invalidated. The
-/// header therefore renders again on its own, so like the cover it holds no album.
-struct AlbumHeading {
-    let serverID: Int
-    let title: String
-    let artist: String
-    let year: Int?
-    let cover: AlbumCover
-    /// The last cover download failed; the next sync tries again.
-    let coverFailed: Bool
-
-    init(_ album: StoredAlbum) {
-        serverID = album.serverID
-        title = album.title
-        artist = album.artist
-        year = album.year
-        cover = AlbumCover(album)
-        coverFailed = album.coverError != nil
-    }
-}
-
 /// Prototype `.ahead`: cover 62 pt, title, artist and year. A cover that failed to
 /// download or cannot be read says so under the header. Long press offers the
 /// album-wide actions of `CollectionMenu`.
 private struct AlbumHeaderRow: View {
     let heading: AlbumHeading
-    /// The album's tracks as ids, for the header menu. See `CollectionMenu`.
-    let trackIDs: [String]
+    /// The album's tracks, for the header menu. See `CollectionMenu`.
+    let tracks: [TrackRowData]
 
     @Environment(\.prismaInk) private var ink
     @State private var coverProblem: String?
@@ -311,7 +231,7 @@ private struct AlbumHeaderRow: View {
                 ProblemBlock(problem)
             }
         }
-        .modifier(CollectionMenu(trackIDs: trackIDs, name: heading.title, problemKey: "album-\(heading.serverID)"))
+        .modifier(CollectionMenu(tracks: tracks, name: heading.title, problemKey: "album-\(heading.id)"))
         .padding(.top, 22)
         .padding(.bottom, 4)
     }

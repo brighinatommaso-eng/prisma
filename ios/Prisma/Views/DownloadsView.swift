@@ -15,19 +15,21 @@ struct DownloadsView: View {
     @Query private var tracks: [StoredTrack]
 
     var body: some View {
-        let inProgress = items(in: [.downloading, .queued])
-        let failed = items(in: [.failed])
-        let cancelled = items(in: [.cancelled])
-        let downloaded = items(in: [.downloaded])
-        let acquiring = acquisitions.filter { $0.isActive }
-        let acquisitionsFailed = acquisitions.filter { !$0.isActive }
+        // The one place this screen reads the store.
+        let data = Projection.downloads(tracks: tracks, acquisitions: acquisitions)
+        let inProgress = data.tracks(in: [.downloading, .queued])
+        let failed = data.tracks(in: [.failed])
+        let cancelled = data.tracks(in: [.cancelled])
+        let downloaded = data.tracks(in: [.downloaded])
+        let acquiring = data.acquisitions.filter(\.isActive)
+        let acquisitionsFailed = data.acquisitions.filter { !$0.isActive }
 
         List {
             AcquisitionCoordinatorError()
                 .prismaRow()
                 .listRowSeparator(.hidden)
 
-            if acquisitions.isEmpty && inProgress.isEmpty && failed.isEmpty && cancelled.isEmpty && downloaded.isEmpty {
+            if data.isEmpty {
                 Text("Nessun download. Tocca un brano in Cerca, o la freccia accanto a un brano in Libreria.")
                     .font(.subheadline)
                     .foregroundStyle(ink.secondary)
@@ -51,7 +53,7 @@ struct DownloadsView: View {
     }
 
     @ViewBuilder
-    private func group(_ title: String, _ matching: [StoredTrack], acquisitions: [PendingAcquisition] = []) -> some View {
+    private func group(_ title: String, _ matching: [TrackRowData], acquisitions: [AcquisitionData] = []) -> some View {
         if !matching.isEmpty || !acquisitions.isEmpty {
             SectionLabel(title)
                 .prismaRow()
@@ -61,9 +63,7 @@ struct DownloadsView: View {
                     .prismaRow()
             }
             ForEach(matching) { track in
-                // The album is read here, where the query has just handed the track
-                // over, and the row is given values.
-                DownloadRow(track: track, cover: AlbumCover(of: track), artist: track.album?.artist)
+                DownloadRow(data: track)
                     .prismaRow()
             }
         }
@@ -108,32 +108,20 @@ struct DownloadsView: View {
         .padding(.bottom, 12)
     }
 
-    private func items(in states: Set<DownloadState>) -> [StoredTrack] {
-        tracks
-            .filter { states.contains($0.downloadState) }
-            .sorted {
-                // Downloading before queued, then by when they were asked for.
-                if $0.downloadState != $1.downloadState {
-                    return $0.downloadState == .downloading
-                }
-                return ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast)
-            }
-    }
 }
 
 /// Prototype `.job`: artwork with the state drawn over it, title and artist, and on
 /// the right the percentage, a cancel button or Riprova. The shared track row, so
 /// tap, long press, swipes and problems are the same as on every other screen.
 private struct DownloadRow: View {
-    let track: StoredTrack
-    let cover: AlbumCover
-    let artist: String?
+    let data: TrackRowData
 
     @Environment(DownloadManager.self) private var downloads
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        TrackRow(track: track, subtitle: subtitle, subtitleLineLimit: 2, showsDuration: false) {
+        TrackRow(data: data, subtitle: subtitle, subtitleLineLimit: 2, showsDuration: false) {
             // 44 pt artwork in the job row's 62 pt height.
             artwork
                 .padding(.vertical, 9)
@@ -144,14 +132,14 @@ private struct DownloadRow: View {
 
     /// Device-phase rows say so, to read apart from acquisitions still on the server.
     private var subtitle: String {
-        if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
+        if data.downloadState == .failed, downloads.preflights[data.id] == nil {
             return "Download sul telefono non riuscito"
         }
-        switch track.downloadState {
+        switch data.downloadState {
         case .queued, .downloading:
-            return ["Sul telefono", artist].compactMap { $0 }.joined(separator: " · ")
+            return ["Sul telefono", data.artist].compactMap { $0 }.joined(separator: " · ")
         default:
-            return artist ?? ""
+            return data.artist ?? ""
         }
     }
 
@@ -159,15 +147,15 @@ private struct DownloadRow: View {
     /// queued.
     private var artwork: some View {
         ZStack {
-            CoverArt(cover: cover, side: 44, cornerRadius: 10)
-            if downloads.preflights[track.serverID] != nil || track.downloadState == .downloading || track.downloadState == .queued {
+            CoverArt(cover: data.cover, side: 44, cornerRadius: 10)
+            if downloads.preflights[data.id] != nil || data.downloadState == .downloading || data.downloadState == .queued {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.45))
                     .frame(width: 44, height: 44)
-                if downloads.preflights[track.serverID] != nil {
+                if downloads.preflights[data.id] != nil {
                     ProgressRing(fraction: nil, color: .white)
-                } else if track.downloadState == .downloading {
-                    ProgressRing(fraction: DownloadProgress.fraction(of: track, in: downloads), color: .white)
+                } else if data.downloadState == .downloading {
+                    ProgressRing(fraction: DownloadProgress.fraction(of: data, in: downloads), color: .white)
                 } else {
                     Image(systemName: "clock")
                         .font(.system(size: 17))
@@ -180,12 +168,12 @@ private struct DownloadRow: View {
 
     @ViewBuilder
     private var trailing: some View {
-        if downloads.preflights[track.serverID] != nil {
+        if downloads.preflights[data.id] != nil {
             EmptyView()
         } else {
-            switch track.downloadState {
+            switch data.downloadState {
             case .downloading:
-                if let fraction = DownloadProgress.fraction(of: track, in: downloads) {
+                if let fraction = DownloadProgress.fraction(of: data, in: downloads) {
                     Text("\(Int((fraction * 100).rounded()))%")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(ink.secondary)
@@ -193,10 +181,12 @@ private struct DownloadRow: View {
                 }
             case .queued:
                 iconButton("xmark", label: "Annulla download", color: ink.secondary) {
+                    guard let track = ModelLookup.track(data.id, in: context) else { return }
                     downloads.cancel(track)
                 }
             case .failed, .cancelled:
                 Button {
+                    guard let track = ModelLookup.track(data.id, in: context) else { return }
                     downloads.download(track)
                 } label: {
                     Text("Riprova")

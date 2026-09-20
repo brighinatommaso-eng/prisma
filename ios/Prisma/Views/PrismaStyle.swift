@@ -386,7 +386,7 @@ extension Formatting {
     }
 
     /// "12 brani · 48 min".
-    static func trackSummary(_ tracks: [StoredTrack]) -> String {
+    static func trackSummary(_ tracks: [TrackRowData]) -> String {
         trackCount(tracks.count) + " · " + totalDuration(tracks.map(\.durationS))
     }
 }

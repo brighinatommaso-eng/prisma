@@ -13,6 +13,9 @@ struct SearchView: View {
     @Query private var acquisitions: [PendingAcquisition]
 
     var body: some View {
+        // The one place this screen reads the store.
+        let index = Projection.search(tracks: libraryTracks, acquisitions: acquisitions)
+
         List {
             SearchField(query: $model.query) {
                 model.search(settings: settings)
@@ -46,15 +49,13 @@ struct SearchView: View {
                     .listRowSeparator(.hidden)
             case .loaded(let results):
                 let songs = results.response.value
-                let localTracks = Dictionary(libraryTracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
-                let pending = Dictionary(acquisitions.map { ($0.videoID, $0) }, uniquingKeysWith: { first, _ in first })
                 if songs.isEmpty {
                     message("Nessun risultato per “\(results.query)”.")
                 } else {
                     // Indexed rather than keyed by video_id: nothing guarantees
                     // the results contain no duplicates.
                     ForEach(Array(songs.enumerated()), id: \.offset) { _, song in
-                        SongRow(song: song, client: results.client, localTrack: localTracks[song.videoID], pending: pending[song.videoID])
+                        SongRow(song: song, client: results.client, localTrack: index.tracks[song.videoID], pending: index.acquisitions[song.videoID])
                             .prismaRow()
                     }
                 }
@@ -125,8 +126,8 @@ private struct SearchField: View {
 private struct SongRow: View {
     let song: SongResult
     let client: APIClient
-    let localTrack: StoredTrack?
-    let pending: PendingAcquisition?
+    let localTrack: TrackRowData?
+    let pending: AcquisitionData?
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -136,7 +137,7 @@ private struct SongRow: View {
         if let localTrack {
             // In the library: the shared track row, so a result already on the phone
             // plays on tap and one that is not starts its device download.
-            TrackRow(track: localTrack, subtitle: subtitle) {
+            TrackRow(data: localTrack, subtitle: subtitle) {
                 thumbnail
             }
         } else {

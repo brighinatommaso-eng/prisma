@@ -50,18 +50,20 @@ struct MiniPlayerView: View {
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        if let track = playback.currentTrack {
+        // The one place this view reads the store: the engine's fetch, projected
+        // before anything below it sees the result.
+        if let track = playback.currentTrack.map(Projection.row(of:)) {
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
                     Button(action: openPlayer) {
                         HStack(spacing: 11) {
-                            CoverArt(cover: AlbumCover(of: track), side: 42, cornerRadius: 10)
+                            CoverArt(cover: track.cover, side: 42, cornerRadius: 10)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(track.title ?? "Senza titolo")
+                                Text(track.title)
                                     .font(.footnote.weight(.semibold))
                                     .foregroundStyle(ink.primary)
                                     .lineLimit(1)
-                                Text(track.album?.artist ?? "")
+                                Text(track.artist ?? "")
                                     .font(.caption2)
                                     .foregroundStyle(ink.secondary)
                                     .lineLimit(1)
@@ -74,7 +76,8 @@ struct MiniPlayerView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Apre il player")
 
-                    FavouriteButton(track: track, hitSize: CGSize(width: 44, height: 46), glyphSize: 17)
+                    FavouriteButton(trackID: track.id, isFavourite: track.isFavourite,
+                                    hitSize: CGSize(width: 44, height: 46), glyphSize: 17)
 
                     // Each control is its own button with the whole square as its hit
                     // area; a plain button otherwise only responds on the glyph.
@@ -171,11 +174,14 @@ struct FullPlayerView: View {
     @State private var addingToPlaylist = false
 
     var body: some View {
+        // The one place this screen reads the store.
+        let track = playback.currentTrack.map(Projection.row(of:))
+
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
-                    if let track = playback.currentTrack {
-                        topBar(source: presenter.sourceName ?? track.album?.title ?? "Libreria")
+                    if let track {
+                        topBar(source: presenter.sourceName ?? track.albumTitle ?? "Libreria")
                         nowPlaying(track, width: proxy.size.width - 52, height: proxy.size.height)
                     } else {
                         topBar(source: nil)
@@ -271,28 +277,28 @@ struct FullPlayerView: View {
     }
 
     @ViewBuilder
-    private func nowPlaying(_ track: StoredTrack, width: CGFloat, height: CGFloat) -> some View {
+    private func nowPlaying(_ track: TrackRowData, width: CGFloat, height: CGFloat) -> some View {
         let side = max(120, min(width, height * 0.45))
 
         // Prototype `.part`: large, radius 24, deep shadow.
-        CoverArt(cover: AlbumCover(of: track), side: side, cornerRadius: 24)
+        CoverArt(cover: track.cover, side: side, cornerRadius: 24)
             .shadow(color: .black.opacity(0.7), radius: 32, y: 24)
             .padding(.top, 22)
 
         // Prototype `.prow`.
         HStack(alignment: .bottom, spacing: 14) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(track.title ?? "Senza titolo")
+                Text(track.title)
                     .font(.title2.weight(.heavy))
                     .foregroundStyle(ink.primary)
                     .lineLimit(2)
-                Text(track.album?.artist ?? "Artista sconosciuto")
+                Text(track.artist ?? "Artista sconosciuto")
                     .font(.subheadline)
                     .foregroundStyle(ink.secondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            FavouriteButton(track: track, glyphSize: 23)
+            FavouriteButton(trackID: track.id, isFavourite: track.isFavourite, glyphSize: 23)
                 .padding(.bottom, -6)
         }
         .padding(.top, 28)
@@ -517,28 +523,29 @@ private struct QueueSheet: View {
     @Query private var tracks: [StoredTrack]
 
     var body: some View {
-        let byID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+        // The one place this sheet reads the store.
+        let rows = Projection.queue(ids: playback.queue, tracks: tracks)
         NavigationStack {
             List {
-                if playback.queue.isEmpty {
+                if rows.isEmpty {
                     Text("La coda è vuota.")
                 }
-                ForEach(Array(playback.queue.enumerated()), id: \.offset) { index, id in
+                ForEach(rows) { row in
                     HStack(spacing: 12) {
-                        Text("\(index + 1)")
+                        Text("\(row.id + 1)")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .frame(width: 24, alignment: .leading)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(byID[id]?.title ?? "Brano non più in libreria")
+                            Text(row.title)
                                 .lineLimit(1)
-                            Text(byID[id]?.album?.artist ?? "")
+                            Text(row.artist)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 0)
-                        if index == playback.currentIndex {
+                        if row.id == playback.currentIndex {
                             EqualizerBars(isAnimating: playback.isPlaying)
                         }
                     }

@@ -4,13 +4,10 @@ import SwiftUI
 
 // MARK: - Track row
 
-/// Where a row sits inside a playlist, for Rimuovi dalla playlist.
-///
-/// The entry travels as its id, not as the object: the menu built from a placement
-/// is opened and tapped long after the body that made it, and deleting a track from
-/// the server takes its playlist entries with it.
-struct PlaylistPlacement {
-    let playlist: Playlist
+/// Where a row sits inside a playlist, for Rimuovi dalla playlist. Both halves are
+/// ids: the menu is opened and tapped long after the body that built it.
+struct PlaylistPlacement: Equatable {
+    let playlistID: UUID
     let entryID: UUID
 }
 
@@ -18,13 +15,17 @@ struct PlaylistPlacement {
 /// Cerca and Download. The prototype's `.trk`: leading slot, title and subtitle,
 /// duration, and the trailing state slot, with any problem in plain language under it.
 ///
-/// Tapping plays the track when its file is on the phone, and starts its download
-/// when it is not. The long-press menu and the swipes come from `TrackMenu`, so every
-/// screen offers the same actions. A screen chooses only what the row shows (leading
-/// and trailing slots, subtitle) and, through `play`, which queue playback starts;
-/// without it the queue is the track's album.
+/// Takes a `TrackRowData`, never a `StoredTrack`: its screen read the store once and
+/// handed down values (see `Projection`). Tapping plays the track when its file is on
+/// the phone, and starts its download when it is not; both read the track back by id
+/// at the moment of the tap.
+///
+/// The long-press menu and the swipes come from `TrackMenu`, so every screen offers
+/// the same actions. A screen chooses only what the row shows (leading and trailing
+/// slots, subtitle) and, through `play`, which queue playback starts; without it the
+/// queue is the track's album.
 struct TrackRow<Leading: View, Trailing: View>: View {
-    let track: StoredTrack
+    let data: TrackRowData
     let subtitle: String?
     let subtitleLineLimit: Int
     let showsDuration: Bool
@@ -36,10 +37,11 @@ struct TrackRow<Leading: View, Trailing: View>: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
     init(
-        track: StoredTrack,
+        data: TrackRowData,
         subtitle: String? = nil,
         subtitleLineLimit: Int = 1,
         showsDuration: Bool = true,
@@ -48,7 +50,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
         @ViewBuilder leading: () -> Leading,
         @ViewBuilder trailing: () -> Trailing
     ) {
-        self.track = track
+        self.data = data
         self.subtitle = subtitle
         self.subtitleLineLimit = subtitleLineLimit
         self.showsDuration = showsDuration
@@ -65,7 +67,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
                     HStack(spacing: 13) {
                         leading
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(track.title ?? "Senza titolo")
+                            Text(data.title)
                                 .font(.subheadline.weight(.medium))
                                 .foregroundStyle(ink.primary)
                                 .lineLimit(1)
@@ -78,7 +80,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
                         }
                         Spacer(minLength: 0)
                         if showsDuration {
-                            Text(Formatting.trackTime(track.durationS))
+                            Text(Formatting.trackTime(data.durationS))
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(ink.secondary)
                         }
@@ -91,19 +93,19 @@ struct TrackRow<Leading: View, Trailing: View>: View {
                 trailing
             }
 
-            TrackProblems(track: track)
+            TrackProblems(data: data)
         }
-        .modifier(TrackMenu(track: track, placement: placement, play: { startPlayback() }))
+        .modifier(TrackMenu(data: data, placement: placement, play: { startPlayback() }))
     }
 
     private func tap() {
-        switch track.downloadState {
+        switch data.downloadState {
         case .downloaded:
             startPlayback()
         case .notDownloaded, .cancelled, .failed:
-            if downloads.preflights[track.serverID] == nil {
-                downloads.download(track)
-            }
+            guard downloads.preflights[data.id] == nil,
+                  let track = ModelLookup.track(data.id, in: context) else { return }
+            downloads.download(track)
         case .queued, .downloading:
             break
         }
@@ -113,6 +115,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
         if let play {
             play()
         } else {
+            guard let track = ModelLookup.track(data.id, in: context) else { return }
             presenter.sourceName = nil
             playback.play(track: track)
         }
@@ -122,14 +125,14 @@ struct TrackRow<Leading: View, Trailing: View>: View {
 extension TrackRow where Trailing == TrackStateSlot {
     /// A row with the standard state icon on the right.
     init(
-        track: StoredTrack,
+        data: TrackRowData,
         subtitle: String? = nil,
         placement: PlaylistPlacement? = nil,
         play: (() -> Void)? = nil,
         @ViewBuilder leading: () -> Leading
     ) {
-        self.init(track: track, subtitle: subtitle, placement: placement, play: play, leading: leading) {
-            TrackStateSlot(track: track)
+        self.init(data: data, subtitle: subtitle, placement: placement, play: play, leading: leading) {
+            TrackStateSlot(data: data)
         }
     }
 }
@@ -137,10 +140,10 @@ extension TrackRow where Trailing == TrackStateSlot {
 /// The standard trailing slot: the download state icon, its 44 pt hit area reaching
 /// the row's edge.
 struct TrackStateSlot: View {
-    let track: StoredTrack
+    let data: TrackRowData
 
     var body: some View {
-        DownloadStateIcon(track: track)
+        DownloadStateIcon(data: data)
             .padding(.trailing, -10)
     }
 }
@@ -148,30 +151,30 @@ struct TrackStateSlot: View {
 /// A track's current problems: a deletion running or failed, a refused download,
 /// and a failed one.
 struct TrackProblems: View {
-    let track: StoredTrack
+    let data: TrackRowData
 
     @Environment(DownloadManager.self) private var downloads
     @Environment(TrackDeletion.self) private var deletion
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
-        if deletion.inProgress.contains(track.serverID) {
+        if deletion.inProgress.contains(data.id) {
             Text("Eliminazione dal server in corso…")
                 .font(.caption)
                 .foregroundStyle(ink.secondary)
                 .padding(.bottom, 8)
         }
-        if let problem = deletion.problems[track.serverID] {
+        if let problem = deletion.problems[data.id] {
             VStack(alignment: .leading, spacing: 0) {
                 ProblemBlock(error: problem)
-                DismissLink { deletion.clearProblem(track.serverID) }
+                DismissLink { deletion.clearProblem(data.id) }
             }
         }
-        if let refusal = downloads.refusals[track.serverID] {
+        if let refusal = downloads.refusals[data.id] {
             ProblemBlock(error: refusal)
         }
-        if track.downloadState == .failed, downloads.preflights[track.serverID] == nil {
-            ProblemBlock(PlainLanguage.message(for: track.failureCause))
+        if data.downloadState == .failed, downloads.preflights[data.id] == nil {
+            ProblemBlock(PlainLanguage.message(for: data.failureCause))
         }
     }
 }
@@ -188,9 +191,13 @@ struct TrackProblems: View {
 ///   server check running. Rimuovi dal telefono: the file is on the phone.
 /// - Elimina dal server: always, unless its deletion is already running.
 ///
+/// What is listed comes from the values the row was given. What each item does is
+/// read back from the store by id when it is tapped, because a menu is opened, and a
+/// confirmation answered, long after the screen last looked.
+///
 /// Rimuovi dal telefono and Elimina dal server delete data, so they ask first.
 struct TrackMenu: ViewModifier {
-    let track: StoredTrack
+    let data: TrackRowData
     let placement: PlaylistPlacement?
     let play: () -> Void
 
@@ -218,15 +225,15 @@ struct TrackMenu: ViewModifier {
             .sheet(isPresented: $addingToPlaylist) {
                 // By id: the sheet stays up on its own and the row behind it can be
                 // deleted while it is open.
-                AddToPlaylistSheet(trackID: track.serverID)
+                AddToPlaylistSheet(trackID: data.id)
             }
             .destructiveConfirmation($confirmation)
     }
 
     @ViewBuilder
     private var menuItems: some View {
-        let onPhone = track.downloadState == .downloaded
-        let canDownload = TrackAvailability.canDownload(track, downloads: downloads)
+        let onPhone = data.downloadState == .downloaded
+        let canDownload = TrackAvailability.canDownload(data, downloads: downloads)
 
         if onPhone {
             Section {
@@ -234,6 +241,7 @@ struct TrackMenu: ViewModifier {
                     Label("Riproduci", systemImage: "play.fill")
                 }
                 Button {
+                    guard let track = ModelLookup.track(data.id, in: context) else { return }
                     playback.addToQueue(track)
                 } label: {
                     Label("Aggiungi alla coda", systemImage: "text.append")
@@ -261,7 +269,7 @@ struct TrackMenu: ViewModifier {
             Section {
                 if canDownload {
                     Button {
-                        downloads.download(track)
+                        download()
                     } label: {
                         Label("Scarica sul telefono", systemImage: "arrow.down.to.line")
                     }
@@ -276,7 +284,7 @@ struct TrackMenu: ViewModifier {
             }
         }
 
-        if !deletion.inProgress.contains(track.serverID) {
+        if !deletion.inProgress.contains(data.id) {
             Section {
                 Button(role: .destructive) {
                     confirmDeleteFromServer()
@@ -289,10 +297,11 @@ struct TrackMenu: ViewModifier {
 
     private var favouriteButton: some View {
         Button {
+            guard let track = ModelLookup.track(data.id, in: context) else { return }
             store.toggleFavourite(track)
         } label: {
-            Label(track.isFavourite ? "Rimuovi dai preferiti" : "Preferito",
-                  systemImage: track.isFavourite ? "heart.slash" : "heart")
+            Label(data.isFavourite ? "Rimuovi dai preferiti" : "Preferito",
+                  systemImage: data.isFavourite ? "heart.slash" : "heart")
         }
     }
 
@@ -305,13 +314,15 @@ struct TrackMenu: ViewModifier {
                 removeFromPlaylist(placement)
             }
         }
-        switch track.downloadState {
+        switch data.downloadState {
         case .queued, .downloading:
             Button("Annulla") {
+                guard let track = ModelLookup.track(data.id, in: context) else { return }
                 downloads.cancel(track)
             }
         case .failed, .cancelled:
             Button("Ignora") {
+                guard let track = ModelLookup.track(data.id, in: context) else { return }
                 downloads.dismiss(track)
             }
         case .notDownloaded, .downloaded:
@@ -319,21 +330,27 @@ struct TrackMenu: ViewModifier {
         }
     }
 
+    private func download() {
+        guard let track = ModelLookup.track(data.id, in: context) else { return }
+        downloads.download(track)
+    }
+
     private func removeFromPlaylist(_ placement: PlaylistPlacement) {
-        guard let entry = ModelLookup.playlistEntry(placement.entryID, in: context) else { return }
-        store.remove([entry], from: placement.playlist)
+        guard let playlist = ModelLookup.playlist(placement.playlistID, in: context),
+              let entry = ModelLookup.playlistEntry(placement.entryID, in: context) else { return }
+        store.remove([entry], from: playlist)
     }
 
     // The two confirmations below sit in `@State` until the user answers the dialog,
-    // which is long enough for a sync to delete the track. They keep its id and its
-    // title, both values, and read the track back when the button is tapped.
+    // which is long enough for a sync to delete the track. They carry its id and the
+    // title it had when the question was asked, and read the track back at the tap.
 
     private func confirmRemoveFromPhone() {
-        let id = track.serverID
+        let id = data.id
         let downloads = self.downloads
         let context = self.context
         confirmation = DestructiveConfirmation(
-            title: "Rimuovere “\(track.title ?? "Senza titolo")” dal telefono?",
+            title: "Rimuovere “\(data.title)” dal telefono?",
             message: "Il file audio viene eliminato da questo iPhone. Il brano resta in libreria, nelle playlist e nei preferiti: per riascoltarlo va scaricato di nuovo.",
             button: "Rimuovi dal telefono"
         ) {
@@ -343,11 +360,11 @@ struct TrackMenu: ViewModifier {
     }
 
     private func confirmDeleteFromServer() {
-        let id = track.serverID
+        let id = data.id
         let deletion = self.deletion
         let context = self.context
         confirmation = DestructiveConfirmation(
-            title: "Eliminare “\(track.title ?? "Senza titolo")” dal server?",
+            title: "Eliminare “\(data.title)” dal server?",
             message: "Il brano e il suo file vengono eliminati dal server, poi spariscono da libreria, playlist, preferiti e da questo iPhone. Per riaverlo va cercato e scaricato di nuovo da Cerca.",
             button: "Elimina dal server"
         ) {
@@ -367,17 +384,10 @@ struct TrackMenu: ViewModifier {
 /// - Rimuovi tutto dal telefono: at least one track is on the phone.
 /// - Elimina tutto dal server: at least one track is not already being deleted.
 ///
-/// The two removals ask first, naming how many tracks they touch.
+/// Takes the collection's members as values, like every row does, and acts on their
+/// ids. The two removals ask first, naming how many tracks they touch.
 struct CollectionMenu: ViewModifier {
-    /// The collection's members as ids, read back through the store at the moment an
-    /// item is drawn or tapped.
-    ///
-    /// Never the objects. This modifier renders again whenever the download manager
-    /// or `TrackDeletion` changes, which is long after the body that listed the
-    /// collection, and its owner — the album or playlist header — is a view value
-    /// SwiftUI may find unchanged and skip. A held array would outlive the rows it
-    /// names.
-    let trackIDs: [String]
+    let tracks: [TrackRowData]
     let name: String
     /// Where this collection's deletion problems are kept, e.g. "album-3".
     let problemKey: String
@@ -400,24 +410,24 @@ struct CollectionMenu: ViewModifier {
         .destructiveConfirmation($confirmation)
     }
 
-    /// Each id once, in the collection's order.
-    private var distinctIDs: [String] {
+    /// Each track once, in the collection's order.
+    private var members: [TrackRowData] {
         var seen = Set<String>()
-        return trackIDs.filter { seen.insert($0).inserted }
+        return tracks.filter { seen.insert($0.id).inserted }
     }
 
     @ViewBuilder
     private var menuItems: some View {
-        let tracks = ModelLookup.tracks(distinctIDs, in: context)
-        let missing = tracks.filter { TrackAvailability.canDownload($0, downloads: downloads) }
-        let onPhone = tracks.filter { $0.downloadState == .downloaded }
-        let deletable = tracks.filter { !deletion.inProgress.contains($0.serverID) }
+        let members = self.members
+        let missing = members.filter { TrackAvailability.canDownload($0, downloads: downloads) }
+        let onPhone = members.filter { $0.downloadState == .downloaded }
+        let deletable = members.filter { !deletion.inProgress.contains($0.id) }
 
         if !missing.isEmpty || !onPhone.isEmpty {
             Section {
                 if !missing.isEmpty {
                     Button {
-                        for track in missing {
+                        for track in ModelLookup.tracks(missing.map(\.id), in: context) {
                             downloads.download(track)
                         }
                     } label: {
@@ -426,7 +436,7 @@ struct CollectionMenu: ViewModifier {
                 }
                 if !onPhone.isEmpty {
                     Button(role: .destructive) {
-                        confirmRemoveFromPhone(onPhone.map(\.serverID))
+                        confirmRemoveFromPhone(onPhone.map(\.id))
                     } label: {
                         Label("Rimuovi tutto dal telefono", systemImage: "iphone.slash")
                     }
@@ -437,7 +447,7 @@ struct CollectionMenu: ViewModifier {
         if !deletable.isEmpty {
             Section {
                 Button(role: .destructive) {
-                    confirmDeleteFromServer(deletable.map(\.serverID))
+                    confirmDeleteFromServer(deletable.map(\.id))
                 } label: {
                     Label("Elimina tutto dal server", systemImage: "trash")
                 }
@@ -447,8 +457,8 @@ struct CollectionMenu: ViewModifier {
 
     @ViewBuilder
     private var problems: some View {
-        // Ids alone: counting what is being deleted must not touch the rows.
-        let deleting = distinctIDs.filter { deletion.inProgress.contains($0) }.count
+        // Ids alone: counting what is being deleted touches no row at all.
+        let deleting = members.filter { deletion.inProgress.contains($0.id) }.count
         if deleting > 0 {
             Text(deleting == 1 ? "Eliminazione di 1 brano dal server in corso…" : "Eliminazione di \(deleting) brani dal server in corso…")
                 .font(.caption)
@@ -499,10 +509,10 @@ struct CollectionMenu: ViewModifier {
 
 enum TrackAvailability {
     /// On the server but not on the phone, with nothing already under way.
-    static func canDownload(_ track: StoredTrack, downloads: DownloadManager) -> Bool {
-        switch track.downloadState {
+    static func canDownload(_ data: TrackRowData, downloads: DownloadManager) -> Bool {
+        switch data.downloadState {
         case .notDownloaded, .failed, .cancelled:
-            return downloads.preflights[track.serverID] == nil
+            return downloads.preflights[data.id] == nil
         case .queued, .downloading, .downloaded:
             return false
         }
