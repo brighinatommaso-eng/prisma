@@ -99,8 +99,6 @@ struct TrackRowData: Identifiable, Equatable {
     let albumTitle: String?
     /// For grouping covers without reading an album again.
     let albumID: Int?
-    /// The album's numbering, for album order.
-    let trackNo: Int?
     let durationS: Int?
     let downloadState: DownloadState
     let failureCause: FailureCause?
@@ -288,7 +286,6 @@ enum Projection {
             artist: album?.artist,
             albumTitle: album?.title,
             albumID: album?.serverID,
-            trackNo: track.trackNo,
             durationS: track.durationS,
             downloadState: track.downloadState,
             failureCause: track.failureCause,
@@ -311,7 +308,6 @@ enum Projection {
             artist: favourite.artist,
             albumTitle: favourite.albumName,
             albumID: nil,
-            trackNo: nil,
             durationS: favourite.durationS,
             downloadState: .notDownloaded,
             failureCause: nil,
@@ -336,23 +332,6 @@ enum Projection {
             failureMessage: record.failureMessage,
             failurePhase: record.failure?.phase
         )
-    }
-
-    /// Album order: by track number, unnumbered tracks last, then by title. The same
-    /// order `StoredTrack.albumOrder` gives, on values.
-    static func albumOrder(_ rows: [TrackRowData]) -> [TrackRowData] {
-        rows.sorted {
-            switch ($0.trackNo, $1.trackNo) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (.some, .none):
-                return true
-            case (.none, .some):
-                return false
-            default:
-                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-            }
-        }
     }
 
     /// The first four distinct albums' covers, for a playlist mosaic. Distinctness is
@@ -465,6 +444,11 @@ enum Projection {
             .map { acquisition($0) }
             .filter { $0.stage != .handingOff || !started.contains($0.id) }
         return DownloadsData(tracks: rows, acquisitions: records)
+    }
+
+    /// The one line Libreria shows about syncing.
+    static func lastSync(_ records: [SyncRecord]) -> Date? {
+        records.first?.lastSyncAt
     }
 
     /// Cerca: what a result needs to know about the library, about Preferiti and

@@ -27,7 +27,7 @@ struct LibraryView: View {
 
     var body: some View {
         // The one place this screen reads the store.
-        let lastSyncAt = records.first?.lastSyncAt
+        let lastSyncAt = Projection.lastSync(records)
 
         List {
             FilterChips(options: LibraryFilter.allCases, selection: $filter) { $0.label }
