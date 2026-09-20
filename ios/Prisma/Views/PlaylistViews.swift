@@ -219,6 +219,7 @@ struct PlaylistDetailView: View {
     @Environment(PlaylistStore.self) private var store
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
@@ -357,16 +358,19 @@ struct PlaylistDetailView: View {
                 problemKey: "playlist-\(data.id.uuidString)"
             ))
 
-            PlayShufflePair(isEnabled: !data.playable.isEmpty) {
-                guard let first = data.playable.first else { return }
+            // What can play now, which with the server answering includes the
+            // entries that are only on it.
+            let playable = data.playable(ServerState(reachability.isReachable))
+            PlayShufflePair(isEnabled: !playable.isEmpty) {
+                guard let first = playable.first else { return }
                 // Riproduci plays in playlist order, even if shuffle was left on.
                 playback.setShuffle(false)
                 presenter.sourceName = data.name
                 play(fromEntryAt: first)
             } onShuffle: {
                 // Starts shuffled: shuffle on first, so the new queue is built
-                // shuffled from a random downloaded entry.
-                guard let start = data.playable.randomElement() else { return }
+                // shuffled from a random playable entry.
+                guard let start = playable.randomElement() else { return }
                 playback.setShuffle(true)
                 presenter.sourceName = data.name
                 play(fromEntryAt: start)
@@ -540,12 +544,13 @@ struct AddToPlaylistSheet: View {
 /// Preferiti: the collection. A flat list of tracks, newest favourite first, with no
 /// album grouping — each row's icon is the cover of the album its track belongs to.
 ///
-/// A favourite is in one of three states and the row says which: on the phone, where
-/// it plays; on the server, where it cannot be played because Prisma does not stream
-/// yet; and not acquired, where it is on neither. The last two are still real rows
-/// with a real title, because a favourite added from Cerca with the plus downloads
-/// nothing.
+/// A favourite is in one of three states and the row says which: on the phone,
+/// where it plays with or without a network; on the server, where it plays by
+/// streaming while the server answers and not at all when it does not; and not
+/// acquired, where it is on neither. The last two are still real rows with a real
+/// title, because a favourite added from Cerca with the plus downloads nothing.
 struct FavouritesContent: View {
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.prismaInk) private var ink
     @Query private var favourites: [FavouriteTrack]
     @Query private var tracks: [StoredTrack]
@@ -554,6 +559,7 @@ struct FavouritesContent: View {
     var body: some View {
         // The one place this filter reads the store.
         let rows = Projection.favourites(favourites: favourites, tracks: tracks, acquisitions: acquisitions)
+        let server = ServerState(reachability.isReachable)
 
         if !rows.isEmpty {
             PlayShuffleButtons(tracks: rows, sourceName: "Preferiti")
@@ -565,6 +571,15 @@ struct FavouritesContent: View {
 
         PlaylistStoreMessages()
 
+        // Said only when it changes what the user can do: some favourites are only
+        // on the server, and the server is not answering, so those rows will not
+        // play until it does.
+        if server == .unreachable, rows.contains(where: { $0.isOnServerOnly }) {
+            ProblemBlock(reachability.statusLine)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
+
         if rows.isEmpty {
             Text("Nessun preferito. Cerca un brano e tocca + per aggiungerlo qui, oppure la freccia per scaricarlo subito.")
                 .font(.subheadline)
@@ -575,12 +590,12 @@ struct FavouritesContent: View {
         }
 
         ForEach(rows) { row in
-            FavouriteRow(data: row)
+            FavouriteRow(data: row, server: server)
                 .prismaRow()
         }
 
         if !rows.isEmpty {
-            Text(Self.summary(of: rows))
+            Text(Self.summary(of: rows, server: server))
                 .font(.caption)
                 .foregroundStyle(ink.secondary)
                 .padding(.top, 20)
@@ -591,14 +606,20 @@ struct FavouritesContent: View {
     }
 
     /// How the collection is spread over the three states, counted from the values
-    /// the projection produced.
-    static func summary(of rows: [TrackRowData]) -> String {
+    /// the projection produced, and what the server's state makes of it.
+    static func summary(of rows: [TrackRowData], server: ServerState) -> String {
         let onPhone = rows.filter { $0.favouriteState == .onPhone }.count
         let onServer = rows.filter { $0.favouriteState == .onServer }.count
         let missing = rows.filter { $0.favouriteState == .notAcquired }.count
         var parts = [Formatting.trackCount(rows.count) + " nei preferiti"]
         if onPhone > 0 { parts.append("\(onPhone) sul telefono") }
-        if onServer > 0 { parts.append("\(onServer) solo sul server") }
+        if onServer > 0 {
+            switch server {
+            case .reachable: parts.append("\(onServer) in streaming dal server")
+            case .unreachable: parts.append("\(onServer) solo sul server, non raggiungibile")
+            case .unknown: parts.append("\(onServer) solo sul server")
+            }
+        }
         if missing > 0 { parts.append("\(missing) non ancora scaricati") }
         return parts.joined(separator: " · ") + "."
     }
@@ -610,6 +631,9 @@ struct FavouritesContent: View {
 /// where a missing track should go rather than starting a download on its own.
 private struct FavouriteRow: View {
     let data: TrackRowData
+    /// Read once by the screen above and handed down, so every row on this screen
+    /// says the same thing about the server.
+    let server: ServerState
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
 
@@ -620,9 +644,9 @@ private struct FavouriteRow: View {
             subtitleLineLimit: 2,
             choosesDestination: true
         ) {
-            FavouriteArtwork(data: data)
+            FavouriteArtwork(data: data, server: server)
         } trailing: {
-            FavouriteStateSlot(data: data)
+            FavouriteStateSlot(data: data, server: server)
         }
     }
 
@@ -640,12 +664,7 @@ private struct FavouriteRow: View {
         case .notDownloaded, .downloaded, .failed, .cancelled:
             break
         }
-        let lead: String?
-        switch data.favouriteState {
-        case .onPhone: lead = nil
-        case .onServer: lead = "Sul server"
-        case .notAcquired: lead = "Non ancora scaricato"
-        }
+        let lead = data.favouriteState == .onPhone ? nil : data.favouriteState.label(server)
         return [lead, data.artist].compactMap { $0 }.joined(separator: " · ")
     }
 }
@@ -659,6 +678,7 @@ private struct FavouriteRow: View {
 /// URL search returned, which is loaded the way Cerca loads its thumbnails.
 private struct FavouriteArtwork: View {
     let data: TrackRowData
+    let server: ServerState
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.prismaInk) private var ink
@@ -677,7 +697,9 @@ private struct FavouriteArtwork: View {
                 CoverArt(cover: data.cover, side: side, cornerRadius: 10)
             }
         }
-        .opacity(data.favouriteState == .onPhone ? 1 : 0.5)
+        // Full strength for a file on this phone, nearly full for one the server
+        // will stream, dim for one that nothing can play right now.
+        .opacity(data.favouriteState.canPlay(server) ? (data.isOnPhone ? 1 : 0.8) : 0.5)
         .overlay(alignment: .bottomTrailing) {
             badge
         }
@@ -718,6 +740,7 @@ private struct FavouriteArtwork: View {
 /// arrow that asks where the copy should go instead of starting one.
 private struct FavouriteStateSlot: View {
     let data: TrackRowData
+    let server: ServerState
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -728,7 +751,7 @@ private struct FavouriteStateSlot: View {
     var body: some View {
         content
             .sheet(item: $destination) { request in
-                DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title))
+                DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title, server: server))
             }
     }
 
@@ -738,7 +761,7 @@ private struct FavouriteStateSlot: View {
             ProgressRing(fraction: record.stage == .onServer ? record.serverProgress : nil, color: ink.accent, side: 18)
                 .frame(width: 44, height: 44)
                 .accessibilityLabel(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))
-        } else if data.isPlayable || data.isBusy || (data.downloadState == .failed && data.presence == .inLibrary) {
+        } else if data.isOnPhone || data.isBusy || (data.downloadState == .failed && data.presence == .inLibrary) {
             // On the phone, arriving, or a device download to retry: the icon every
             // other screen shows, doing what it does everywhere.
             TrackStateSlot(data: data)
@@ -808,22 +831,26 @@ struct PlayShuffleButtons: View {
 
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
 
     var body: some View {
-        let playable = tracks.indices.filter { tracks[$0].downloadState == .downloaded }
+        // Enabled by what can play now; the engine decides again at the tap, over
+        // the tracks it reads back then, so a server that went away in between
+        // simply produces a shorter queue rather than a dead button.
+        let playable = tracks.contains { $0.canPlay(ServerState(reachability.isReachable)) }
         // The buttons are tapped long after this body, so their closures keep the
         // ids and read the tracks back then.
         let ids = tracks.map(\.id)
-        PlayShufflePair(isEnabled: !playable.isEmpty) {
+        PlayShufflePair(isEnabled: playable) {
             let live = ModelLookup.tracks(ids, in: context)
-            guard let first = live.firstIndex(where: { $0.downloadState == .downloaded }) else { return }
+            guard let first = live.firstIndex(where: { playback.canPlayNow($0) }) else { return }
             playback.setShuffle(false)
             presenter.sourceName = sourceName
             playback.play(playlistTracks: live, startingAt: first)
         } onShuffle: {
             let live = ModelLookup.tracks(ids, in: context)
-            guard let start = live.indices.filter({ live[$0].downloadState == .downloaded }).randomElement() else { return }
+            guard let start = live.indices.filter({ playback.canPlayNow(live[$0]) }).randomElement() else { return }
             playback.setShuffle(true)
             presenter.sourceName = sourceName
             playback.play(playlistTracks: live, startingAt: start)

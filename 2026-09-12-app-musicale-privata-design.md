@@ -8,13 +8,14 @@
 
 ## 1. Obiettivo
 
-Un'app musicale personale su un solo iPhone, con libreria interamente offline. L'utente cerca un brano, lo scarica sul telefono attraverso un backend self-hosted basato su yt-dlp, e lo ascolta senza rete.
+Un'app musicale personale su un solo iPhone, con libreria offline. L'utente cerca un brano, lo scarica sul telefono attraverso un backend self-hosted basato su yt-dlp, e lo ascolta senza rete. Quello che è sul server ma non ancora sul telefono si ascolta in streaming finché il server risponde: il file locale, quando c'è, vince sempre.
 
 ### Cosa deve fare
 
 - Cercare brani, album e artisti con metadata puliti (titolo, artista, album, durata, copertina).
 - Scaricare l'audio sul server, taggarlo, e trasferirlo sull'iPhone.
 - Riprodurre offline con controlli di sistema (lock screen, AirPods, Centro di Controllo).
+- Riprodurre in streaming dal proprio server i brani non ancora scaricati, con gli stessi controlli di sistema, e tornare ai soli brani locali quando il server non è raggiungibile.
 - Funzionare identica in casa e fuori, senza esporre porte su internet.
 - Avere un'interfaccia curata, conforme a Liquid Glass, con tema configurabile.
 
@@ -28,14 +29,14 @@ Un'app musicale personale su un solo iPhone, con libreria interamente offline. L
 | Sincronizzazione playlist con servizi esterni | Non serve. |
 | Testi, radio, raccomandazioni algoritmiche | Complessità sproporzionata rispetto al valore. |
 | Widget e Live Activity | Richiedono target aggiuntivi. Eventuale fase successiva. |
-| Streaming dal server | Deciso: la libreria vive sul telefono. Lo streaming resterebbe un percorso di codice parallelo da mantenere senza motivo. |
 
 ### Criteri di successo
 
 1. Da "cerco un brano" a "ce l'ho sul telefono" in meno di 30 secondi su rete domestica.
-2. L'app riproduce in modalità aereo senza alcun degrado.
+2. L'app riproduce in modalità aereo senza alcun degrado: tutto quello che è scaricato si ascolta, e quello che non lo è dice perché non si può ascoltare invece di restare in attesa.
 3. I download proseguono con l'app in background o schermo bloccato.
 4. La libreria sopravvive a un aggiornamento dell'app (nessuna perdita di file).
+5. Un brano che è solo sul server parte in streaming, e se il server sparisce a metà la riproduzione continua dal primo brano scaricato della coda, dicendo cosa è successo.
 
 ---
 

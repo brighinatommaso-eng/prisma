@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(ThemeEngine.self) private var theme
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.prismaInk) private var ink
 
     @State private var draft = ""
@@ -13,6 +14,21 @@ struct SettingsView: View {
     @State private var testGeneration = 0
 
     private let buildInfo = BuildInfo(bundle: .main)
+
+    /// The recorded reachability answer, short enough for a value row. The whole
+    /// sentence, with the reason, is `ServerReachability.statusLine`, which
+    /// Preferiti shows when it changes what the user can do.
+    private var reachabilityValue: String {
+        if reachability.isProbing, reachability.isReachable == nil {
+            return "Controllo in corso…"
+        }
+        let when = reachability.checkedAt.map { " · " + Formatting.time($0) } ?? ""
+        switch reachability.isReachable {
+        case nil: return "Non ancora controllato"
+        case true?: return "Disponibile" + when
+        case false?: return "Non disponibile" + when
+        }
+    }
 
     private enum SaveResult {
         case saved(String)
@@ -106,6 +122,16 @@ struct SettingsView: View {
 
             valueRow("Stato") {
                 statusValue
+            }
+
+            hairline
+
+            // What the rest of the app is acting on: the recorded answer that
+            // decides whether a track only the server has can be streamed.
+            valueRow("Streaming") {
+                Text(reachabilityValue)
+                    .foregroundStyle(ink.secondary)
+                    .multilineTextAlignment(.trailing)
             }
 
             if case .loaded(let response) = test {
@@ -343,5 +369,9 @@ struct SettingsView: View {
             guard current == testGeneration else { return }
             test = outcome
         }
+        // The same tap answers the question the rest of the app asks, so a user who
+        // has just brought the server back does not have to wait for another event
+        // before a streamed track becomes playable.
+        reachability.retry()
     }
 }

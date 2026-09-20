@@ -21,9 +21,14 @@ struct PlaylistPlacement: Equatable {
 /// .presence` says, and what decides here whether tapping plays, downloads, or
 /// explains. Whatever it does, it reads the track back by id at the moment of the tap.
 ///
-/// `choosesDestination` is Preferiti: there a track that is not on the phone is not
-/// simply downloaded, because the user picks where the copy goes, and a track that
-/// cannot be played says why instead of doing nothing.
+/// Tapping plays whatever can play: the file when the phone has one, and the server
+/// when it does not and the server is answering. That decision is `TrackRowData
+/// .canPlay`, the same rule `PlaybackEngine.canPlayNow` applies to the stored track,
+/// so a row never offers a tap the engine will refuse.
+///
+/// `choosesDestination` is Preferiti: there a track that cannot play is not simply
+/// downloaded, because the user picks where the copy goes, and a track that cannot
+/// be played says why instead of doing nothing.
 ///
 /// The long-press menu and the swipes come from `TrackMenu`, so every screen offers
 /// the same actions. A screen chooses only what the row shows (leading and trailing
@@ -43,6 +48,7 @@ struct TrackRow<Leading: View, Trailing: View>: View {
     @Environment(DownloadManager.self) private var downloads
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
@@ -114,12 +120,17 @@ struct TrackRow<Leading: View, Trailing: View>: View {
             chooseDestination: choosesDestination ? { destination = data.acquisitionRequest } : nil
         ))
         .sheet(item: $destination) { request in
-            DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title))
+            DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title, server: server))
         }
     }
 
+    private var server: ServerState { ServerState(reachability.isReachable) }
+
     private func tap() {
-        if data.isPlayable {
+        // The file first, the server second: a downloaded track plays from disk
+        // even when the server is answering, and a track only the server has plays
+        // by streaming while it answers.
+        if data.canPlay(server) {
             startPlayback()
             return
         }
@@ -127,6 +138,9 @@ struct TrackRow<Leading: View, Trailing: View>: View {
             // Preferiti: a row that will not play opens the choice, whose header is
             // the answer to the tap. A transfer already under way says so itself.
             guard !data.isBusy, downloads.preflights[data.id] == nil else { return }
+            // The server may have come back since the last answer was recorded, and
+            // the sheet is about to say it has not. Ask again while it is open.
+            reachability.retry()
             destination = data.acquisitionRequest
             return
         }
@@ -250,6 +264,7 @@ struct TrackMenu: ViewModifier {
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlaylistStore.self) private var store
     @Environment(TrackDeletion.self) private var deletion
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
 
     @State private var addingToPlaylist = false
@@ -277,14 +292,20 @@ struct TrackMenu: ViewModifier {
 
     @ViewBuilder
     private var menuItems: some View {
-        let onPhone = data.isPlayable
+        // Two different questions, and the menu keeps them apart: what can be
+        // played right now (a file here, or a stream while the server answers),
+        // and what is actually on this phone (which is what Rimuovi dal telefono
+        // acts on).
+        let canPlay = data.canPlay(ServerState(reachability.isReachable))
+        let onPhone = data.isOnPhone
         let canDownload = TrackAvailability.canDownload(data, downloads: downloads)
         let canChoose = chooseDestination != nil && !onPhone && !data.isBusy
 
-        if onPhone {
+        if canPlay {
             Section {
                 Button(action: play) {
-                    Label("Riproduci", systemImage: "play.fill")
+                    Label(data.isOnPhone ? "Riproduci" : "Riproduci in streaming",
+                          systemImage: data.isOnPhone ? "play.fill" : "play.circle")
                 }
                 Button {
                     guard let track = ModelLookup.track(data.id, in: context) else { return }

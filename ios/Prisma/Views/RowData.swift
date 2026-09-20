@@ -53,34 +53,82 @@ enum TrackPresence: String, Equatable, Sendable {
     case favouriteOnly
 }
 
+/// What the app knows about the server right now, as a value.
+///
+/// `ServerReachability` holds the truth; this is the shape the interface reasons
+/// in. It is not part of the store projection and does not need to be: reachability
+/// is a service in the environment, like `DownloadManager` and `PlaybackEngine`,
+/// and reading it below a body is safe because there is no row that can be deleted
+/// underneath it. What it must not do is disagree with the engine, so the
+/// playability rule is written once, as `TrackRowData.canPlay`, and the engine's
+/// `canPlayNow` is the same rule over the stored track.
+enum ServerState: Equatable, Sendable {
+    /// Nothing has asked the server yet in this session.
+    case unknown
+    case reachable
+    case unreachable
+
+    init(_ isReachable: Bool?) {
+        switch isReachable {
+        case nil: self = .unknown
+        case true?: self = .reachable
+        case false?: self = .unreachable
+        }
+    }
+
+    /// Streaming is worth attempting. "Not asked yet" counts as yes: attempting is
+    /// the fastest way to find out, and the attempt is bounded by the engine's
+    /// streaming deadline, so it cannot hang.
+    var mayStream: Bool { self != .unreachable }
+}
+
 /// The three states a Preferiti row tells apart, and the words for each.
 ///
-/// Streaming does not exist yet, so two of the three cannot be played, and each
-/// says why in its own terms rather than sharing one vague sentence.
+/// A track on the server is now playable too, by streaming, but only while the
+/// server answers — so what the row says about it depends on `ServerState`, and the
+/// three states no longer map one-to-one onto "plays" and "does not play".
 enum FavouriteState: Equatable, Sendable {
-    /// The file is on this phone: it plays.
+    /// The file is on this phone: it plays, with or without a network.
     case onPhone
-    /// The server has it and this phone does not.
+    /// The server has it and this phone does not: it streams while the server
+    /// answers, and nothing can play it when it does not.
     case onServer
     /// Neither the server nor this phone has it.
     case notAcquired
 
     /// The row's subtitle prefix, so the state is legible without tapping.
-    var label: String {
+    func label(_ server: ServerState) -> String {
         switch self {
-        case .onPhone: return "Sul telefono"
-        case .onServer: return "Sul server"
-        case .notAcquired: return "Non ancora scaricato"
+        case .onPhone:
+            return "Sul telefono"
+        case .onServer:
+            switch server {
+            case .reachable: return "Sul server · in streaming"
+            case .unreachable: return "Sul server · non raggiungibile"
+            case .unknown: return "Sul server"
+            }
+        case .notAcquired:
+            return "Non ancora scaricato"
+        }
+    }
+
+    /// Whether this state can produce audio with the server in this state.
+    func canPlay(_ server: ServerState) -> Bool {
+        switch self {
+        case .onPhone: return true
+        case .onServer: return server.mayStream
+        case .notAcquired: return false
         }
     }
 
     /// Why the track will not play, in full, or nil when it will.
-    func reason(title: String) -> String? {
+    func reason(title: String, server: ServerState) -> String? {
         switch self {
         case .onPhone:
             return nil
         case .onServer:
-            return "“\(title)” è sul server ma non su questo telefono, e Prisma non riproduce ancora in streaming: scaricalo sul telefono per ascoltarlo."
+            guard !server.mayStream else { return nil }
+            return "“\(title)” è sul server ma non su questo telefono, e il server ora non risponde, quindi non si può nemmeno riprodurre in streaming. Scaricalo sul telefono quando il server torna raggiungibile, così lo ascolti anche in modalità aereo."
         case .notAcquired:
             return "“\(title)” non è ancora stato scaricato: non è né sul server né su questo telefono. Scegli dove scaricarlo per poterlo ascoltare."
         }
@@ -128,7 +176,21 @@ struct TrackRowData: Identifiable, Equatable {
         }
     }
 
-    var isPlayable: Bool { downloadState == .downloaded }
+    /// The file is here. Plays with no network at all, and is the source chosen
+    /// even when the server is one hop away.
+    var isOnPhone: Bool { downloadState == .downloaded }
+
+    /// The server has a file for this track and this phone has not, so it is the
+    /// one kind of row that streaming is for. A copy this phone claimed as its only
+    /// one, and a favourite with no track anywhere, are not: `/tracks/{id}/file`
+    /// would answer 404 for both.
+    var isOnServerOnly: Bool { presence == .inLibrary && downloadState != .downloaded }
+
+    /// Can it produce audio right now? The rule the engine implements, as a value,
+    /// so a row and the engine cannot disagree about what a tap will do.
+    func canPlay(_ server: ServerState) -> Bool {
+        isOnPhone || (isOnServerOnly && server.mayStream)
+    }
 
     /// Playlists, Elimina dal server and the device download all need a library row.
     var hasLibraryRow: Bool { presence != .favouriteOnly }
@@ -179,8 +241,11 @@ struct PlaylistData: Identifiable, Equatable {
     var tracks: [TrackRowData] { rows.compactMap(\.track) }
     var trackIDs: [String] { tracks.map(\.id) }
     var covers: [AlbumCover] { Projection.covers(of: tracks) }
-    /// Offsets into `rows` whose track is on the phone.
-    var playable: [Int] { rows.indices.filter { rows[$0].track?.downloadState == .downloaded } }
+    /// Offsets into `rows` whose track can produce audio with the server in this
+    /// state: on the phone, or on the server while it answers.
+    func playable(_ server: ServerState) -> [Int] {
+        rows.indices.filter { rows[$0].track?.canPlay(server) ?? false }
+    }
     /// Distinct tracks not on the phone.
     var missingCount: Int {
         Set(rows.compactMap { row -> String? in
@@ -254,12 +319,48 @@ struct SearchIndex: Equatable {
     let favourites: Set<String>
 }
 
+/// Where a queued line's audio would come from, so the queue can show what will be
+/// skipped instead of silently skipping it.
+enum QueueRowSource: Equatable, Sendable {
+    /// The file is on this phone.
+    case onPhone
+    /// Only the server has it: it streams while the server answers.
+    case onServer
+    /// In the library, but on neither the phone nor the server.
+    case nowhere
+    /// Not in the library any more: it was queued and then deleted.
+    case gone
+}
+
 /// One line of the play queue.
 struct QueueRowData: Identifiable, Equatable {
     /// The position in the queue: a playlist may hold the same track twice.
     let id: Int
     let title: String
     let artist: String
+    let source: QueueRowSource
+
+    func canPlay(_ server: ServerState) -> Bool {
+        switch source {
+        case .onPhone: return true
+        case .onServer: return server.mayStream
+        case .nowhere, .gone: return false
+        }
+    }
+
+    /// Why this line will be passed over, or nil when it will play.
+    func skippedReason(_ server: ServerState) -> String? {
+        switch source {
+        case .onPhone:
+            return nil
+        case .onServer:
+            return server.mayStream ? nil : "Solo sul server, non raggiungibile"
+        case .nowhere:
+            return "Non è sul telefono né sul server"
+        case .gone:
+            return "Non più in libreria"
+        }
+    }
 }
 
 // MARK: - Reading the store, once
@@ -469,11 +570,20 @@ enum Projection {
     static func queue(ids: [String], tracks: [StoredTrack]) -> [QueueRowData] {
         let byID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
         return ids.enumerated().map { offset, id in
-            let track = byID[id]
+            guard let track = byID[id] else {
+                return QueueRowData(id: offset, title: "Brano non più in libreria", artist: "", source: .gone)
+            }
+            let source: QueueRowSource
+            if track.downloadState == .downloaded {
+                source = .onPhone
+            } else {
+                source = track.serverDroppedAt == nil ? .onServer : .nowhere
+            }
             return QueueRowData(
                 id: offset,
-                title: track?.title ?? "Brano non più in libreria",
-                artist: track?.album?.artist ?? ""
+                title: track.title ?? "Senza titolo",
+                artist: track.album?.artist ?? "",
+                source: source
             )
         }
     }
