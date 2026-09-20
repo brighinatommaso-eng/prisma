@@ -12,6 +12,7 @@ final class AppModel {
     struct Services {
         let container: ModelContainer
         let downloads: DownloadManager
+        let reachability: ServerReachability
         let sync: LibrarySync
         let playback: PlaybackEngine
         let theme: ThemeEngine
@@ -39,11 +40,26 @@ final class AppModel {
             )
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
-            settings.onAddressChange = { [downloads] previous, new in
+            let reachability = ServerReachability(settings: settings)
+            settings.onAddressChange = { [downloads, reachability] previous, new in
                 downloads.serverAddressChanged(from: previous, to: new)
+                // The recorded answer was about a different server.
+                reachability.addressChanged()
             }
-            let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
+            let playback = PlaybackEngine(
+                context: container.mainContext, settings: settings,
+                downloads: downloads, reachability: reachability
+            )
             sync.playback = playback
+            // The single wire between "is the server there" and "what can play".
+            // Only a real change arrives here, so a queue is never reconsidered
+            // because a probe merely repeated itself.
+            reachability.onChange = { [playback] reachable in
+                playback.serverReachabilityChanged(reachable: reachable)
+            }
+            // Starts the network-path watch, whose first update is the first probe
+            // of the process. Nothing here repeats on a schedule.
+            reachability.start()
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
             // Created here but idle: it only runs once RootView reports the app is
@@ -53,7 +69,7 @@ final class AppModel {
                 downloads: downloads, playlists: playlists
             )
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
+            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
             playlists.removeOrphanedEntries()
             // Preferiti is now the only place a track is browsed, so everything
             // already on this phone becomes a favourite once. Runs before any view
