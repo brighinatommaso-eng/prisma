@@ -307,7 +307,7 @@ struct PlaylistDetailView: View {
         PlaylistStoreMessages()
 
         if data.rows.isEmpty {
-            Text("Questa playlist è vuota. Aggiungi brani da Libreria o Cerca tenendo premuto su un brano.")
+            Text("Questa playlist è vuota. Tocca + qui sopra per aggiungere brani dai preferiti o cercandoli, oppure tieni premuto su un brano in Libreria o Cerca.")
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
                 .padding(.vertical, 12)
