@@ -29,7 +29,14 @@ final class AppModel {
         let settings = AppSettings()
         self.settings = settings
         do {
-            let container = try ModelContainer(for: StoredAlbum.self, StoredTrack.self, SyncRecord.self, Playlist.self, PlaylistEntry.self, PendingAcquisition.self)
+            // FavouriteTrack is a new entity and the fields added to StoredTrack,
+            // SyncRecord and PendingAcquisition are optional or carry a default, so
+            // the library already on the phone opens with a lightweight migration
+            // and nothing in it is rewritten.
+            let container = try ModelContainer(
+                for: StoredAlbum.self, StoredTrack.self, SyncRecord.self,
+                Playlist.self, PlaylistEntry.self, PendingAcquisition.self, FavouriteTrack.self
+            )
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
             settings.onAddressChange = { [downloads] previous, new in
@@ -41,10 +48,17 @@ final class AppModel {
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
             // Created here but idle: it only runs once RootView reports the app is
             // in the foreground, never during a background launch.
-            let acquisitions = AcquisitionCoordinator(context: container.mainContext, settings: settings, sync: sync, downloads: downloads)
+            let acquisitions = AcquisitionCoordinator(
+                context: container.mainContext, settings: settings, sync: sync,
+                downloads: downloads, playlists: playlists
+            )
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
             services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
             playlists.removeOrphanedEntries()
+            // Preferiti is now the only place a track is browsed, so everything
+            // already on this phone becomes a favourite once. Runs before any view
+            // exists, and does nothing on every launch after the first.
+            playlists.migrateFavourites()
             launchError = nil
             downloads.checkTransfers(reason: "avvio dell'app")
         } catch {

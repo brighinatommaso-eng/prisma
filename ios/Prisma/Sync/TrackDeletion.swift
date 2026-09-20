@@ -64,6 +64,7 @@ final class TrackDeletion {
             .map { Target(id: $0.serverID, title: $0.title ?? "Senza titolo") }
         problems[key] = nil
         guard !targets.isEmpty else { return }
+        releaseClaims(on: targets.map(\.id))
         let ids = targets.map(\.id)
         inProgress.formUnion(ids)
         Task {
@@ -73,6 +74,30 @@ final class TrackDeletion {
 
     func clearProblem(_ key: String) {
         problems[key] = nil
+    }
+
+    /// Gives up this phone's claim on the only copy of these tracks, if it had one.
+    ///
+    /// Elimina dal server means everywhere: the track, its file and its favourite
+    /// are all meant to go. A track in the middle of the Telefono chain carries
+    /// `phoneOnlySince`, which tells `LibrarySync` to keep the file when the server
+    /// reports the deletion — exactly the wrong answer here — so the claim is
+    /// withdrawn before the DELETE goes out, and saved, for the same reason the
+    /// chain writes it before its own DELETE: the sync must read the current
+    /// intention, not the previous one.
+    ///
+    /// A save that fails leaves the claim in place, so the worst outcome is a file
+    /// kept on the phone that the user asked to remove — visible, and undoable from
+    /// the row — rather than one deleted that they wanted kept.
+    private func releaseClaims(on ids: [String]) {
+        var changed = false
+        for track in ModelLookup.tracks(ids, in: context) where track.phoneOnlySince != nil || track.serverDroppedAt != nil {
+            track.phoneOnlySince = nil
+            track.serverDroppedAt = nil
+            changed = true
+        }
+        guard changed else { return }
+        try? context.save()
     }
 
     // MARK: - Work

@@ -174,11 +174,33 @@ final class StoredTrack {
     /// From a failed or interrupted transfer, so a retry can continue from there.
     @Attribute(.externalStorage) var resumeData: Data?
 
-    /// The favourite flag: set when favourited, nil otherwise. Optional so the
-    /// existing on-device library migrates without a default value. Sync only
-    /// writes catalogue fields, so it never clears this; deleting the track removes
-    /// it with the row.
+    /// Mirror of `FavouriteTrack`, kept in step by `PlaylistStore`.
+    ///
+    /// The collection itself is `FavouriteTrack`, keyed by video id, because a
+    /// favourite may exist with no track anywhere. This flag stays because every
+    /// row projection already reads it, and because a build installed before the
+    /// collection existed still reads favourites from here.
     var favouritedAt: Date?
+
+    /// When this phone asked the server to drop its copy, so that this phone could
+    /// own the only one (the Telefono destination). Written and saved *before*
+    /// `DELETE /tracks/{id}` is sent, never after: between the two the server may
+    /// answer, a delta sync may arrive, and `LibrarySync` must already know that
+    /// the deletion it is being told about is one this phone asked for.
+    ///
+    /// nil on every track the server owns, which is every track of the library that
+    /// existed before this build.
+    var phoneOnlySince: Date?
+
+    /// When a sync actually saw the server drop this track while `phoneOnlySince`
+    /// was set. The intent above is what stops the file being discarded; this is
+    /// the fact, and it is what the interface reads: a track whose server copy is
+    /// confirmed gone is "non acquisito" once its file leaves the phone.
+    ///
+    /// Cleared, together with `phoneOnlySince`, when the server lists the track
+    /// again — `POST /downloads` revives a soft-deleted track, and then the server
+    /// owns it once more.
+    var serverDroppedAt: Date?
 
     /// Every playlist entry pointing at this track. Deleting the track (as a sync
     /// does when the server removes it) deletes these entries with it, so no
@@ -217,6 +239,64 @@ final class StoredTrack {
         get { failureCauseRaw.flatMap { FailureCause(rawValue: $0) } }
         set { failureCauseRaw = newValue?.rawValue }
     }
+}
+
+/// One track in Preferiti: the collection, keyed by the YouTube video id.
+///
+/// Its own row rather than a flag on `StoredTrack`, because a favourite may exist
+/// with no track anywhere. Adding one from Cerca with the plus stores exactly what
+/// search returned — video id, title, artist, album name, artwork URL — and
+/// downloads nothing, so the favourite is real before the audio is.
+///
+/// The video id is the same id `StoredTrack.serverID` uses, so a favourite and a
+/// library track are matched by comparing two strings and reading neither row.
+/// Nothing in the sync writes here: the server has no idea what is favourited, and
+/// deleting a track from the server leaves its favourite behind on purpose.
+@Model
+final class FavouriteTrack {
+    @Attribute(.unique) var videoID: String
+    /// What search or the library knew when it was added, so a favourite with no
+    /// track still has a line to show.
+    var title: String?
+    var artist: String?
+    var albumName: String?
+    /// Absolute, as search returned it. Only used while no local album cover exists.
+    var artworkURL: String?
+    var durationS: Int?
+    /// Newest first is the order of Preferiti.
+    var addedAt: Date
+
+    init(
+        videoID: String,
+        title: String?,
+        artist: String?,
+        albumName: String?,
+        artworkURL: String?,
+        durationS: Int?,
+        addedAt: Date = Date()
+    ) {
+        self.videoID = videoID
+        self.title = title
+        self.artist = artist
+        self.albumName = albumName
+        self.artworkURL = artworkURL
+        self.durationS = durationS
+        self.addedAt = addedAt
+    }
+}
+
+/// Everything needed to create a favourite, as plain values.
+///
+/// A row builds one while it is drawn and hands it to a button, a menu or a sheet,
+/// which act on it long afterwards — so it holds no model object, and the store
+/// reads nothing back to create the favourite except the favourite itself.
+struct FavouriteDraft: Equatable, Sendable {
+    let videoID: String
+    let title: String?
+    let artist: String?
+    let albumName: String?
+    let artworkURL: String?
+    let durationS: Int?
 }
 
 /// A user playlist, stored only on this iPhone.
@@ -268,6 +348,11 @@ final class SyncRecord {
     var lastServerTime: Int?
     var lastSyncAt: Date?
     var lastSummary: String?
+
+    /// When the one-off pass that made every track already on this phone a
+    /// favourite finished. nil means it has not run: it runs at the next launch.
+    /// Kept here because this row already exists exactly once.
+    var favouritesMigratedAt: Date?
 
     init() {}
 }

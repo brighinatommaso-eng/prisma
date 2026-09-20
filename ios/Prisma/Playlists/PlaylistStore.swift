@@ -206,9 +206,124 @@ final class PlaylistStore {
 
     // MARK: - Favourites
 
-    func toggleFavourite(_ track: StoredTrack) {
-        track.favouritedAt = track.isFavourite ? nil : Date()
-        save(track.isFavourite ? "adding a favourite" : "removing a favourite")
+    /// Preferiti is a collection of its own: a `FavouriteTrack` keyed by video id,
+    /// which exists whether or not the track does. `StoredTrack.favouritedAt` is
+    /// kept in step here, and only here, so every row projection keeps reading one
+    /// field and an older build still finds its favourites.
+    ///
+    /// Takes values, not a track: Cerca favourites a result that is in no library.
+    func toggleFavourite(_ draft: FavouriteDraft) {
+        if let existing = storedFavourite(draft.videoID) {
+            context.delete(existing)
+            ModelLookup.track(draft.videoID, in: context)?.favouritedAt = nil
+            save("removing “\(draft.title ?? draft.videoID)” from the favourites")
+        } else {
+            addFavourite(draft)
+            save("adding “\(draft.title ?? draft.videoID)” to the favourites")
+        }
+    }
+
+    /// Adds the favourite if it is not already there, without saving. The callers
+    /// that also acquire a track save once, after both changes.
+    func addFavourite(_ draft: FavouriteDraft) {
+        let now = Date()
+        if let existing = storedFavourite(draft.videoID) {
+            // Already a favourite: fill in anything it did not know yet, e.g. a
+            // favourite added from search before the album title was known.
+            existing.title = existing.title ?? draft.title
+            existing.artist = existing.artist ?? draft.artist
+            existing.albumName = existing.albumName ?? draft.albumName
+            existing.artworkURL = existing.artworkURL ?? draft.artworkURL
+            existing.durationS = existing.durationS ?? draft.durationS
+        } else {
+            context.insert(FavouriteTrack(
+                videoID: draft.videoID,
+                title: draft.title,
+                artist: draft.artist,
+                albumName: draft.albumName,
+                artworkURL: draft.artworkURL,
+                durationS: draft.durationS,
+                addedAt: now
+            ))
+        }
+        ModelLookup.track(draft.videoID, in: context)?.favouritedAt = now
+    }
+
+    /// Adds the favourite and saves. For the plus in Cerca, which downloads nothing.
+    func addToFavourites(_ draft: FavouriteDraft) {
+        guard storedFavourite(draft.videoID) == nil else { return }
+        addFavourite(draft)
+        if save("adding “\(draft.title ?? draft.videoID)” to the favourites") {
+            notice = "“\(draft.title ?? draft.videoID)” aggiunto ai preferiti."
+        }
+    }
+
+    private func storedFavourite(_ videoID: String) -> FavouriteTrack? {
+        ModelLookup.favourite(videoID, in: context)
+    }
+
+    /// Makes every track already on this phone a favourite, once.
+    ///
+    /// Preferiti is the only place a track is browsed now, so without this the
+    /// library the user already has would have nowhere to be seen. Purely additive:
+    /// it inserts favourites and sets a flag, and deletes and changes nothing, so a
+    /// library installed by an earlier build survives it untouched. It runs again at
+    /// the next launch if it could not finish, and inserting a favourite that is
+    /// already there does nothing.
+    func migrateFavourites() {
+        let records: [SyncRecord]
+        let tracks: [StoredTrack]
+        do {
+            records = try context.fetch(FetchDescriptor<SyncRecord>())
+            guard records.first?.favouritesMigratedAt == nil else { return }
+            tracks = try context.fetch(FetchDescriptor<StoredTrack>())
+        } catch {
+            lastError = .storage("Could not read the library to create the favourites", location: nil, error: error,
+                                 message: "I brani già sul telefono non si sono potuti aggiungere ai preferiti perché la libreria non si è letta: riavvia l'app; se si ripete, controlla lo spazio libero.")
+            return
+        }
+
+        let record: SyncRecord
+        if let existing = records.first {
+            record = existing
+        } else {
+            record = SyncRecord()
+            context.insert(record)
+        }
+
+        let already = Set(existingFavouriteIDs())
+        var added = 0
+        let now = Date()
+        for track in tracks where !already.contains(track.serverID) {
+            context.insert(FavouriteTrack(
+                videoID: track.serverID,
+                title: track.title,
+                artist: track.album?.artist,
+                albumName: track.album?.title,
+                artworkURL: nil,
+                durationS: track.durationS,
+                addedAt: track.favouritedAt ?? now
+            ))
+            added += 1
+        }
+        for track in tracks where track.favouritedAt == nil {
+            track.favouritedAt = now
+        }
+        record.favouritesMigratedAt = now
+        guard save("making every track on this phone a favourite") else { return }
+        if added > 0 {
+            notice = added == 1
+                ? "1 brano già sul telefono è stato aggiunto ai preferiti."
+                : "\(added) brani già sul telefono sono stati aggiunti ai preferiti."
+        }
+    }
+
+    private func existingFavouriteIDs() -> [String] {
+        do {
+            return try context.fetch(FetchDescriptor<FavouriteTrack>()).map(\.videoID)
+        } catch {
+            return []
+        }
     }
 
     // MARK: - Errors

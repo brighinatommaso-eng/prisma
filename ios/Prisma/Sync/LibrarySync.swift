@@ -110,6 +110,9 @@ final class LibrarySync {
             "Tracks: \(changes.tracksInserted) new, \(changes.tracksUpdated) updated, \(changes.tracksDeleted) deleted",
             "Covers: \(covers.downloaded) downloaded, \(covers.unchanged) unchanged, \(covers.failed) failed",
         ]
+        if changes.tracksRetained > 0 {
+            lines.append("\(changes.tracksRetained) track(s) the server dropped were kept: this iPhone had asked for the only copy (Telefono).")
+        }
         if changes.filesChanged > 0 {
             lines.append("\(changes.filesChanged) track(s) have a new file on the server; their local copies were discarded")
         }
@@ -139,8 +142,14 @@ final class LibrarySync {
         var tracksInserted = 0
         var tracksUpdated = 0
         var tracksDeleted = 0
+        /// Tracks the server dropped that this phone had claimed, and therefore
+        /// kept, file and all.
+        var tracksRetained = 0
         var filesChanged = 0
         var upsertedAlbumIDs = Set<Int>()
+        /// Albums holding at least one retained track. They outlive the server's
+        /// deletion too, because their cover is what those tracks' rows show.
+        var albumsWithRetainedTracks = Set<ObjectIdentifier>()
         var problems: [String] = []
     }
 
@@ -196,6 +205,20 @@ final class LibrarySync {
                 track.fileBytes = remoteTrack.fileBytes
                 track.sha256 = remoteTrack.sha256
                 track.updatedAt = remoteTrack.updatedAt
+                if track.serverDroppedAt != nil {
+                    // The server is listing a track it had dropped, so it has been
+                    // fetched again (POST /downloads clears a soft deletion). It
+                    // owns the file once more, and this phone's claim on the only
+                    // copy ends with it.
+                    //
+                    // Only when the drop was actually seen. A track in the middle
+                    // of the Telefono chain is still listed by the server, has its
+                    // claim already written, and must keep it: clearing on every
+                    // upsert would undo the claim in exactly the window it exists
+                    // for.
+                    track.serverDroppedAt = nil
+                    track.phoneOnlySince = nil
+                }
                 // Albums arrive with their complete track list, so this also moves
                 // a track that changed album.
                 track.album = album
@@ -238,6 +261,10 @@ final class LibrarySync {
             for track in album.tracks where !track.isDeleted && !listedTrackIDs.contains(track.serverID) {
                 deleteTrack(track, changes: &changes)
             }
+            // A track this phone claimed stays, and its row shows this album's
+            // cover, so the album stays with it. Membership is decided from the set
+            // the retention filled in, never by reading a track back.
+            guard !changes.albumsWithRetainedTracks.contains(ObjectIdentifier(album)) else { continue }
             if let problem = removeCover(of: album) {
                 changes.problems.append(problem)
             }
@@ -250,7 +277,35 @@ final class LibrarySync {
         return changes
     }
 
+    /// Removes a track the server no longer has - unless this phone asked it to
+    /// let go.
+    ///
+    /// The Telefono destination ends with DELETE /tracks/{id}, and the backend then
+    /// reports that id in every following delta's `deleted_track_ids`. Without this
+    /// the sync would answer the way it answers any dropped track: discard the audio
+    /// file and delete the row, destroying the copy the phone had just downloaded
+    /// and verified, moments after asking for it.
+    ///
+    /// `phoneOnlySince` is that request, written and saved before the DELETE was
+    /// sent, so it is always already there when the answer comes back. Finding it
+    /// means the deletion is the expected end of a chain this phone ran, so nothing
+    /// local is touched: the row, the file, the playlists' entries and the favourite
+    /// all stay, and only `serverDroppedAt` is written, which is what makes the
+    /// interface say the track is no longer on the server.
+    ///
+    /// Every other deletion is unchanged, including one for a track without the
+    /// claim, which is every track the library had before this build.
     private func deleteTrack(_ track: StoredTrack, changes: inout Changes) {
+        if track.phoneOnlySince != nil {
+            if track.serverDroppedAt == nil {
+                track.serverDroppedAt = Date()
+            }
+            if let album = track.album {
+                changes.albumsWithRetainedTracks.insert(ObjectIdentifier(album))
+            }
+            changes.tracksRetained += 1
+            return
+        }
         if let problem = downloads.discardLocalData(for: track) {
             changes.problems.append(problem)
         }

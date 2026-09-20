@@ -52,6 +52,20 @@ enum ModelLookup {
         return ids.compactMap { byID[$0] }
     }
 
+    /// The favourite for this video id, or nil if it is not in Preferiti.
+    ///
+    /// A favourite is keyed by video id and has no track behind it, so this is the
+    /// only way to ask whether one exists: nothing can be inferred from the library.
+    static func favourite(_ videoID: String, in context: ModelContext) -> FavouriteTrack? {
+        var descriptor = FetchDescriptor<FavouriteTrack>(predicate: #Predicate<FavouriteTrack> { $0.videoID == videoID })
+        descriptor.fetchLimit = 1
+        do {
+            return try context.fetch(descriptor).first
+        } catch {
+            return nil
+        }
+    }
+
     /// The playlist entry with this id, or nil if the track it pointed at left the
     /// library and took it with it.
     static func playlistEntry(_ id: UUID, in context: ModelContext) -> PlaylistEntry? {

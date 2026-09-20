@@ -2,9 +2,19 @@ import Foundation
 import Observation
 import SwiftData
 
-/// Takes a search result from "not on the server" to "downloaded on this iPhone":
+/// Takes a track from "nowhere" to wherever the user chose to keep it:
 /// POST /downloads, poll GET /downloads until the job is done, sync the library so
-/// the track arrives with its hash and size, then hand it to `DownloadManager`.
+/// the track arrives with its hash and size, hand it to `DownloadManager`, and -
+/// for Telefono - delete the server's copy once the phone's is verified.
+///
+/// The destination decides where the chain stops. Server stops at the sync, with no
+/// file on the phone. Entrambi stops when the device download owns the track.
+/// Telefono goes one step further, and that step is the only one in the app that
+/// destroys the other copy, so its order is fixed: the server's copy is deleted
+/// **after** the device download has reached `downloaded`, which is the state
+/// `DownloadFinalizer` produces only once the received file matched its SHA-256.
+/// Nothing here verifies anything itself; it reads that state, and refuses to act
+/// without it.
 ///
 /// Resumable by construction: every step starts from what is stored in its
 /// `PendingAcquisition` and what the server reports, never from memory, and each
@@ -33,11 +43,19 @@ final class AcquisitionCoordinator {
     static let handoffStartDeadline: TimeInterval = 20
     /// POST attempts for one acquisition before a lost job counts as a failure.
     static let maxRequestAttempts = 3
+    /// DELETE attempts against a server that keeps answering 409 (busy) before the
+    /// step gives up. The verified file is on the phone throughout, so giving up
+    /// costs the user nothing but space on the server.
+    static let maxDeletionAttempts = 10
 
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let sync: LibrarySync
     @ObservationIgnored private let downloads: DownloadManager
+    /// Every acquisition adds its track to Preferiti, whatever the destination and
+    /// before anything is fetched, so the collection is right even if the chain
+    /// never finishes.
+    @ObservationIgnored private let playlists: PlaylistStore
 
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var loopToken = UUID()
@@ -50,11 +68,18 @@ final class AcquisitionCoordinator {
     /// or a silent start is attributed to this handoff and not an older action.
     @ObservationIgnored private var handoffsThisProcess = Set<String>()
 
-    init(context: ModelContext, settings: AppSettings, sync: LibrarySync, downloads: DownloadManager) {
+    init(
+        context: ModelContext,
+        settings: AppSettings,
+        sync: LibrarySync,
+        downloads: DownloadManager,
+        playlists: PlaylistStore
+    ) {
         self.context = context
         self.settings = settings
         self.sync = sync
         self.downloads = downloads
+        self.playlists = playlists
     }
 
     // MARK: - Lifecycle
@@ -76,33 +101,76 @@ final class AcquisitionCoordinator {
 
     // MARK: - Actions from the UI
 
-    /// Starts acquiring a search result. Does nothing for a track already being
-    /// acquired; a track already in the library goes straight to the device download.
-    func acquire(_ song: SongResult) {
+    /// Adds the track to Preferiti and acquires it to `destination`.
+    ///
+    /// The favourite is created first and unconditionally: Preferiti is the
+    /// collection, and it is honest about a track that is nowhere yet. What the
+    /// chain then has to do depends on what already exists, which is why the
+    /// starting stage is worked out rather than assumed.
+    func acquire(_ request: AcquisitionRequest, destination: AcquisitionDestination) {
         lastError = nil
-        if let track = storedTrack(song.videoID) {
-            switch track.downloadState {
-            case .notDownloaded, .failed, .cancelled:
-                if downloads.preflights[track.serverID] == nil {
-                    downloads.download(track)
-                }
-            case .queued, .downloading, .downloaded:
-                break
+        playlists.addFavourite(request.draft)
+
+        if let existing = pendingRecord(request.videoID) {
+            // Already on its way. A failed one is picked up again with the newly
+            // chosen destination; a running one keeps the one it started with.
+            if existing.stage == .failed {
+                existing.destination = destination
+                save("recording the new destination for “\(request.name)”")
+                retry(videoID: request.videoID)
+            } else {
+                save("adding “\(request.name)” to the favourites")
             }
             return
         }
-        guard pendingRecord(song.videoID) == nil else { return }
+
+        guard let stage = startingStage(for: destination, track: storedTrack(request.videoID)) else {
+            // Nothing left to fetch: the favourite alone was the change.
+            save("adding “\(request.name)” to the favourites")
+            return
+        }
+
         let record = PendingAcquisition(
-            videoID: song.videoID,
-            title: song.title,
-            artist: song.artist,
-            album: song.album,
-            durationS: song.durationS,
-            artworkURL: song.artworkURLSmall ?? song.artworkURL
+            videoID: request.videoID,
+            title: request.title,
+            artist: request.artist,
+            album: request.albumName,
+            durationS: request.durationS,
+            artworkURL: request.artworkURL,
+            destination: destination
         )
+        record.stage = stage
         context.insert(record)
-        guard save("recording the request for “\(song.title ?? song.videoID)”") else { return }
+        guard save("recording the request for “\(request.name)”") else { return }
         startLoopIfNeeded()
+    }
+
+    /// Where the chain has to start for this destination, given what the phone
+    /// already has, or nil when there is nothing left to do.
+    ///
+    /// "On the server" is a track with a library row the server has not dropped:
+    /// `serverDroppedAt` is set only once a sync saw the server let go of a copy
+    /// this phone had claimed, and such a track has to be asked for again rather
+    /// than downloaded, because the server's file is gone. `POST /downloads` revives
+    /// a soft-deleted track, so asking again is all it takes.
+    private func startingStage(for destination: AcquisitionDestination, track: StoredTrack?) -> AcquisitionStage? {
+        guard let track else { return .requesting }
+        let onPhone = track.downloadState == .downloaded
+        let onServer = track.serverDroppedAt == nil
+        // Without a hash the device download could not verify anything, so the
+        // library is synced first to fetch one.
+        let deviceStage: AcquisitionStage = track.sha256 == nil ? .syncing : .handingOff
+
+        switch destination {
+        case .phone:
+            if onPhone { return onServer ? .deletingFromServer : nil }
+            return onServer ? deviceStage : .requesting
+        case .server:
+            return onServer ? nil : .requesting
+        case .both:
+            if !onServer { return .requesting }
+            return onPhone ? nil : deviceStage
+        }
     }
 
     /// Picks a failed acquisition up again from the step that failed.
@@ -122,6 +190,10 @@ final class AcquisitionCoordinator {
         case .deviceDownloadRefused:
             record.handoffRequestedAt = nil
             record.stage = .handingOff
+        case .serverDeletionFailed:
+            // The file is on the phone and verified; only the server's copy is left.
+            record.deletionAttempts = 0
+            record.stage = .deletingFromServer
         case .noAddress, .unreachable, .serverRejected, .unreadableResponse, .storage, .unexpected, nil:
             // Wherever it was: a known job is polled, otherwise the request is made,
             // or looked up first if it may already have been sent.
@@ -200,6 +272,11 @@ final class AcquisitionCoordinator {
 
         handOff()
 
+        if activeRecords().contains(where: { $0.stage == .deletingFromServer }) {
+            await deleteServerCopies(generation: generation)
+            guard generation == foregroundGeneration else { return nil }
+        }
+
         let remaining = activeRecords()
         if remaining.isEmpty {
             return nil
@@ -207,6 +284,11 @@ final class AcquisitionCoordinator {
         if remaining.contains(where: { $0.stage == .requesting || $0.stage == .onServer }) {
             // Back off while polls fail: 2, 4, 8 s.
             return Self.serverPollInterval * pow(2, Double(min(pollFailures, 3)))
+        }
+        if remaining.contains(where: { $0.stage == .deletingFromServer }) {
+            // A 409 means the server is busy with this track or with its library, so
+            // asking again a second later would only find it busy again.
+            return Self.serverPollInterval
         }
         return Self.handoffCheckInterval
     }
@@ -372,7 +454,9 @@ final class AcquisitionCoordinator {
         save("recording server download progress")
     }
 
-    /// A library sync, then each record whose track has arrived moves on.
+    /// A library sync, then each record whose track has arrived moves on: to the
+    /// device download for Telefono and Entrambi, and nowhere for Server, whose
+    /// chain is finished the moment the track is in the catalogue.
     private func syncPending(generation: Int) async {
         // Joins a sync already running. If that one started before the track
         // existed, the next pass syncs again (see syncAttempts).
@@ -380,9 +464,16 @@ final class AcquisitionCoordinator {
         guard generation == foregroundGeneration else { return }
 
         for record in activeRecords() where record.stage == .syncing {
-            if let track = storedTrack(record.videoID), track.sha256 != nil {
-                record.handoffRequestedAt = nil
-                record.stage = .handingOff
+            // Server needs no hash: nothing on this phone will verify a file it is
+            // never going to receive.
+            let needsHash = record.destination.downloadsToPhone
+            if let track = storedTrack(record.videoID), !needsHash || track.sha256 != nil {
+                if needsHash {
+                    record.handoffRequestedAt = nil
+                    record.stage = .handingOff
+                } else {
+                    finish(record)
+                }
                 continue
             }
             if case .failed(let error) = sync.status {
@@ -405,8 +496,13 @@ final class AcquisitionCoordinator {
         save("recording the library sync result")
     }
 
-    /// Hands each track now in the library to the existing device download, and
-    /// forgets the record once that download owns it.
+    /// Hands each track now in the library to the existing device download.
+    ///
+    /// Entrambi is finished as soon as the download owns the track: from there the
+    /// track's own row reports it. Telefono is not, because it still has to delete
+    /// the server's copy, and it may do that only once this phone holds a verified
+    /// file - so it waits for `downloaded`, and a device download that fails leaves
+    /// the server's copy exactly where it is.
     private func handOff() {
         var changed = false
         for record in activeRecords() where record.stage == .handingOff {
@@ -431,7 +527,22 @@ final class AcquisitionCoordinator {
             let changedSinceRequest = record.handoffRequestedAt.map { (track.stateChangedAt ?? .distantPast) >= $0 } ?? false
 
             switch track.downloadState {
-            case .queued, .downloading, .downloaded:
+            case .downloaded:
+                if record.destination == .phone && track.serverDroppedAt == nil {
+                    // The file is here and its SHA-256 matched. Only now.
+                    handoffsThisProcess.remove(record.videoID)
+                    record.deletionAttempts = 0
+                    record.stage = .deletingFromServer
+                } else {
+                    finish(record)
+                }
+                changed = true
+            case .queued, .downloading:
+                if record.destination == .phone {
+                    // Still arriving: the server keeps its copy until it has landed
+                    // and verified. Nothing to record, so nothing is saved.
+                    continue
+                }
                 finish(record)
                 changed = true
             case .notDownloaded, .failed, .cancelled:
@@ -463,6 +574,90 @@ final class AcquisitionCoordinator {
         if changed {
             save("handing tracks to the device download")
         }
+    }
+
+    /// Deletes the server's copy of every track whose phone copy is downloaded and
+    /// verified, one at a time.
+    private func deleteServerCopies(generation: Int) async {
+        for videoID in activeRecords().filter({ $0.stage == .deletingFromServer }).map(\.videoID) {
+            await deleteServerCopy(videoID, generation: generation)
+            guard generation == foregroundGeneration else { return }
+        }
+    }
+
+    /// The last step of Telefono, and the only place in the app that deletes a
+    /// track the user still wants.
+    ///
+    /// Two things make it safe. First, it refuses to run unless the track is
+    /// `downloaded` right now - the state `DownloadFinalizer` sets only after the
+    /// received file's SHA-256 matched the server's - so a failed or unfinished
+    /// device download can never reach the DELETE, and the server's copy simply
+    /// stays. Second, `phoneOnlySince` is written and **saved before** the request
+    /// goes out, because the server answers, then reports the id in the next
+    /// delta's `deleted_track_ids`, and `LibrarySync` has to already know that this
+    /// deletion was asked for here; a claim written afterwards would race the sync
+    /// that discards the file.
+    ///
+    /// A claim left on a track whose DELETE did not succeed is harmless - the
+    /// server still lists the track, so no deletion is ever reported for it - but a
+    /// terminal failure withdraws it anyway, so the flag never outlives its reason.
+    private func deleteServerCopy(_ videoID: String, generation: Int) async {
+        guard let record = pendingRecord(videoID), record.stage == .deletingFromServer else { return }
+        let name = record.title ?? videoID
+
+        guard let track = storedTrack(videoID), track.downloadState == .downloaded else {
+            // The file left the phone while this was waiting, e.g. Rimuovi dal
+            // telefono. There is nothing to take ownership of, so the server keeps
+            // its copy and the track stays available there.
+            if let track = storedTrack(videoID) {
+                track.phoneOnlySince = nil
+            }
+            finish(record)
+            save("leaving the server's copy of " + L + name + R + " in place")
+            return
+        }
+
+        let client: APIClient
+        do {
+            client = try settings.makeClient()
+        } catch {
+            fail(record, .noAddress, .from(error))
+            return
+        }
+
+        if track.phoneOnlySince == nil {
+            track.phoneOnlySince = Date()
+        }
+        record.deletionAttempts += 1
+        guard save("claiming the only copy of " + L + name + R) else { return }
+
+        do {
+            _ = try await client.deleteTrack(trackID: videoID)
+        } catch {
+            guard generation == foregroundGeneration,
+                  let current = pendingRecord(videoID), current.stage == .deletingFromServer else { return }
+            let apiError = APIError.from(error)
+            if apiError.httpStatus == 404 {
+                // The server does not have it, which is where this step was going.
+                finish(current)
+                save("recording that the server no longer has " + L + name + R)
+                return
+            }
+            if apiError.httpStatus == 409, current.deletionAttempts < Self.maxDeletionAttempts {
+                // Busy downloading this track, or writing the library. Ask again.
+                return
+            }
+            // Terminal. The server still has its copy, so the claim is withdrawn:
+            // nothing on this phone depends on it any more, and a deletion the
+            // server makes later for its own reasons must behave normally again.
+            storedTrack(videoID)?.phoneOnlySince = nil
+            fail(current, .serverDeletionFailed, apiError)
+            return
+        }
+
+        guard let done = pendingRecord(videoID) else { return }
+        finish(done)
+        save("recording that the server deleted its copy of " + L + name + R)
     }
 
     // MARK: - Helpers
@@ -541,6 +736,8 @@ final class AcquisitionCoordinator {
                 + PlainLanguage.message(for: error).lowercasedFirst + " Poi tocca Riprova."
         case .notInLibrary:
             return "Il server dice di avere il brano, ma non compare nella libreria. Prova Risincronizza tutto in Libreria, poi tocca Riprova."
+        case .serverDeletionFailed:
+            return "Il brano è stato scaricato e verificato su questo telefono, ma il server non ha eliminato la sua copia, quindi ora sta su entrambi: non si è perso nulla. Tocca Riprova per liberare lo spazio sul server."
         case .deviceDownloadRefused:
             return "Il brano è in libreria, ma il download sul telefono non è partito: "
                 + PlainLanguage.message(for: error).lowercasedFirst + " Poi tocca Riprova."
