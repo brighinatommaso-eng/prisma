@@ -501,7 +501,10 @@ struct CollectionMenu: ViewModifier {
         let members = self.members
         let missing = members.filter { TrackAvailability.canDownload($0, downloads: downloads) }
         let onPhone = members.filter { $0.downloadState == .downloaded }
-        let deletable = members.filter { !deletion.inProgress.contains($0.id) }
+        // Only what the server still has: a playlist can now hold a track that is in
+        // no library at all, and DELETE /tracks/{id} has nothing to delete for it.
+        // The single-track menu already asks the same question.
+        let deletable = members.filter { $0.presence == .inLibrary && !deletion.inProgress.contains($0.id) }
 
         if !missing.isEmpty || !onPhone.isEmpty {
             Section {

@@ -324,6 +324,25 @@ final class Playlist {
 
 /// One slot in a playlist. Its own row, so the same track can appear more than
 /// once, and the order is the stored `position`, never insertion time.
+///
+/// A slot names its track twice over, and the two are not the same thing:
+///
+/// - `track` is the library row, when there is one. It carries the download state
+///   and the album, and the cascade on `StoredTrack.playlistEntries` means the slot
+///   dies with it when the server drops the track.
+/// - `videoID` is the YouTube video id, which is what `FavouriteTrack` is keyed by
+///   and what `StoredTrack.serverID` holds. It is the *name* of the track, and it
+///   exists even when nothing has been downloaded anywhere.
+///
+/// The second was added because a playlist can now be filled from Cerca, and a
+/// result chosen there has no library row at all — exactly the case `FavouriteTrack`
+/// was created for. A slot like that carries only the id until the track is
+/// acquired; `PlaylistStore.entries(of:)` links it to its library row the first time
+/// it sees one, and from that moment it behaves like every other slot, cascade
+/// included.
+///
+/// Optional because entries written by earlier builds have no id recorded; they
+/// have a `track`, and everything that needs an id falls back to its `serverID`.
 @Model
 final class PlaylistEntry {
     @Attribute(.unique) var id: UUID
@@ -331,6 +350,7 @@ final class PlaylistEntry {
     var addedAt: Date
     var playlist: Playlist?
     var track: StoredTrack?
+    var videoID: String?
 
     init(position: Int, playlist: Playlist, track: StoredTrack) {
         self.id = UUID()
@@ -338,6 +358,23 @@ final class PlaylistEntry {
         self.addedAt = Date()
         self.playlist = playlist
         self.track = track
+        self.videoID = track.serverID
+    }
+
+    /// A slot for a track that is in no library yet: chosen from Cerca, added to
+    /// Preferiti in the same action, and downloaded whenever the user decides.
+    init(position: Int, playlist: Playlist, videoID: String) {
+        self.id = UUID()
+        self.position = position
+        self.addedAt = Date()
+        self.playlist = playlist
+        self.track = nil
+        self.videoID = videoID
+    }
+
+    /// What this slot names, however it was created.
+    var trackID: String? {
+        videoID ?? track?.serverID
     }
 }
 
