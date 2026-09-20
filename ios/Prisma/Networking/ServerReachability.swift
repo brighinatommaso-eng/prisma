@@ -197,15 +197,6 @@ final class ServerReachability {
         }
     }
 
-    /// What a row says about a track the server has and the phone does not.
-    var serverOnlyLabel: String {
-        switch isReachable {
-        case true?: return "Sul server · in streaming"
-        case false?: return "Sul server · non raggiungibile"
-        case nil: return "Sul server"
-        }
-    }
-
     /// Streaming is worth attempting: either the server answered, or nothing has
     /// asked yet and the attempt itself is the fastest way to find out.
     var mayStream: Bool {
