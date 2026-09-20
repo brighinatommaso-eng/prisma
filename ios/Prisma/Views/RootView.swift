@@ -40,6 +40,7 @@ struct RootView: View {
                     .environment(services.theme)
                     .environment(services.playlists)
                     .environment(services.deletion)
+                    .environment(services.reachability)
                     .environment(presenter)
                     .modelContainer(services.container)
                     .preferredColorScheme(colorScheme)
@@ -51,6 +52,7 @@ struct RootView: View {
             .environment(services.playlists)
             .environment(services.acquisitions)
             .environment(services.deletion)
+            .environment(services.reachability)
             .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every
@@ -66,6 +68,10 @@ struct RootView: View {
                 case .active:
                     services.downloads.checkTransfers(reason: "apertura dell'app")
                     services.acquisitions.resume()
+                    // Coming back is an event, so the server is asked again — but
+                    // only if the last answer is older than the freshness window,
+                    // so switching apps twice in a row costs one request.
+                    services.reachability.appBecameActive()
                 case .background:
                     services.playback.persist()
                     services.acquisitions.pause()

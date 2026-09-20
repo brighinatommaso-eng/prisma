@@ -47,6 +47,15 @@ nonisolated struct APIClient: Sendable {
     nonisolated enum Timeout {
         /// The backend probes YouTube Music for up to 8 s.
         static let health: TimeInterval = 20
+        /// "Is the server there right now", for `ServerReachability`.
+        ///
+        /// Idle timeout, and /health is the slowest cheap endpoint the backend has:
+        /// it caps its own upstream probes at 8 s and caches them for a minute, so
+        /// all but the first call of each minute answers in milliseconds. Ten
+        /// seconds is therefore the point past which a server that is answering at
+        /// all has stopped answering — and nothing on screen waits for it, because
+        /// the interface reads the last recorded answer rather than this request.
+        static let reachability: TimeInterval = 10
         /// The backend allows YouTube Music 20 s, then HEAD-checks each artwork URL.
         static let search: TimeInterval = 45
         static let library: TimeInterval = 20
@@ -82,6 +91,22 @@ nonisolated struct APIClient: Sendable {
 
     func health() async throws -> APIResponse<Health> {
         try await getJSON("/health", timeout: Timeout.health)
+    }
+
+    /// Is the server answering? GET /health, status only.
+    ///
+    /// The body is not decoded on purpose: this asks whether the backend is there,
+    /// and a response this build cannot parse still proves that it is. Anything
+    /// other than a 2xx throws, because something that answers /health with an error
+    /// will not serve a track's file either.
+    @discardableResult
+    func ping() async throws -> Int {
+        let fetched = try await fetch(
+            try address.endpoint("/health"),
+            accept: "application/json",
+            timeout: Timeout.reachability
+        )
+        return fetched.status
     }
 
     func search(query: String, limit: Int = 20) async throws -> APIResponse<[SongResult]> {

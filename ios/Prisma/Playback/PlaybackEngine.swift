@@ -25,8 +25,30 @@ extension StoredTrack {
     }
 }
 
-/// Plays downloaded tracks from Application Support/Music. Local files only:
-/// nothing in playback touches the network, so it works in airplane mode.
+/// Plays a track from the file in Application Support/Music when the phone has one,
+/// and straight from the server when it does not.
+///
+/// The file always wins: a downloaded track plays locally even with the server one
+/// hop away, because that is faster and costs no data, and it is what makes the app
+/// work unchanged in airplane mode. Streaming exists for the other case — a track
+/// the server has and this phone has not — and it is the same playback in every
+/// other respect. One `AVQueuePlayer`, one audio session, one Now Playing centre,
+/// one set of remote commands: the choice between a file and a stream is made in
+/// `source(for:)` and shows up nowhere else, so the lock screen cannot behave
+/// differently for the two.
+///
+/// Streaming depends on something that can disappear while it is happening, which
+/// local playback does not. Three things follow from that, and they are the only
+/// places the two paths differ:
+///
+/// - The queue is built from what can play *now*, and rebuilt — without losing its
+///   ids — whenever that changes. `ServerReachability` tells the engine; the engine
+///   never asks on the main path.
+/// - A stream that has not produced audio within `streamDeadline` is declared
+///   failed and playback moves on. There is no state in which the app waits forever
+///   for a server that has gone quiet.
+/// - Nothing streamed is written to disk. `AVPlayerItem` over HTTP buffers in
+///   memory and discards what it has played; downloading stays an explicit act.
 ///
 /// Created once per process by `AppModel`, like `DownloadManager`, so the player,
 /// the audio session, the remote commands and Now Playing outlive every view.
@@ -63,6 +85,19 @@ final class PlaybackEngine {
     private(set) var message: String?
     /// Why the lock screen has no artwork, when a cover file exists but cannot be read.
     private(set) var artworkProblem: String?
+    /// The current track is coming from the server rather than from a file here.
+    private(set) var isStreaming = false
+    /// A stream is waiting for audio. Always bounded: `streamWatchdog` ends it one
+    /// way or the other within `streamDeadline`, so this can never be a spinner that
+    /// stays up.
+    private(set) var isBuffering = false
+
+    /// How long a stream may go without producing audio before it is declared
+    /// failed: from the moment it is asked to play, and again from every stall.
+    ///
+    /// It is a deadline, not a poll — one sleep, armed by an event, cancelled the
+    /// moment the player reports it is playing.
+    static let streamDeadline: TimeInterval = 15
 
     /// The queue before shuffling (album or playlist order), so turning shuffle off
     /// restores it.
@@ -73,10 +108,22 @@ final class PlaybackEngine {
     @ObservationIgnored private var queueSources: [Int] = []
     @ObservationIgnored private let player = AVQueuePlayer()
     @ObservationIgnored private let context: ModelContext
+    /// Only to build the URL a stream is read from, and to say so when there is no
+    /// address to build one out of.
+    @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private let downloads: DownloadManager
-    /// Which queue position each AVPlayerItem in the player plays. A position, not a
-    /// track id, so a track that appears twice is still tracked correctly.
-    @ObservationIgnored private var itemQueueIndices: [ObjectIdentifier: Int] = [:]
+    @ObservationIgnored private let reachability: ServerReachability
+    /// What each AVPlayerItem in the player is playing: its queue position — a
+    /// position, not a track id, so a track that appears twice is still tracked
+    /// correctly — and whether it came from the server. The second half is why
+    /// `itemFailed` can tell a missing local file from a stream that dropped, and
+    /// mark the track failed only in the first case.
+    @ObservationIgnored private var itemQueueIndices: [ObjectIdentifier: QueuedItem] = [:]
+    /// The next queue position that can play right now, worked out with the upcoming
+    /// item and kept, so `hasNext` and the lock screen's next button can answer
+    /// without walking the queue and fetching every track again.
+    @ObservationIgnored private var nextPlayable: Int?
+    @ObservationIgnored private var streamWatchdog: Task<Void, Never>?
     @ObservationIgnored private var observations: [NSKeyValueObservation] = []
     @ObservationIgnored private var notificationObservers: [any NSObjectProtocol] = []
     @ObservationIgnored private var commandTargets: [(MPRemoteCommand, Any)] = []
@@ -103,9 +150,22 @@ final class PlaybackEngine {
         static let all = [queue, albumOrder, index, position, shuffle, repeatMode, queueSources]
     }
 
-    init(context: ModelContext, downloads: DownloadManager) {
+    /// One AVPlayerItem's place in the queue, and where its audio comes from.
+    private struct QueuedItem {
+        let index: Int
+        let isStream: Bool
+    }
+
+    init(
+        context: ModelContext,
+        settings: AppSettings,
+        downloads: DownloadManager,
+        reachability: ServerReachability
+    ) {
         self.context = context
+        self.settings = settings
         self.downloads = downloads
+        self.reachability = reachability
         configureAudioSession()
         installObservers()
         installRemoteCommands()
@@ -124,20 +184,66 @@ final class PlaybackEngine {
     }
 
     var hasNext: Bool {
-        nextIndex(after: currentIndex) != nil
+        nextPlayable != nil
+    }
+
+    // MARK: - What can play right now
+
+    /// The one rule the whole feature rests on.
+    ///
+    /// 1. The file is on this phone → it plays, from the file, even with the server
+    ///    one hop away.
+    /// 2. No file, and the server both has the track and is answering → it streams.
+    /// 3. Otherwise it cannot play now, and whatever asked says so instead of
+    ///    starting something that would hang.
+    ///
+    /// "The server has the track" is `serverDroppedAt == nil`: a copy this phone
+    /// claimed as its only one, and a favourite the server never heard of, have no
+    /// file at `/tracks/{id}/file` to stream. "The server is answering" is the last
+    /// answer `ServerReachability` recorded; before the first probe of a session it
+    /// counts as yes, because attempting is the fastest way to find out and the
+    /// attempt is bounded by `streamDeadline`.
+    func canPlayNow(_ track: StoredTrack) -> Bool {
+        if track.downloadState == .downloaded { return true }
+        return canStream(track)
+    }
+
+    private func canStream(_ track: StoredTrack) -> Bool {
+        track.downloadState != .downloaded
+            && track.serverDroppedAt == nil
+            && reachability.mayStream
+            && !settings.savedAddress.isEmpty
+    }
+
+    /// Why a track will not play, as the sentence the user reads.
+    private func cannotPlay(_ track: StoredTrack) -> APIError {
+        let name = track.title ?? track.serverID
+        if track.serverDroppedAt != nil {
+            return .invalidInput(
+                "“\(name)” non è più sul server e non è sul telefono",
+                detail: "Il file di questo brano non esiste da nessuna parte: fallo riscaricare dal server dai Preferiti per poterlo ascoltare."
+            )
+        }
+        if settings.savedAddress.isEmpty {
+            return .invalidInput(
+                "“\(name)” è solo sul server, e non c'è un indirizzo del server",
+                detail: "Imposta l'indirizzo in Impostazioni per riprodurlo in streaming, oppure scaricalo sul telefono."
+            )
+        }
+        return .invalidInput(
+            "“\(name)” è solo sul server, che ora non risponde",
+            detail: "Senza server non si può riprodurre in streaming: controlla la rete e, se lo usi, che Tailscale sia connesso, poi riprova. I brani scaricati sul telefono si ascoltano comunque."
+        )
     }
 
     // MARK: - Actions
 
-    /// Plays `track` and queues the downloaded tracks after it in its album.
+    /// Plays `track` and queues the playable tracks after it in its album.
     func play(track: StoredTrack) {
         lastError = nil
         message = nil
-        guard track.downloadState == .downloaded else {
-            lastError = .invalidInput(
-                "“\(track.title ?? track.serverID)” non è scaricato",
-                detail: "Si possono riprodurre solo i brani salvati sul telefono: scaricalo prima."
-            )
+        guard canPlayNow(track) else {
+            lastError = cannotPlay(track)
             return
         }
         // From the store, not from `album.tracks`: a to-many relationship is a
@@ -147,17 +253,20 @@ final class PlaybackEngine {
             StoredTrack.albumOrder(ModelLookup.members(of: album, in: context))
         } ?? [track]
         let start = albumTracks.firstIndex { $0.serverID == track.serverID } ?? 0
-        var ids = albumTracks[start...].filter { $0.downloadState == .downloaded }.map(\.serverID)
+        var ids = albumTracks[start...].filter { canPlayNow($0) }.map(\.serverID)
         if ids.first != track.serverID {
             ids.insert(track.serverID, at: 0)
         }
         startQueue(ids, at: 0)
     }
 
-    /// Plays a playlist: the queue is its downloaded tracks in playlist order, and
-    /// playback starts at the entry at `startOffset` in `tracks`. Tracks that are not
-    /// downloaded are left out. An offset rather than a track, because a playlist can
-    /// hold the same track twice.
+    /// Plays a playlist: the queue is the tracks that can play now, in playlist
+    /// order, and playback starts at the entry at `startOffset` in `tracks`. An
+    /// offset rather than a track, because a playlist can hold the same track twice.
+    ///
+    /// Built from availability at the moment of the tap, which for a streamed track
+    /// means "the server was answering then". If that stops being true the queue is
+    /// worked out again rather than rebuilt: see `serverReachabilityChanged`.
     func play(playlistTracks tracks: [StoredTrack], startingAt startOffset: Int) {
         lastError = nil
         message = nil
@@ -166,39 +275,33 @@ final class PlaybackEngine {
             return
         }
         let start = tracks[startOffset]
-        guard start.downloadState == .downloaded else {
-            lastError = .invalidInput(
-                "“\(start.title ?? start.serverID)” non è scaricato",
-                detail: "Si possono riprodurre solo i brani salvati sul telefono: scaricalo prima."
-            )
+        guard canPlayNow(start) else {
+            lastError = cannotPlay(start)
             return
         }
         var ids: [String] = []
         var startIndex: Int?
         // `tracks` was read from the store by the caller at the moment of the tap.
-        for (offset, track) in tracks.enumerated() where track.downloadState == .downloaded {
+        for (offset, track) in tracks.enumerated() where canPlayNow(track) {
             if offset == startOffset {
                 startIndex = ids.count
             }
             ids.append(track.serverID)
         }
         guard let startIndex else {
-            lastError = .invalidInput("Impossibile avviare la riproduzione", detail: "Il brano scelto non risulta tra quelli scaricati: controlla che sia scaricato e riprova.")
+            lastError = .invalidInput("Impossibile avviare la riproduzione", detail: "Il brano scelto non risulta tra quelli riproducibili adesso: scaricalo sul telefono, oppure riprova quando il server risponde.")
             return
         }
         startQueue(ids, at: startIndex)
     }
 
-    /// Appends a downloaded track to the end of the queue, after anything shuffled.
-    /// With nothing loaded it becomes the queue, paused: adding never starts
-    /// playback by itself.
+    /// Appends a track that can play now to the end of the queue, after anything
+    /// shuffled. With nothing loaded it becomes the queue, paused: adding never
+    /// starts playback by itself.
     func addToQueue(_ track: StoredTrack) {
         lastError = nil
-        guard track.downloadState == .downloaded else {
-            lastError = .invalidInput(
-                "“\(track.title ?? track.serverID)” non è scaricato",
-                detail: "Si possono mettere in coda solo i brani salvati sul telefono: scaricalo prima."
-            )
+        guard canPlayNow(track) else {
+            lastError = cannotPlay(track)
             return
         }
         guard currentIndex != nil, !queue.isEmpty else {
@@ -263,18 +366,7 @@ final class PlaybackEngine {
         queue = newQueue
 
         guard !queue.isEmpty else {
-            replacingItems = true
-            player.removeAllItems()
-            itemQueueIndices.removeAll()
-            replacingItems = false
-            wantsToPlay = false
-            isPlaying = false
-            currentIndex = nil
-            elapsed = 0
-            duration = 0
-            message = "La coda si è svuotata: i brani che conteneva sono stati eliminati dal server."
-            updateNowPlaying()
-            persist()
+            stopCleanly(message: "La coda si è svuotata: i brani che conteneva sono stati eliminati dal server.")
             return
         }
 
@@ -288,7 +380,8 @@ final class PlaybackEngine {
         if let playing = player.currentItem, let survivingCurrent {
             // Only the item playing now keeps its place; the one preloaded after it
             // was queued for a position that has moved, so it is worked out again.
-            itemQueueIndices = [ObjectIdentifier(playing): survivingCurrent]
+            let wasStream = itemQueueIndices[ObjectIdentifier(playing)]?.isStream ?? false
+            itemQueueIndices = [ObjectIdentifier(playing): QueuedItem(index: survivingCurrent, isStream: wasStream)]
             for item in player.items() where item !== playing {
                 player.remove(item)
             }
@@ -296,6 +389,113 @@ final class PlaybackEngine {
             itemQueueIndices.removeAll()
         }
         preloadNext()
+        updateNowPlaying()
+        persist()
+    }
+
+    // MARK: - Used by ServerReachability
+
+    /// The server appeared or went away. Called by `AppModel`'s wiring whenever the
+    /// recorded answer actually changes, never on a repeat.
+    ///
+    /// The queue keeps its ids either way. A queue is a list of tracks the user
+    /// asked for, not a list of tracks that happen to be reachable this second:
+    /// rebuilding it would lose the order they chose, and the tracks would have to
+    /// be found again when the server came back. What changes is which positions can
+    /// produce audio, and that is worked out in `load` and `preloadNext`, which walk
+    /// forward past anything `source(for:)` says is unavailable.
+    ///
+    /// So losing the server does three things, in this order:
+    ///
+    /// 1. If the current track is streaming, it stops — cleanly, not as a failure:
+    ///    the player's items go, the position is not persisted as a half-second of
+    ///    a stream, and playback continues from the next position that can still
+    ///    play. That is a downloaded track, because nothing else can play with the
+    ///    server gone. If it was playing, the next one plays; if it was paused, the
+    ///    next one is loaded paused. If nothing in the queue is on the phone,
+    ///    playback stops and Now Playing clears, with a sentence saying why.
+    /// 2. If the current track is local, it is not touched at all — not a pause, not
+    ///    a gap. Only the item preloaded after it may be a stream, so that one is
+    ///    worked out again and becomes the next downloaded track instead.
+    /// 3. Either way the lock screen follows, through the same `updateNowPlaying`
+    ///    every other change goes through: the next button switches off when nothing
+    ///    playable is left, and the title and artwork are the ones actually playing.
+    ///
+    /// The server coming back is the mirror image and much quieter: nothing that is
+    /// playing is disturbed, the upcoming item is worked out again so a streamable
+    /// track is available once more, and the user is told the queue is whole again.
+    func serverReachabilityChanged(reachable: Bool) {
+        guard currentIndex != nil, !queue.isEmpty else {
+            nextPlayable = nil
+            updateCommands()
+            return
+        }
+        let streamsInQueue = queue.contains { id in
+            guard let track = track(id: id) else { return false }
+            return track.downloadState != .downloaded && track.serverDroppedAt == nil
+        }
+        guard streamsInQueue else { return }
+
+        if reachable {
+            preloadNext()
+            updateNowPlaying()
+            message = "Il server è di nuovo raggiungibile: i brani della coda che sono solo sul server tornano riproducibili."
+            return
+        }
+
+        guard isStreaming, let index = currentIndex else {
+            // A local track keeps playing untouched; only what comes after it has to
+            // be chosen again.
+            preloadNext()
+            updateNowPlaying()
+            message = "Il server non è più raggiungibile: la riproduzione continua, ma i brani della coda che sono solo sul server vengono saltati finché non torna."
+            return
+        }
+
+        let name = currentTrack?.title ?? queue[index]
+        let resume = wantsToPlay
+        stopStreamedItems()
+        guard let landing = nextPlayableIndex(after: index) else {
+            stopCleanly(
+                message: "“\(name)” era in streaming e il server non è più raggiungibile: la riproduzione si è fermata, perché nella coda non c'è nessun brano scaricato su questo telefono."
+            )
+            return
+        }
+        message = "“\(name)” era in streaming e il server non è più raggiungibile: la riproduzione continua dal primo brano della coda che è sul telefono."
+        load(index: landing, position: 0, autoplay: resume)
+    }
+
+    /// Takes every streamed item out of the player without treating it as a failure.
+    /// Playback is about to be moved, or stopped, on purpose.
+    private func stopStreamedItems() {
+        disarmStreamWatchdog()
+        player.pause()
+        replacingItems = true
+        player.removeAllItems()
+        itemQueueIndices.removeAll()
+        replacingItems = false
+        isStreaming = false
+        isBuffering = false
+        pendingSeek = nil
+    }
+
+    /// Nothing left to play: the player is emptied, the lock screen cleared, and the
+    /// sentence explains it. Shared by every place playback runs out.
+    private func stopCleanly(message text: String) {
+        disarmStreamWatchdog()
+        replacingItems = true
+        player.removeAllItems()
+        itemQueueIndices.removeAll()
+        replacingItems = false
+        wantsToPlay = false
+        isPlaying = false
+        isStreaming = false
+        isBuffering = false
+        currentIndex = nil
+        elapsed = 0
+        duration = 0
+        nextPlayable = nil
+        message = text
         updateNowPlaying()
         persist()
     }
@@ -335,12 +535,18 @@ final class PlaybackEngine {
         }
         wantsToPlay = true
         player.play()
+        if isStreaming {
+            // From here the server has `streamDeadline` seconds to produce audio.
+            isBuffering = player.timeControlStatus != .playing
+            armStreamWatchdog(reason: .starting)
+        }
         updateNowPlaying()
         persist()
     }
 
     func pause() {
         wantsToPlay = false
+        disarmStreamWatchdog()
         player.pause()
         updateNowPlaying()
         persist()
@@ -356,8 +562,10 @@ final class PlaybackEngine {
 
     @discardableResult
     func next() -> Bool {
-        guard let index = nextIndex(after: currentIndex) else {
-            message = "Questo è l'ultimo brano della coda."
+        guard let index = nextPlayable else {
+            message = reachability.isReachable == false && currentIndex != nil
+                ? "Dopo questo non c'è altro da riprodurre adesso: i brani che restano nella coda sono solo sul server, che non è raggiungibile."
+                : "Questo è l'ultimo brano della coda."
             return false
         }
         load(index: index, position: 0, autoplay: wantsToPlay)
@@ -373,7 +581,7 @@ final class PlaybackEngine {
             seek(to: 0)
             return true
         }
-        guard let index = previousIndex(before: currentIndex) else {
+        guard let index = previousPlayableIndex(before: currentIndex) else {
             seek(to: 0)
             return true
         }
@@ -390,6 +598,11 @@ final class PlaybackEngine {
             pendingSeek = target
         }
         elapsed = target
+        if isStreaming, wantsToPlay {
+            // The server has to serve a new Range from here; the same deadline
+            // applies to that as to starting.
+            armStreamWatchdog(reason: .starting)
+        }
         updateNowPlaying(position: target)
         persist()
     }
@@ -408,7 +621,8 @@ final class PlaybackEngine {
             }
             queue = queueSources.map { albumOrder[$0] }
             if let current = player.currentItem, let currentIndex {
-                itemQueueIndices[ObjectIdentifier(current)] = currentIndex
+                let wasStream = itemQueueIndices[ObjectIdentifier(current)]?.isStream ?? false
+                itemQueueIndices[ObjectIdentifier(current)] = QueuedItem(index: currentIndex, isStream: wasStream)
             }
             preloadNext()
             updateNowPlaying()
@@ -454,14 +668,47 @@ final class PlaybackEngine {
 
     // MARK: - Loading items
 
-    private enum Playable {
+    /// Where one track's audio comes from, decided in one place.
+    private enum Source {
+        /// A file in Application Support/Music.
         case file(URL)
-        case notDownloaded
+        /// GET /tracks/{id}/file on the saved server address.
+        case stream(URL)
+        /// Not now: no file here and no file there, or the server is not answering.
+        case unavailable
+        /// The track says it is downloaded and its file is not readable. Recorded on
+        /// the track so the row offers to download it again.
         case unplayable(APIError)
+
+        /// The URL to play and whether it comes over the network, for the two cases
+        /// that produce audio at all.
+        var playable: (url: URL, isStream: Bool)? {
+            switch self {
+            case .file(let url): return (url, false)
+            case .stream(let url): return (url, true)
+            case .unavailable, .unplayable: return nil
+            }
+        }
     }
 
-    private func playableFile(for track: StoredTrack) -> Playable {
-        guard track.downloadState == .downloaded else { return .notDownloaded }
+    /// The rule of `canPlayNow`, with the URL attached. The only code that decides
+    /// between a file and a stream.
+    private func source(for track: StoredTrack) -> Source {
+        if track.downloadState == .downloaded {
+            return localFile(for: track)
+        }
+        guard canStream(track) else { return .unavailable }
+        do {
+            let client = try settings.makeClient()
+            return .stream(try client.trackFileURL(trackID: track.serverID))
+        } catch {
+            // Only an unusable saved address reaches here, and `canPlayNow` already
+            // called it unplayable, so the row said so before the tap.
+            return .unavailable
+        }
+    }
+
+    private func localFile(for track: StoredTrack) -> Source {
         let title = "Could not play “\(track.title ?? track.serverID)”"
         let marked = "The track was marked failed (file missing). Download it again from the Library tab."
         let missing = "Impossibile riprodurre “\(track.title ?? track.serverID)”: il file audio non è più sul telefono, quindi il brano è segnato come da riscaricare. Scaricalo di nuovo."
@@ -489,14 +736,34 @@ final class PlaybackEngine {
         return .file(url)
     }
 
+    /// An `AVPlayerItem` for a source, and nothing more.
+    ///
+    /// A stream is a plain `AVPlayerItem` over HTTP. Nothing here uses
+    /// `AVAssetDownloadURLSession` or an `AVAssetResourceLoaderDelegate`, which are
+    /// the two ways AVFoundation writes media to disk, so what is streamed is
+    /// buffered in memory and discarded — downloading a track stays something the
+    /// user asks for, in Preferiti, with a destination.
+    ///
+    /// `preferPreciseDurationAndTiming` is off for a stream: it would make
+    /// AVFoundation read more of the file up front to build an exact timing map, and
+    /// the duration is already known from the library.
+    private func makeItem(url: URL, isStream: Bool) -> AVPlayerItem {
+        guard isStream else { return AVPlayerItem(url: url) }
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
+        return AVPlayerItem(asset: asset)
+    }
+
     /// Replaces the player's items with the track at `index`, skipping forward past
-    /// tracks that are not downloaded or whose file is missing.
+    /// tracks that cannot play now — not on the phone and not reachable on the
+    /// server, or downloaded with a file that has gone.
     private func load(index: Int, position: TimeInterval, autoplay: Bool) {
+        disarmStreamWatchdog()
         replacingItems = true
         player.removeAllItems()
         itemQueueIndices.removeAll()
         replacingItems = false
         pendingSeek = nil
+        isBuffering = false
 
         var candidate: Int? = queue.indices.contains(index) ? index : nil
         var tried = 0
@@ -506,11 +773,12 @@ final class PlaybackEngine {
                 candidate = nextIndex(after: target)
                 continue
             }
-            switch playableFile(for: track) {
-            case .file(let url):
-                let item = AVPlayerItem(url: url)
-                itemQueueIndices[ObjectIdentifier(item)] = target
+            let source = self.source(for: track)
+            if let playable = source.playable {
+                let item = makeItem(url: playable.url, isStream: playable.isStream)
+                itemQueueIndices[ObjectIdentifier(item)] = QueuedItem(index: target, isStream: playable.isStream)
                 currentIndex = target
+                isStreaming = playable.isStream
                 duration = Double(track.durationS ?? 0)
                 elapsed = target == index ? position : 0
                 pendingSeek = elapsed > 0 ? elapsed : nil
@@ -524,57 +792,94 @@ final class PlaybackEngine {
                     persist()
                 }
                 return
-            case .notDownloaded:
-                candidate = nextIndex(after: target)
-            case .unplayable(let error):
-                recordUnplayable(track, error: error)
-                candidate = nextIndex(after: target)
             }
+            if case .unplayable(let error) = source {
+                recordUnplayable(track, error: error)
+            }
+            candidate = nextIndex(after: target)
         }
 
-        wantsToPlay = false
-        isPlaying = false
-        currentIndex = nil
-        message = "Nella coda non resta niente da riprodurre: i brani successivi non sono scaricati o i loro file mancano."
-        updateNowPlaying()
-        persist()
+        stopCleanly(message: nothingLeftMessage)
+    }
+
+    /// Why the queue ran out, told apart so the sentence is the true one.
+    private var nothingLeftMessage: String {
+        if settings.savedAddress.isEmpty {
+            return "Nella coda non resta niente da riprodurre: i brani rimasti non sono sul telefono e non c'è un indirizzo del server da cui riprodurli in streaming — impostalo in Impostazioni."
+        }
+        if reachability.isReachable == false {
+            return "Nella coda non resta niente da riprodurre adesso: i brani rimasti sono solo sul server, che non è raggiungibile."
+        }
+        return "Nella coda non resta niente da riprodurre: i brani successivi non sono scaricati o i loro file mancano."
+    }
+
+    /// The next position after `index` that can produce audio right now, or nil.
+    /// Reads the store, so it is worked out once per change and kept in
+    /// `nextPlayable` rather than asked on every draw.
+    private func nextPlayableIndex(after index: Int) -> Int? {
+        var candidate = nextIndex(after: index)
+        var tried = 0
+        while let target = candidate, tried < queue.count {
+            tried += 1
+            if let track = track(id: queue[target]), canPlayNow(track) {
+                return target
+            }
+            candidate = nextIndex(after: target)
+        }
+        return nil
     }
 
     /// Keeps exactly one upcoming item after the current one, so AVQueuePlayer
-    /// moves to the next track without a gap, including with the screen locked.
+    /// moves to the next track without a gap, including with the screen locked, and
+    /// records which position that is so `hasNext` can answer honestly.
+    ///
+    /// A streamed track is preloaded the same way a local one is. AVFoundation
+    /// starts filling its buffer as soon as the item is in the player, which is what
+    /// makes a stream follow a track without a pause — and it is still only one item
+    /// ahead, so a queue of streams never opens more than two connections.
     private func preloadNext() {
         guard let current = player.currentItem, let index = currentIndex else {
+            nextPlayable = nil
             updateCommands()
             return
         }
         player.actionAtItemEnd = repeatMode == .one ? .pause : .advance
         let upcoming = player.items().filter { $0 !== current }
 
-        var wanted: (index: Int, url: URL)?
-        if repeatMode != .one {
-            var candidate = nextIndex(after: index)
-            var tried = 0
-            while let target = candidate, tried < queue.count {
-                tried += 1
-                guard let track = track(id: queue[target]) else {
-                    candidate = nextIndex(after: target)
-                    continue
-                }
-                switch playableFile(for: track) {
-                case .file(let url):
-                    wanted = (index: target, url: url)
-                case .notDownloaded:
-                    break
-                case .unplayable(let error):
-                    recordUnplayable(track, error: error)
-                }
-                if wanted != nil { break }
+        var wanted: (index: Int, url: URL, isStream: Bool)?
+        var candidate = nextIndex(after: index)
+        var tried = 0
+        while let target = candidate, tried < queue.count {
+            tried += 1
+            guard let track = track(id: queue[target]) else {
                 candidate = nextIndex(after: target)
+                continue
             }
+            let source = self.source(for: track)
+            if let playable = source.playable {
+                wanted = (index: target, url: playable.url, isStream: playable.isStream)
+                break
+            }
+            if case .unplayable(let error) = source {
+                recordUnplayable(track, error: error)
+            }
+            candidate = nextIndex(after: target)
+        }
+        // What the next button may go to, whether or not it was preloaded: with
+        // repeat-one nothing is queued after the current item, but next still works.
+        nextPlayable = wanted?.index
+
+        guard repeatMode != .one else {
+            for item in upcoming {
+                player.remove(item)
+                itemQueueIndices[ObjectIdentifier(item)] = nil
+            }
+            updateCommands()
+            return
         }
 
         if upcoming.count == 1, let only = upcoming.first, let wanted,
-           itemQueueIndices[ObjectIdentifier(only)] == wanted.index {
+           itemQueueIndices[ObjectIdentifier(only)]?.index == wanted.index {
             updateCommands()
             return
         }
@@ -583,8 +888,8 @@ final class PlaybackEngine {
             itemQueueIndices[ObjectIdentifier(item)] = nil
         }
         if let wanted {
-            let item = AVPlayerItem(url: wanted.url)
-            itemQueueIndices[ObjectIdentifier(item)] = wanted.index
+            let item = makeItem(url: wanted.url, isStream: wanted.isStream)
+            itemQueueIndices[ObjectIdentifier(item)] = QueuedItem(index: wanted.index, isStream: wanted.isStream)
             player.insert(item, after: current)
         }
         updateCommands()
@@ -629,7 +934,86 @@ final class PlaybackEngine {
                 guard let item = notification.object as? AVPlayerItem else { return }
                 itemFailed(item, error: notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)
             },
+            // A stream that ran dry mid-track. AVFoundation will keep trying
+            // forever; the watchdog gives it `streamDeadline` and then moves on.
+            PlaybackBridge.observe(AVPlayerItem.playbackStalledNotification, object: nil) { [self] notification in
+                guard let item = notification.object as? AVPlayerItem, item === player.currentItem else { return }
+                guard itemQueueIndices[ObjectIdentifier(item)]?.isStream == true else { return }
+                isBuffering = true
+                armStreamWatchdog(reason: .stalled)
+            },
         ]
+    }
+
+    // MARK: - The streaming deadline
+
+    /// Why a stream is being waited on, which decides the sentence if it runs out.
+    private enum StreamWait {
+        case starting
+        case stalled
+    }
+
+    /// Gives the current stream `streamDeadline` seconds to produce audio.
+    ///
+    /// One sleep, armed by an event — asking a stream to play, or a stall — and
+    /// cancelled the moment the player reports it is playing. It is what makes "no
+    /// spinner that waits forever" true: every wait on the network ends in audio or
+    /// in a sentence, inside fifteen seconds.
+    private func armStreamWatchdog(reason: StreamWait) {
+        guard let item = player.currentItem,
+              itemQueueIndices[ObjectIdentifier(item)]?.isStream == true else {
+            disarmStreamWatchdog()
+            return
+        }
+        streamWatchdog?.cancel()
+        let waiting = ObjectIdentifier(item)
+        streamWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.streamDeadline))
+            guard !Task.isCancelled, let self else { return }
+            self.streamDeadlineExpired(for: waiting, reason: reason)
+        }
+    }
+
+    private func disarmStreamWatchdog() {
+        streamWatchdog?.cancel()
+        streamWatchdog = nil
+        isBuffering = false
+    }
+
+    /// The stream had its fifteen seconds. Say so and move on.
+    private func streamDeadlineExpired(for waiting: ObjectIdentifier, reason: StreamWait) {
+        guard let item = player.currentItem, ObjectIdentifier(item) == waiting else { return }
+        guard let slot = itemQueueIndices[waiting], slot.isStream, queue.indices.contains(slot.index) else { return }
+        guard player.timeControlStatus != .playing else {
+            disarmStreamWatchdog()
+            return
+        }
+        let trackID = queue[slot.index]
+        let name = track(id: trackID)?.title ?? trackID
+        let sentence: String
+        switch reason {
+        case .starting:
+            sentence = "Lo streaming di “\(name)” non è partito: il server non ha mandato audio entro \(Int(Self.streamDeadline)) secondi."
+        case .stalled:
+            sentence = "Lo streaming di “\(name)” si è interrotto: il server ha smesso di mandare audio per \(Int(Self.streamDeadline)) secondi."
+        }
+        // The server disagreed with what was on file about it, so ask it again. The
+        // answer, when it arrives, may take the rest of the queue's streams with it.
+        reachability.streamingFailed()
+        streamFailed(
+            at: slot.index,
+            error: APIError(
+                kind: .transport,
+                title: "Streaming stalled for “\(name)”",
+                url: (item.asset as? AVURLAsset)?.url.absoluteString,
+                details: [
+                    "No audio for \(Int(Self.streamDeadline))s while \(reason == .starting ? "starting" : "playing").",
+                    "AVPlayer timeControlStatus: \(player.timeControlStatus.rawValue).",
+                    "AVPlayerItem isPlaybackLikelyToKeepUp: \(item.isPlaybackLikelyToKeepUp), isPlaybackBufferEmpty: \(item.isPlaybackBufferEmpty).",
+                ],
+                message: sentence + " Controlla la rete e, se lo usi, che Tailscale sia connesso; per ascoltarlo senza rete scaricalo sul telefono."
+            )
+        )
     }
 
     private func currentItemChanged() {
@@ -638,18 +1022,26 @@ final class PlaybackEngine {
             queueEnded()
             return
         }
-        guard let index = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(index) else {
+        guard let slot = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(slot.index) else {
             report("The player moved to an item Prisma did not queue", error: nil,
                    message: "Il lettore è passato a un brano che l'app non aveva messo in coda: tocca un brano per ripartire.")
             return
         }
         let previousIndex = currentIndex
-        currentIndex = index
+        currentIndex = slot.index
+        isStreaming = slot.isStream
         let live = Set(player.items().map { ObjectIdentifier($0) })
         itemQueueIndices = itemQueueIndices.filter { live.contains($0.key) }
-        if previousIndex != index {
+        if previousIndex != slot.index {
             elapsed = 0
             duration = Double(currentTrack?.durationS ?? 0)
+        }
+        // The queue player moved on by itself, with the screen possibly locked: if
+        // what it moved to is a stream, it is on the clock from now.
+        if slot.isStream, wantsToPlay {
+            armStreamWatchdog(reason: .starting)
+        } else {
+            disarmStreamWatchdog()
         }
         preloadNext()
         updateNowPlaying()
@@ -681,7 +1073,17 @@ final class PlaybackEngine {
     }
 
     private func timeControlStatusChanged() {
-        let playing = player.timeControlStatus != .paused
+        let status = player.timeControlStatus
+        // Only a stream can be waiting on the network; a local file either plays or
+        // it does not.
+        isBuffering = isStreaming && status == .waitingToPlayAtSpecifiedRate
+        if status == .playing {
+            // Audio is coming out: the deadline has been met.
+            disarmStreamWatchdog()
+        } else if isStreaming, wantsToPlay, status == .waitingToPlayAtSpecifiedRate {
+            armStreamWatchdog(reason: .starting)
+        }
+        let playing = status != .paused
         guard playing != isPlaying else { return }
         isPlaying = playing
         updateNowPlaying()
@@ -721,14 +1123,24 @@ final class PlaybackEngine {
         load(index: index, position: 0, autoplay: false)
     }
 
-    /// The file could not be decoded or read. Recorded on the track, shown, and
-    /// playback moves on to the next track.
+    /// The item could not be played. What that means depends on where it was coming
+    /// from, so the two are told apart here and nowhere else.
+    ///
+    /// A **file** that fails is a file that is missing or damaged: the track is
+    /// marked as needing downloading again, because that is a lasting fact about
+    /// this phone.
+    ///
+    /// A **stream** that fails says nothing about the track. The server may have
+    /// gone, the network may have dropped, or the track may have been deleted on the
+    /// server since the queue was built — a mid-stream 404. None of those is a
+    /// reason to mark a local download failed, and there is no local download to
+    /// mark. It is reported, the server is asked again, and playback moves on.
     private func itemFailed(_ item: AVPlayerItem, error: Error?) {
-        guard let failedIndex = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(failedIndex) else { return }
-        let trackID = queue[failedIndex]
+        guard let slot = itemQueueIndices[ObjectIdentifier(item)], queue.indices.contains(slot.index) else { return }
+        let trackID = queue[slot.index]
         let track = self.track(id: trackID)
-        let resume = wantsToPlay
-        let title = "Could not play “\(track?.title ?? trackID)”"
+        let name = track?.title ?? trackID
+        let url = (item.asset as? AVURLAsset)?.url
         var details: [String] = []
         if let error {
             let nsError = error as NSError
@@ -742,32 +1154,54 @@ final class PlaybackEngine {
         } else {
             details.append("AVFoundation reported a failure without an error.")
         }
-        let path = (item.asset as? AVURLAsset)?.url.path(percentEncoded: false)
 
+        guard !slot.isStream else {
+            details.append("The audio was being streamed from the server, not played from a file on this iPhone, so nothing was marked as needing a new download.")
+            reachability.streamingFailed()
+            streamFailed(at: slot.index, error: APIError(
+                kind: .transport,
+                title: "Streaming failed for “\(name)”",
+                url: url?.absoluteString,
+                details: details,
+                message: "Lo streaming di “\(name)” non è riuscito: il server non ha mandato il file, o ha smesso a metà. Se il brano non è più sul server, sincronizza la libreria; per ascoltarlo senza rete scaricalo sul telefono."
+            ))
+            return
+        }
+
+        let resume = wantsToPlay
+        let title = "Could not play “\(name)”"
+        let path = url?.path(percentEncoded: false)
         if let track, track.downloadState == .downloaded {
             details.append("The audio file is missing or unreadable, so the track was marked failed (file missing). Download it again from the Library tab.")
             recordUnplayable(track, error: APIError(
                 kind: .storage, title: title, url: path, details: details,
-                message: "Impossibile riprodurre “\(track.title ?? trackID)”: il file audio manca o è danneggiato, quindi il brano è segnato come da riscaricare. Scaricalo di nuovo."
+                message: "Impossibile riprodurre “\(name)”: il file audio manca o è danneggiato, quindi il brano è segnato come da riscaricare. Scaricalo di nuovo."
             ))
         } else {
             details.append("The track is no longer downloaded on this iPhone; it was removed or re-synced during playback.")
             lastError = APIError(
                 kind: .storage, title: title, url: path, details: details,
-                message: "Impossibile riprodurre “\(track?.title ?? trackID)”: il brano è stato rimosso dal telefono o risincronizzato durante la riproduzione. Scaricalo di nuovo."
+                message: "Impossibile riprodurre “\(name)”: il brano è stato rimosso dal telefono o risincronizzato durante la riproduzione. Scaricalo di nuovo."
             )
         }
 
-        guard let next = nextIndex(after: failedIndex) else {
-            replacingItems = true
-            player.removeAllItems()
-            itemQueueIndices.removeAll()
-            replacingItems = false
-            wantsToPlay = false
-            isPlaying = false
-            currentIndex = nil
-            updateNowPlaying()
-            persist()
+        guard let next = nextPlayableIndex(after: slot.index) else {
+            stopCleanly(message: nothingLeftMessage)
+            return
+        }
+        load(index: next, position: 0, autoplay: resume)
+    }
+
+    /// A stream at `index` gave up. Show why, then carry on from the next position
+    /// that can still play — which, with the server gone, is the next track on the
+    /// phone. Nothing is written to the track: a stream failing is about the network,
+    /// not about this phone's copy.
+    private func streamFailed(at index: Int, error: APIError) {
+        disarmStreamWatchdog()
+        let resume = wantsToPlay
+        lastError = error
+        guard let next = nextPlayableIndex(after: index) else {
+            stopCleanly(message: nothingLeftMessage)
             return
         }
         load(index: next, position: 0, autoplay: resume)
@@ -1028,6 +1462,22 @@ final class PlaybackEngine {
         guard let index, !queue.isEmpty else { return nil }
         if index > 0 { return index - 1 }
         return repeatMode == .all && queue.count > 1 ? queue.count - 1 : nil
+    }
+
+    /// The nearest earlier position that can produce audio right now, so the back
+    /// button walks past a streamed track the server can no longer serve instead of
+    /// landing on it and failing.
+    private func previousPlayableIndex(before index: Int?) -> Int? {
+        var candidate = previousIndex(before: index)
+        var tried = 0
+        while let target = candidate, tried < queue.count {
+            tried += 1
+            if let track = track(id: queue[target]), canPlayNow(track) {
+                return target
+            }
+            candidate = previousIndex(before: target)
+        }
+        return nil
     }
 
     private func track(id: String) -> StoredTrack? {
