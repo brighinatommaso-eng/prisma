@@ -112,6 +112,7 @@ struct PlaylistsContent: View {
     @State private var newName = ""
     @State private var renaming: PlaylistSummaryData?
     @State private var renameText = ""
+    @State private var confirmation: DestructiveConfirmation?
 
     var body: some View {
         // The one place this filter reads the store.
@@ -148,6 +149,7 @@ struct PlaylistsContent: View {
             }
             Button("Annulla", role: .cancel) {}
         }
+        .destructiveConfirmation($confirmation)
 
         PlaylistStoreMessages()
 
@@ -166,9 +168,14 @@ struct PlaylistsContent: View {
                 PlaylistSummaryRow(summary: summary)
             }
             .swipeActions(edge: .trailing) {
-                Button("Elimina", role: .destructive) {
-                    store.delete(ModelLookup.playlists([summary.id], in: context))
+                // Asks first, like every other destructive action: the swipe only
+                // opens the question, and the playlist goes on Elimina playlist.
+                // Red by tint rather than by role: a destructive role makes the
+                // list animate the row away before the question is answered.
+                Button("Elimina") {
+                    confirmation = .deletePlaylist(summary.id, named: summary.name, store: store, context: context)
                 }
+                .tint(.red)
                 Button("Rinomina") {
                     renameText = summary.name
                     renaming = summary
@@ -184,6 +191,31 @@ struct PlaylistsContent: View {
             let resolved = ModelLookup.playlists(summaries.map(\.id), in: context)
             guard resolved.count == summaries.count else { return }
             store.movePlaylists(resolved, from: source, to: destination)
+        }
+    }
+}
+
+extension DestructiveConfirmation {
+    /// Deleting a playlist, from the swipe on its row in the list and from its own
+    /// screen's menu: the same question in both places, naming the playlist and
+    /// saying what goes and what stays.
+    ///
+    /// By id, resolved at the tap, like every action here. `then` runs after the
+    /// deletion; the playlist's own screen uses it to go back to the list.
+    static func deletePlaylist(
+        _ id: UUID,
+        named name: String,
+        store: PlaylistStore,
+        context: ModelContext,
+        then done: @escaping () -> Void = {}
+    ) -> DestructiveConfirmation {
+        DestructiveConfirmation(
+            title: "Eliminare la playlist “\(name)”?",
+            message: "Si cancellano la playlist e il suo elenco di brani, nient'altro. I brani restano nei preferiti e dove sono adesso, sul telefono o sul server: nessun file viene eliminato.",
+            button: "Elimina playlist"
+        ) {
+            store.delete(ModelLookup.playlists([id], in: context))
+            done()
         }
     }
 }
@@ -226,6 +258,7 @@ struct PlaylistDetailView: View {
     @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
+    @Environment(\.dismiss) private var dismiss
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var allEntries: [PlaylistEntry]
     /// A slot added from Cerca has no library row until its track is acquired, and
@@ -236,7 +269,9 @@ struct PlaylistDetailView: View {
     @State private var renaming = false
     @State private var renameText = ""
     @State private var editMode: EditMode = .inactive
-    @State private var addingTracks = false
+    /// Which of the two sources the + opened, each its own sheet.
+    @State private var addingFrom: AddTrackSource?
+    @State private var confirmation: DestructiveConfirmation?
 
     var body: some View {
         // The one place this screen reads the store.
@@ -259,8 +294,14 @@ struct PlaylistDetailView: View {
                 EditModeButton(editMode: $editMode)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    addingTracks = true
+                Menu {
+                    ForEach(AddTrackSource.allCases) { source in
+                        Button {
+                            addingFrom = source
+                        } label: {
+                            Label(source.label, systemImage: source.symbol)
+                        }
+                    }
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -274,16 +315,45 @@ struct PlaylistDetailView: View {
                     } label: {
                         Label("Rinomina…", systemImage: "pencil")
                     }
+                    Button(role: .destructive) {
+                        // Back to the list once it is gone: this screen would
+                        // otherwise stay open on a playlist that no longer exists.
+                        let dismiss = self.dismiss
+                        confirmation = .deletePlaylist(
+                            playlistID,
+                            named: data?.name ?? name,
+                            store: store,
+                            context: context
+                        ) {
+                            dismiss()
+                        }
+                    } label: {
+                        Label("Elimina playlist", systemImage: "trash")
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                 }
                 .accessibilityLabel("Altre azioni")
             }
         }
-        .sheet(isPresented: $addingTracks) {
-            // By id: the sheet stays up on its own while this screen changes behind
-            // it, and says so if the playlist is deleted meanwhile.
-            AddTracksToPlaylistSheet(playlistID: playlistID)
+        .sheet(item: $addingFrom) { source in
+            // By id: each sheet stays up on its own while this screen changes
+            // behind it, and says so if the playlist is deleted meanwhile.
+            switch source {
+            case .favourites:
+                AddFavouritesToPlaylistSheet(playlistID: playlistID)
+            case .search:
+                PlaylistSearchSheet(playlistID: playlistID)
+            }
+        }
+        .destructiveConfirmation($confirmation)
+        // A slot chosen in Cerca names its track by video id until the sync writes
+        // the library row; the moment the projection sees that row, the slot is
+        // linked to it, so it behaves like any other slot from then on.
+        .task(id: data?.awaitsAdoption ?? false) {
+            guard data?.awaitsAdoption == true,
+                  let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+            store.adoptLibraryRows(in: playlist)
         }
         .alert("Rinomina playlist", isPresented: $renaming) {
             TextField("Nome", text: $renameText)
@@ -321,6 +391,10 @@ struct PlaylistDetailView: View {
                         data: track,
                         subtitle: track.artist,
                         placement: PlaylistPlacement(playlistID: data.id, entryID: row.entryID),
+                        // A track on neither the phone nor the server — added with
+                        // the plus — asks where to keep it when tapped, as it does
+                        // in Preferiti and in Cerca, instead of doing nothing.
+                        choosesDestination: track.favouriteState == .notAcquired,
                         play: {
                             presenter.sourceName = data.name
                             play(fromEntryAt: index)
@@ -362,10 +436,12 @@ struct PlaylistDetailView: View {
             .prismaRow()
         }
 
+        // Not what Scarica can fetch, so said apart from it — and pointing at the
+        // rows themselves, which ask where to keep the track when tapped.
         if data.notAcquiredCount > 0 {
             Text(data.notAcquiredCount == 1
-                 ? "1 brano non è né sul telefono né sul server: aprilo nei Preferiti e scegli dove scaricarlo."
-                 : "\(data.notAcquiredCount) brani non sono né sul telefono né sul server: aprili nei Preferiti e scegli dove scaricarli.")
+                 ? "1 brano non è né sul telefono né sul server: toccalo per scegliere dove scaricarlo."
+                 : "\(data.notAcquiredCount) brani non sono né sul telefono né sul server: tocca ciascuno per scegliere dove scaricarlo.")
                 .font(.caption)
                 .foregroundStyle(ink.secondary)
                 .padding(.vertical, 8)

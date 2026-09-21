@@ -82,6 +82,14 @@ final class PlaylistStore {
         save("linking \(linked) playlist entries to tracks that have arrived in the library")
     }
 
+    /// The same adoption, asked for by the playlist's screen as soon as its
+    /// projection sees a slot whose track has arrived — typically one chosen in the
+    /// playlist's Cerca, whose acquisition the sync has just written — so the slot
+    /// does not stay un-adopted until the next tap.
+    func adoptLibraryRows(in playlist: Playlist) {
+        _ = entries(of: playlist)
+    }
+
     // MARK: - Playlists
 
     @discardableResult
@@ -116,12 +124,20 @@ final class PlaylistStore {
         save("renaming the playlist to “\(name)”")
     }
 
+    /// Deletes the playlists and, by the cascade on `Playlist.entries`, their slots.
+    /// Nothing else: the tracks stay in the library and on the phone, the favourites
+    /// stay in Preferiti, and the server is not asked anything — playlists live only
+    /// on this iPhone.
     func delete(_ playlists: [Playlist]) {
+        guard !playlists.isEmpty else { return }
         let names = playlists.map(\.name)
         for playlist in playlists {
             context.delete(playlist)
         }
-        save("deleting \(names.joined(separator: ", "))")
+        guard save("deleting \(names.joined(separator: ", "))") else { return }
+        notice = names.count == 1
+            ? "Playlist “\(names[0])” eliminata. I suoi brani sono ancora nei preferiti."
+            : "\(names.count) playlist eliminate. I loro brani sono ancora nei preferiti."
     }
 
     /// `ordered` is the list as displayed; the new order is stored in `sortPosition`.
@@ -149,9 +165,10 @@ final class PlaylistStore {
     /// Adds tracks to the end of a playlist, in the order given, and makes sure each
     /// one is in Preferiti.
     ///
-    /// Takes drafts rather than tracks because that is the only shape both sources
-    /// of the Aggiungi brani sheet share: a favourite already in the collection has
-    /// one, and so does a Cerca result that is in no library at all. For the second
+    /// Takes drafts rather than tracks because that is the only shape both ways of
+    /// filling a playlist from the playlist share — Dai preferiti, and Cerca opened
+    /// over the playlist: a favourite already in the collection has one, and so does
+    /// a search result that is in no library at all. For the second
     /// kind `addFavourite` creates the favourite — the not-acquired state, with what
     /// search knew and nothing downloaded — and the slot carries the video id until
     /// the track is acquired.
@@ -263,10 +280,10 @@ final class PlaylistStore {
     /// and this phone has not.
     ///
     /// A device download fetches GET /tracks/{id}/file, so it needs a track the
-    /// server still holds. A slot added from Cerca, and one whose only copy this
-    /// phone claimed and then deleted, have no file there to fetch: they have to be
-    /// asked of the server again, with a destination, which happens in Preferiti.
-    /// They are counted and named here rather than skipped in silence.
+    /// server still holds. A slot added with the plus in Cerca, and one whose only
+    /// copy this phone claimed and then deleted, have no file there to fetch: they
+    /// have to be asked of the server again, with a destination, which tapping their
+    /// row asks for. They are counted and named here rather than skipped in silence.
     func downloadMissing(in playlist: Playlist) {
         var seen = Set<String>()
         var started = 0
@@ -298,8 +315,8 @@ final class PlaylistStore {
         }
         let stillMissing = notAcquired == 0 ? "" :
             (notAcquired == 1
-                ? " 1 brano non è né sul telefono né sul server: aprilo nei Preferiti e scegli dove scaricarlo."
-                : " \(notAcquired) brani non sono né sul telefono né sul server: aprili nei Preferiti e scegli dove scaricarli.")
+                ? " 1 brano non è né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo."
+                : " \(notAcquired) brani non sono né sul telefono né sul server: tocca ciascuno nella playlist e scegli dove scaricarlo.")
         if started == 0 && busy == 0 {
             notice = (notAcquired == 0
                       ? "Tutti i brani di “\(playlist.name)” sono già scaricati."
@@ -325,7 +342,7 @@ final class PlaylistStore {
         guard listed[index].track != nil else {
             lastError = listed[index].videoID == nil
                 ? .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
-                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è ancora stato scaricato né sul telefono né sul server: aprilo nei Preferiti e scegli dove scaricarlo.")
+                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è ancora stato scaricato né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo.")
             return
         }
         let tracks = listed.compactMap(\.track)

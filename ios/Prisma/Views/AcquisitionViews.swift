@@ -238,13 +238,22 @@ struct AcquisitionRow: View {
 /// Holds an `AcquisitionRequest` and a string, both values. The sheet stays up on
 /// its own while the library changes underneath it, and the coordinator reads the
 /// store back when a destination is tapped.
+///
+/// Opened from Cerca presented over a playlist, it carries `joining` too: the
+/// playlist the track goes into when a destination is chosen, by id. The slot is
+/// written first and the acquisition started second, both at the tap, so the track
+/// is in the playlist even if the download then fails — as it is in Preferiti.
 struct DestinationSheet: View {
     let request: AcquisitionRequest
     /// Why the track cannot be played right now, or nil when nothing was expected
     /// to play yet.
     let reason: String?
+    /// The playlist the track also joins, or nil.
+    var joining: PlaylistSlotTarget? = nil
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
+    @Environment(PlaylistStore.self) private var store
+    @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -272,6 +281,7 @@ struct DestinationSheet: View {
                 Section {
                     ForEach(AcquisitionDestination.allCases) { destination in
                         Button {
+                            join()
                             acquisitions.acquire(request, destination: destination)
                             dismiss()
                         } label: {
@@ -296,7 +306,7 @@ struct DestinationSheet: View {
                 } header: {
                     Text("Dove tenerlo").textCase(nil)
                 } footer: {
-                    Text("Il brano viene aggiunto ai preferiti in ogni caso, anche se il download non riesce.")
+                    Text(footer)
                 }
             }
             .navigationTitle("Scarica")
@@ -313,5 +323,24 @@ struct DestinationSheet: View {
     private var subtitle: String? {
         let line = [request.artist, request.albumName].compactMap { $0 }.joined(separator: " · ")
         return line.isEmpty ? nil : line
+    }
+
+    private var footer: String {
+        guard let joining else {
+            return "Il brano viene aggiunto ai preferiti in ogni caso, anche se il download non riesce."
+        }
+        if joining.holdsTrack {
+            return "Il brano è già in “\(joining.playlistName)”, quindi non viene aggiunto di nuovo. Finisce nei preferiti in ogni caso, anche se il download non riesce."
+        }
+        return "Il brano entra in “\(joining.playlistName)” e nei preferiti in ogni caso, anche se il download non riesce."
+    }
+
+    /// Puts the track in the playlist it was chosen for, resolved at the tap. A
+    /// playlist that already holds it is left alone: the choice here is about
+    /// downloading, and a second copy is never added from a picker.
+    private func join() {
+        guard let joining, !joining.holdsTrack,
+              let playlist = ModelLookup.playlist(joining.playlistID, in: context) else { return }
+        store.add([request.draft], to: playlist)
     }
 }
