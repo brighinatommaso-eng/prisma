@@ -256,6 +256,11 @@ struct PlaylistData: Identifiable, Equatable {
     let id: UUID
     let name: String
     let rows: [PlaylistRowData]
+    /// Some slot still names its track by video id alone although the library now
+    /// has a row for it: the sync wrote the track after the slot was added. The
+    /// screen hands the playlist to `PlaylistStore.adoptLibraryRows(in:)` when this
+    /// turns true, so the slot becomes an ordinary one without waiting for a tap.
+    let awaitsAdoption: Bool
 
     var tracks: [TrackRowData] { rows.compactMap(\.track) }
     var trackIDs: [String] { tracks.map(\.id) }
@@ -273,9 +278,10 @@ struct PlaylistData: Identifiable, Equatable {
         distinct { $0.isOnServerOnly }
     }
 
-    /// Distinct tracks that are in no library at all — added from Cerca, or claimed
-    /// as this phone's only copy and then removed. Nothing on this screen can fetch
-    /// them: they have to be asked of the server from Preferiti, with a destination.
+    /// Distinct tracks that are in no library at all — added with the plus, or
+    /// claimed as this phone's only copy and then removed. A device download cannot
+    /// fetch them: they have to be asked of the server with a destination, which is
+    /// what tapping one of their rows does.
     var notAcquiredCount: Int {
         distinct { !$0.isOnPhone && !$0.isOnServerOnly }
     }
@@ -325,16 +331,13 @@ struct FavouritePickerRow: Identifiable, Equatable {
     var id: String { track.id }
 }
 
-/// Everything the Aggiungi brani sheet needs, from one read of the store: which
-/// playlist it is adding to, the collection to pick from, and the video ids the
-/// playlist already holds — which is what both of its sources check against.
+/// Everything the Dai preferiti sheet needs, from one read of the store: which
+/// playlist it is adding to, and the collection to pick from, each line marked with
+/// whether the playlist already holds it.
 struct PlaylistAdditionData: Equatable {
     /// nil once the playlist has been deleted while the sheet was open.
     let playlistName: String?
     let rows: [FavouritePickerRow]
-    /// By video id, so Cerca can mark a result without a library track existing.
-    let alreadyIn: Set<String>
-    let favouriteIDs: Set<String>
 
     var addableCount: Int { rows.filter { !$0.isInPlaylist }.count }
 }
@@ -375,6 +378,30 @@ struct SearchIndex: Equatable {
     let tracks: [String: TrackRowData]
     let acquisitions: [String: AcquisitionData]
     let favourites: Set<String>
+    /// The playlist results are being added to, when Cerca is open over one; nil in
+    /// the Cerca tab, and nil once that playlist has been deleted.
+    let playlist: PlaylistSearchTarget?
+}
+
+/// The playlist Cerca adds to when it is presented over a playlist: its name, and
+/// the video ids it already holds, so a result can say it is already there without
+/// a library track existing.
+struct PlaylistSearchTarget: Equatable {
+    let id: UUID
+    let name: String
+    let alreadyIn: Set<String>
+
+    func slot(for videoID: String) -> PlaylistSlotTarget {
+        PlaylistSlotTarget(playlistID: id, playlistName: name, holdsTrack: alreadyIn.contains(videoID))
+    }
+}
+
+/// One search result's view of that playlist: where it would go, and whether it is
+/// there already. An id and strings only, so a row can carry it and act on it later.
+struct PlaylistSlotTarget: Equatable {
+    let playlistID: UUID
+    let playlistName: String
+    let holdsTrack: Bool
 }
 
 /// Where a queued line's audio would come from, so the queue can show what will be
@@ -567,7 +594,10 @@ enum Projection {
         return PlaylistData(
             id: playlist.id,
             name: playlist.name,
-            rows: ordered.map { slot($0, in: index) }
+            rows: ordered.map { slot($0, in: index) },
+            awaitsAdoption: ordered.contains { entry in
+                entry.track == nil && entry.videoID.map { index.tracks[$0] != nil } == true
+            }
         )
     }
 
@@ -659,24 +689,42 @@ enum Projection {
     }
 
     /// Cerca: what a result needs to know about the library, about Preferiti and
-    /// about what is already being acquired, by video id.
+    /// about what is already being acquired, by video id — and, when Cerca is open
+    /// over a playlist, which of those video ids the playlist already holds.
+    ///
+    /// One pass for the tab and for the overlay, so the two cannot come to disagree
+    /// about what a result is. The tab passes no `playlistID`, and then no playlist
+    /// is looked at.
     static func search(
         tracks: [StoredTrack],
         favourites: [FavouriteTrack],
-        acquisitions: [PendingAcquisition]
+        acquisitions: [PendingAcquisition],
+        playlistID: UUID? = nil,
+        playlists: [Playlist] = [],
+        entries: [PlaylistEntry] = []
     ) -> SearchIndex {
-        SearchIndex(
+        var target: PlaylistSearchTarget?
+        if let playlistID, let playlist = playlists.first(where: { $0.id == playlistID }) {
+            let listed = group(entries)[ObjectIdentifier(playlist)] ?? []
+            // `trackID` reads the id off the slot, or off the library row it points
+            // at for a slot written before slots carried one.
+            target = PlaylistSearchTarget(
+                id: playlist.id,
+                name: playlist.name,
+                alreadyIn: Set(listed.compactMap(\.trackID))
+            )
+        }
+        return SearchIndex(
             tracks: Dictionary(tracks.map { ($0.serverID, row(of: $0)) }, uniquingKeysWith: { first, _ in first }),
             acquisitions: Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first }),
-            favourites: Set(favourites.map(\.videoID))
+            favourites: Set(favourites.map(\.videoID)),
+            playlist: target
         )
     }
 
-    /// The Aggiungi brani sheet, for both of its sources.
+    /// The Dai preferiti sheet: the collection, and what is already in the playlist.
     ///
-    /// One pass for the whole sheet: Dai preferiti needs the collection and what is
-    /// already in the playlist, and Cerca needs the same two sets by video id. A
-    /// picker shows no transfers, so no acquisitions are read for it — a row here
+    /// A picker shows no transfers, so no acquisitions are read for it — a row here
     /// says what the track is, not what is happening to it.
     static func playlistAddition(
         playlistID: UUID,
@@ -694,12 +742,7 @@ enum Projection {
         // same name, and the collection here is exactly the Preferiti list.
         let rows = Projection.favourites(favourites: favourites, tracks: tracks, acquisitions: [])
             .map { FavouritePickerRow(track: $0, isInPlaylist: alreadyIn.contains($0.id)) }
-        return PlaylistAdditionData(
-            playlistName: playlist?.name,
-            rows: rows,
-            alreadyIn: alreadyIn,
-            favouriteIDs: Set(favourites.map(\.videoID))
-        )
+        return PlaylistAdditionData(playlistName: playlist?.name, rows: rows)
     }
 
     /// The play queue sheet: the engine's ids against the library.
