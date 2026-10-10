@@ -68,6 +68,8 @@ nonisolated struct APIClient: Sendable {
         /// DELETE /tracks/{id} removes files on the server; a busy library answers
         /// 409 straight away rather than waiting.
         static let deletion: TimeInterval = 30
+        /// GET and PUT /collection only touch one small row.
+        static let collection: TimeInterval = 20
     }
 
     let address: ServerAddress
@@ -147,6 +149,35 @@ nonisolated struct APIClient: Sendable {
     func deleteTrack(trackID: String) async throws -> APIResponse<TrackDeletionResult> {
         let segment = try ServerAddress.pathSegment(trackID)
         return try await requestJSON("/tracks/" + segment, method: "DELETE", body: nil, timeout: Timeout.deletion)
+    }
+
+    /// GET /collection: the favourites and playlists, with the server's version.
+    func collection() async throws -> APIResponse<ServerCollection> {
+        try await getJSON("/collection", timeout: Timeout.collection)
+    }
+
+    /// PUT /collection: replaces the collection. `collection.version` is the version
+    /// the sent copy was based on. A 409 is an answer, not a failure: it carries the
+    /// server's current collection.
+    func putCollection(_ collection: ServerCollection) async throws -> CollectionPush {
+        let url = try address.endpoint("/collection")
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(collection)
+        } catch {
+            throw APIError.unexpected(error, url: url)
+        }
+        let fetched = try await fetch(
+            url, accept: "application/json", timeout: Timeout.collection,
+            method: "PUT", body: body, alsoAccepting: [409]
+        )
+        let value: ServerCollection
+        do {
+            value = try JSONDecoder().decode(ServerCollection.self, from: fetched.data)
+        } catch {
+            throw APIError.decoding(error, url: url, body: fetched.data)
+        }
+        return fetched.status == 409 ? .stale(value) : .accepted(value)
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.
@@ -292,7 +323,8 @@ nonisolated struct APIClient: Sendable {
         timeout: TimeInterval,
         headers: [String: String] = [:],
         method: String = "GET",
-        body: Data? = nil
+        body: Data? = nil,
+        alsoAccepting extraStatuses: Set<Int> = []
     ) async throws -> Fetched {
         // A conditional request must reach the server, not be answered from the
         // in-memory cache, so its 304 comes back to the caller.
@@ -330,7 +362,7 @@ nonisolated struct APIClient: Sendable {
         }
         let contentType = http.value(forHTTPHeaderField: "Content-Type")
         let isNotModified = isConditional && http.statusCode == 304
-        guard (200...299).contains(http.statusCode) || isNotModified else {
+        guard (200...299).contains(http.statusCode) || isNotModified || extraStatuses.contains(http.statusCode) else {
             throw APIError.http(status: http.statusCode, url: url, contentType: contentType, body: data)
         }
         return Fetched(

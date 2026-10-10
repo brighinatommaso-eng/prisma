@@ -15,6 +15,9 @@ final class PlaylistStore {
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let downloads: DownloadManager
     @ObservationIgnored private let playback: PlaybackEngine
+    /// Called after favourites or playlists may have changed, so the server copy can
+    /// follow. `AppModel` points this at `CollectionSync`; the change is already saved.
+    @ObservationIgnored var onCollectionChange: (() -> Void)?
 
     init(context: ModelContext, downloads: DownloadManager, playback: PlaybackEngine) {
         self.context = context
@@ -393,6 +396,8 @@ final class PlaylistStore {
             ))
         }
         ModelLookup.track(draft.videoID, in: context)?.favouritedAt = now
+        // The caller saves right after; the push waits long enough to see it.
+        onCollectionChange?()
     }
 
     private func storedFavourite(_ videoID: String) -> FavouriteTrack? {
@@ -486,10 +491,16 @@ final class PlaylistStore {
         notice = nil
     }
 
+    /// A line from outside the store, shown where its own notices are.
+    func announce(_ text: String) {
+        notice = text
+    }
+
     @discardableResult
     private func save(_ activity: String) -> Bool {
         do {
             try context.save()
+            onCollectionChange?()
             return true
         } catch {
             lastError = .storage("Saving failed while \(activity)", location: nil, error: error,

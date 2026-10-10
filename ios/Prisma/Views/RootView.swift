@@ -62,12 +62,14 @@ struct RootView: View {
             // acquisition left unfinished by the last run.
             .task {
                 services.acquisitions.resume()
+                services.collection.syncNow()
             }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
                     services.downloads.checkTransfers(reason: "apertura dell'app")
                     services.acquisitions.resume()
+                    services.collection.syncNow()
                     // Coming back is an event, so the server is asked again — but
                     // only if the last answer is older than the freshness window,
                     // so switching apps twice in a row costs one request.

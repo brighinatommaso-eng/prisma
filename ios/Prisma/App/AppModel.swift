@@ -19,6 +19,7 @@ final class AppModel {
         let playlists: PlaylistStore
         let acquisitions: AcquisitionCoordinator
         let deletion: TrackDeletion
+        let collection: CollectionSync
     }
 
     let settings: AppSettings
@@ -41,11 +42,15 @@ final class AppModel {
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
             let reachability = ServerReachability(settings: settings)
-            settings.onAddressChange = { [downloads, reachability] previous, new in
+            let collection = CollectionSync(context: container.mainContext, settings: settings, reachability: reachability)
+            settings.onAddressChange = { [downloads, reachability, collection] previous, new in
                 downloads.serverAddressChanged(from: previous, to: new)
                 // The recorded answer was about a different server.
                 reachability.addressChanged()
+                // So was the version of the collection: the next sync merges again.
+                collection.addressChanged()
             }
+            sync.onSucceeded = { [collection] in collection.localChanged() }
             let playback = PlaybackEngine(
                 context: container.mainContext, settings: settings,
                 downloads: downloads, reachability: reachability
@@ -54,14 +59,21 @@ final class AppModel {
             // The single wire between "is the server there" and "what can play".
             // Only a real change arrives here, so a queue is never reconsidered
             // because a probe merely repeated itself.
-            reachability.onChange = { [playback] reachable in
+            reachability.onChange = { [playback, collection] reachable in
                 playback.serverReachabilityChanged(reachable: reachable)
+                // Changes made while the server was away are pushed now. Not a retry
+                // timer: this is the server coming back.
+                if reachable {
+                    collection.syncNow()
+                }
             }
             // Starts the network-path watch, whose first update is the first probe
             // of the process. Nothing here repeats on a schedule.
             reachability.start()
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
+            playlists.onCollectionChange = { [collection] in collection.localChanged() }
+            collection.announce = { [playlists] text in playlists.announce(text) }
             // Created here but idle: it only runs once RootView reports the app is
             // in the foreground, never during a background launch.
             let acquisitions = AcquisitionCoordinator(
@@ -69,7 +81,7 @@ final class AppModel {
                 downloads: downloads, playlists: playlists
             )
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
-            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
+            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion, collection: collection)
             playlists.removeOrphanedEntries()
             // Preferiti is now the only place a track is browsed, so everything
             // already on this phone becomes a favourite once. Runs before any view

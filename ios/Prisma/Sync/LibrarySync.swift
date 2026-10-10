@@ -32,6 +32,10 @@ final class LibrarySync {
     /// Set once at launch, after the engine exists. The sync is the only code that
     /// removes tracks, so it is where playback is told to let one go.
     @ObservationIgnored var playback: PlaybackEngine?
+    /// Called after a sync has been saved. Removing a track removes its playlist
+    /// entries with it, which changes the collection; `AppModel` points this at
+    /// `CollectionSync`.
+    @ObservationIgnored var onSucceeded: (() -> Void)?
     @ObservationIgnored private var current: Task<Void, Never>?
 
     init(context: ModelContext, settings: AppSettings, downloads: DownloadManager) {
@@ -131,6 +135,7 @@ final class LibrarySync {
             return
         }
         status = .succeeded(Date())
+        onSucceeded?()
     }
 
     // MARK: - Applying the catalogue
