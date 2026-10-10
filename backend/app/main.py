@@ -20,10 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field, model_validator
 
-from . import db, deletion, diagnostics, worker, ytm
+from . import collection, db, deletion, diagnostics, worker, ytm
 from .config import MUSIC_DIR
 
 log = logging.getLogger("prisma.api")
@@ -139,6 +139,45 @@ class Library(BaseModel):
     albums: list[LibraryAlbum]
     deleted_album_ids: list[int]
     deleted_track_ids: list[str]
+
+
+class Favourite(BaseModel):
+    """Keyed by YouTube video id. Carries its own metadata because the server
+    may never have downloaded the track."""
+    video_id: str = Field(min_length=1)
+    title: str | None = None
+    artist: str | None = None
+    album: str | None = None
+    artwork_url: str | None = None
+    added_at: int | float
+
+
+class Playlist(BaseModel):
+    id: str = Field(min_length=1)
+    name: str
+    created_at: int | float
+    updated_at: int | float
+    # Video ids in play order. May name a track the server does not have, and
+    # may repeat.
+    entries: list[str]
+
+
+class Collection(BaseModel):
+    # Incremented by the server on every accepted PUT; 0 on an empty server.
+    # On a PUT it is the version the client's copy was based on.
+    version: int = Field(ge=0)
+    favourites: list[Favourite]
+    playlists: list[Playlist]
+
+    @model_validator(mode="after")
+    def _ids_are_unique(self) -> "Collection":
+        favourite_ids = [f.video_id for f in self.favourites]
+        playlist_ids = [p.id for p in self.playlists]
+        if len(set(favourite_ids)) != len(favourite_ids):
+            raise ValueError("favourites contains a video_id more than once")
+        if len(set(playlist_ids)) != len(playlist_ids):
+            raise ValueError("playlists contains an id more than once")
+        return self
 
 
 def _installed_version(distribution: str) -> str:
@@ -273,6 +312,30 @@ async def library(
 ) -> Library:
     payload = await asyncio.to_thread(db.library, since)
     return Library(**payload)
+
+
+@app.get("/collection", response_model=Collection)
+async def get_collection() -> dict[str, Any]:
+    """The favourites and playlists, plus the version. Empty at version 0 on a
+    server that has never been written to."""
+    return await asyncio.to_thread(collection.get)
+
+
+@app.put("/collection", response_model=Collection, responses={409: {"model": Collection}})
+async def put_collection(payload: Collection) -> Any:
+    """Replace the whole collection. `version` is the version the client's copy
+    was based on.
+
+    Last write wins, with a guard: a version older than the stored one is
+    refused with 409, and the body is the stored collection so the client can
+    reconcile and retry. On success the body is the stored collection, with
+    the new version.
+    """
+    document = payload.model_dump(exclude={"version"})
+    try:
+        return await asyncio.to_thread(collection.put, payload.version, document)
+    except collection.Stale as stale:
+        return JSONResponse(status_code=409, content=stale.current)
 
 
 @app.delete("/tracks/{track_id}")

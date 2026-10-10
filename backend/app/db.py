@@ -87,6 +87,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 )
 """
 
+# The favourites and playlists, as one JSON document in one row. Replacing the
+# whole collection is the only write, so a row is the unit that stays atomic;
+# `version` is the counter the stale-write guard compares. Independent of the
+# tracks table on purpose: deleting a track's audio must not touch it.
+_COLLECTION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collection (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    version    INTEGER NOT NULL,
+    body       TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+"""
+
 # Columns added after an earlier release. Additive only.
 _EXPECTED_TRACK_COLUMNS = {
     "album_raw": "TEXT",
@@ -137,6 +150,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_TRACKS_SCHEMA)
     conn.execute(_ALBUMS_SCHEMA)
     conn.execute(_JOBS_SCHEMA)
+    conn.execute(_COLLECTION_SCHEMA)
     present = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
     for column, sql_type in _EXPECTED_TRACK_COLUMNS.items():
         if column not in present:
