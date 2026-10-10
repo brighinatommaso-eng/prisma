@@ -337,13 +337,14 @@ final class PlaylistStore {
             lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in questa playlist: riapri la schermata e riprova.")
             return
         }
-        // Told apart, because they need different things of the user: a slot whose
-        // library row has gone can only be removed, while one added da Cerca has
-        // simply never been downloaded anywhere yet.
+        // Told apart, because they need different things of the user: a slot that
+        // names nothing can only be removed, while one that names a track with no
+        // library row — added da Cerca and not downloaded yet, or downloaded once
+        // and since gone from the library — can be downloaded from its row.
         guard listed[index].track != nil else {
             lastError = listed[index].videoID == nil
                 ? .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
-                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è ancora stato scaricato né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo.")
+                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo.")
             return
         }
         let tracks = listed.compactMap(\.track)

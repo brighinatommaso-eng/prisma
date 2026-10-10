@@ -227,8 +227,11 @@ struct TrackRowData: Identifiable, Equatable {
 enum MissingEntryReason: Equatable, Sendable {
     /// The slot pointed at a library row that has gone, and only the slot is left.
     case leftTheLibrary
-    /// The slot names a video id that is in neither the library nor Preferiti:
-    /// a track added from Cerca whose favourite was removed afterwards.
+    /// The slot names a video id that is in neither the library nor Preferiti.
+    /// Either a track added from Cerca whose favourite was removed before it was
+    /// ever downloaded, or one that was downloaded, then left the library, and
+    /// whose favourite was removed too. The slot cannot tell which, so the text
+    /// claims neither.
     case unknownTrack
 
     var text: String {
@@ -236,7 +239,7 @@ enum MissingEntryReason: Equatable, Sendable {
         case .leftTheLibrary:
             return "Brano non più in libreria"
         case .unknownTrack:
-            return "Brano tolto dai preferiti e mai scaricato"
+            return "Brano non più in libreria né nei preferiti"
         }
     }
 }

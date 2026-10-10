@@ -392,7 +392,7 @@ final class SyncRecord {
 
     /// The server's version of the favourites and playlists this phone last agreed
     /// with. nil means it never has: the next sync is the first one, which merges
-    /// rather than replaces. Cleared when the server address changes.
+    /// rather than replaces.
     var collectionVersion: Int?
     /// Fingerprint of the favourites and playlists as they were when they last
     /// matched the server. What the phone holds now differing from this is what

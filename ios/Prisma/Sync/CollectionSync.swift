@@ -36,8 +36,9 @@ import SwiftData
 /// coming on screen, the server answering again, a different address. A pass that
 /// fails for a reason that may pass (the network, a 5xx) is tried again a bounded
 /// number of times while there is something to push; one that fails for a reason
-/// that will not (a 422, a backend without the endpoint) is shown and left alone
-/// until what the phone holds, or the address it talks to, is different.
+/// that will not (a 422, a backend without the endpoint) is shown, and the same
+/// push is not sent again by a change or a retry; the app coming to the foreground
+/// or the server coming back still tries, and a pass that completes clears it.
 @Observable
 final class CollectionSync {
     /// How long after the first of a burst of changes the push goes out, so a run of
@@ -73,11 +74,14 @@ final class CollectionSync {
     @ObservationIgnored private var timer: Task<Void, Never>?
     @ObservationIgnored private var retryTimer: Task<Void, Never>?
     @ObservationIgnored private var retryAttempt = 0
+    /// The next pass was started by the retry timer, not by an event.
+    @ObservationIgnored private var retryRequested = false
     /// Bumped when the server address changes. A pass that started before it
     /// discards whatever it learned from the old client.
     @ObservationIgnored private var generation = 0
     /// Digest of the phone's collection when a pass failed for good. While the phone
-    /// still holds exactly that, the same request is not sent again.
+    /// still holds exactly that, a change-driven or retry pass does not send the
+    /// same request again. Passes that read the server are not held back by it.
     @ObservationIgnored private var refusedDigest: String?
     /// The server holds something this phone cannot store. Nothing is pushed, and
     /// nothing of the server's is taken, until a read of the server finds it gone.
@@ -156,6 +160,7 @@ final class CollectionSync {
         retryTimer?.cancel()
         retryTimer = nil
         retryAttempt = 0
+        retryRequested = false
         begin()
     }
 
@@ -180,11 +185,20 @@ final class CollectionSync {
     private func run() async {
         let wantsPull = pullRequested
         pullRequested = false
+        let isRetry = retryRequested
+        retryRequested = false
         let pass = generation
         // Unreachable: the changes stay local and pending, and `ServerReachability`
-        // reporting the server back is what runs this again.
+        // reporting the server back is what runs this again. A recorded "no" only
+        // changes when something asks, though, so a retry asks: it forces a probe,
+        // whose "yes" comes back here as an event, and waits its turn again in case
+        // the answer is still no. Bounded by `retryDelays` like every retry.
         guard reachability.isReachable != false else {
             refreshPending()
+            if isRetry {
+                reachability.retry()
+                scheduleRetry()
+            }
             return
         }
         do {
@@ -199,43 +213,65 @@ final class CollectionSync {
                 rerun = true
                 return
             }
-            if let refusedDigest, refusedDigest == localDigest {
-                // Shown, not retried: the phone would send exactly what failed.
+            if let refusedDigest, refusedDigest == localDigest, !wantsPull {
+                // Shown, not retried: a change-driven or retry pass would send
+                // exactly what failed. An event that reads the server — the app
+                // coming to the foreground, the server coming back — is not blocked
+                // by it, and tries again.
                 return
             }
             refusedDigest = nil
 
             let record = try loadRecord()
+            // Whether the pass ended with the phone and the server agreeing, having
+            // talked to each other. A pass that only adopted the version of an
+            // earlier upload did not: the edits made since are still to be sent.
+            let settled: Bool
             if record.collectionVersion == nil {
                 try await firstSync(client: client, pass: pass)
+                settled = true
             } else if localDigest != record.collectionSyncedDigest {
-                try await push(client: client, pass: pass)
+                settled = try await push(client: client, pass: pass)
             } else if wantsPull {
-                try await pull(client: client, pass: pass)
+                settled = try await pull(client: client, pass: pass)
             } else {
-                // A save that changed nothing in the collection.
+                // A save that changed nothing in the collection: nothing was asked
+                // of the server, and nothing is wrong.
+                problem = nil
+                refreshPending()
                 return
             }
-            try succeeded()
+            // The pass completed, so whatever the row said before is no longer true.
+            problem = nil
+            retryAttempt = 0
+            if settled {
+                try recordSyncTime()
+            }
         } catch is Superseded {
             // `addressChanged` already asked for another pass.
         } catch let hold as Held {
-            held = true
-            problem = Self.heldProblem(hold.ids)
+            // What a pass learned from the old client is not written, whether it
+            // ended well or badly.
+            if pass == generation {
+                held = true
+                problem = Self.heldProblem(hold.ids)
+            }
         } catch {
-            failed(.from(error))
+            if pass == generation {
+                failed(.from(error))
+            }
         }
         refreshPending()
     }
 
-    private func succeeded() throws {
+    /// The time shown as the last successful sync: a pass that exchanged the
+    /// collection with the server, or read it and found the two already agreed.
+    private func recordSyncTime() throws {
         let now = Date()
         try commit("recording the sync time") { record in
             record.collectionLastSyncAt = now
         }
         lastSyncedAt = now
-        problem = nil
-        retryAttempt = 0
     }
 
     private func failed(_ error: APIError) {
@@ -258,11 +294,18 @@ final class CollectionSync {
         }
     }
 
-    /// One more attempt after a wait, while there is something to push. Bounded by
-    /// `retryDelays`; an event in the meantime replaces it.
+    /// One more attempt after a wait, while there is something to push or an upload
+    /// the server never confirmed. Bounded by `retryDelays`; an event in the
+    /// meantime replaces it.
+    ///
+    /// An unconfirmed upload matters even when nothing is pending: the request may
+    /// have been stored, and if the user has since undone the change the phone looks
+    /// clean while the server holds what was undone. So that retry also reads the
+    /// server, which is where the stored upload is recognised and corrected.
     private func scheduleRetry() {
         refreshPending()
-        guard hasPendingChanges, retryTimer == nil, retryAttempt < Self.retryDelays.count else { return }
+        let unconfirmed = hasUnconfirmedUploads()
+        guard hasPendingChanges || unconfirmed, retryTimer == nil, retryAttempt < Self.retryDelays.count else { return }
         let delay = Self.retryDelays[retryAttempt]
         retryAttempt += 1
         retryTimer = Task {
@@ -272,7 +315,23 @@ final class CollectionSync {
                 return
             }
             retryTimer = nil
+            retryRequested = true
+            if hasUnconfirmedUploads() {
+                pullRequested = true
+            }
             begin()
+        }
+    }
+
+    /// Whether a push went out whose answer never came back.
+    private func hasUnconfirmedUploads() -> Bool {
+        do {
+            let sent = try context.fetch(FetchDescriptor<SyncRecord>()).first?.collectionSentDigests
+            return !(sent ?? []).isEmpty
+        } catch {
+            // Not being able to tell is itself the failure to show.
+            problem = Self.inItalian(.from(error))
+            return false
         }
     }
 
@@ -340,7 +399,10 @@ final class CollectionSync {
 
     // MARK: - Pushing and pulling
 
-    private func push(client: APIClient, pass: Int) async throws {
+    /// Returns whether the phone and the server now agree. False when the pass only
+    /// adopted the version of an earlier upload and the edits made since are still
+    /// to be sent, or when there was no version to push with.
+    private func push(client: APIClient, pass: Int) async throws -> Bool {
         let sent = try snapshot()
         let sentDigest = CollectionMerge.digest(sent)
         var known: Int?
@@ -349,10 +411,12 @@ final class CollectionSync {
         // and that is how it is told apart from somebody else's.
         try commit("noting what is about to be sent") { record in
             known = record.collectionVersion
+            // Every one of them is kept until the server confirms a push: any of
+            // them may be the one it stored.
             let earlier = (record.collectionSentDigests ?? []).filter { $0 != sentDigest }
-            record.collectionSentDigests = Array((earlier + [sentDigest]).suffix(8))
+            record.collectionSentDigests = earlier + [sentDigest]
         }
-        guard let version = known else { return }
+        guard let version = known else { return false }
 
         let answer = try await client.putCollection(ServerCollection(version: version, content: sent))
         try stillCurrent(pass)
@@ -365,6 +429,7 @@ final class CollectionSync {
                 record.collectionSyncedDigest = sentDigest
                 record.collectionSentDigests = nil
             }
+            return true
         case .stale(let current):
             let content = CollectionMerge.normalized(current.content)
             let serverDigest = CollectionMerge.digest(content)
@@ -382,8 +447,9 @@ final class CollectionSync {
                 }
                 if serverDigest != localDigest {
                     rerun = true
+                    return false
                 }
-                return
+                return true
             }
             // A real conflict: the server holds a collection this phone never sent.
             // With one phone that is a reinstall meeting an old install, or damaged
@@ -395,17 +461,19 @@ final class CollectionSync {
                 record.collectionSentDigests = nil
             }
             notice = "Sul server c'erano preferiti e playlist diversi da quelli di questo telefono, e più recenti, quindi ho usato quelli del server. Le modifiche fatte qui e non ancora inviate sono state sostituite."
+            return true
         }
     }
 
-    private func pull(client: APIClient, pass: Int) async throws {
+    /// Returns whether the phone and the server now agree, as `push` does.
+    private func pull(client: APIClient, pass: Int) async throws -> Bool {
         let base = try snapshot()
         let server = try await client.collection().value
         try stillCurrent(pass)
         let content = CollectionMerge.normalized(server.content)
         let serverDigest = CollectionMerge.digest(content)
         let record = try loadRecord()
-        guard let version = record.collectionVersion else { return }
+        guard let version = record.collectionVersion else { return false }
 
         if server.version > version {
             if (record.collectionSentDigests ?? []).contains(serverDigest) {
@@ -417,7 +485,7 @@ final class CollectionSync {
                     record.collectionSentDigests = nil
                 }
                 rerun = true
-                return
+                return false
             }
             try refuseForeign(content)
             try commit("applying the server's collection") { record in
@@ -429,8 +497,9 @@ final class CollectionSync {
             // The server has lost state this phone still has (a restored backup, a
             // new database). The phone's copy is the better one: send it.
             try refuseForeign(content)
-            try await push(client: client, pass: pass)
+            return try await push(client: client, pass: pass)
         }
+        return true
     }
 
     /// Reads the server only to learn whether it still holds something this phone
