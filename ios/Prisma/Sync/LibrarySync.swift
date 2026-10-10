@@ -32,10 +32,6 @@ final class LibrarySync {
     /// Set once at launch, after the engine exists. The sync is the only code that
     /// removes tracks, so it is where playback is told to let one go.
     @ObservationIgnored var playback: PlaybackEngine?
-    /// Called after a sync has been saved. Removing a track removes its playlist
-    /// entries with it, which changes the collection; `AppModel` points this at
-    /// `CollectionSync`.
-    @ObservationIgnored var onSucceeded: (() -> Void)?
     @ObservationIgnored private var current: Task<Void, Never>?
 
     init(context: ModelContext, settings: AppSettings, downloads: DownloadManager) {
@@ -135,7 +131,6 @@ final class LibrarySync {
             return
         }
         status = .succeeded(Date())
-        onSucceeded?()
     }
 
     // MARK: - Applying the catalogue
@@ -155,6 +150,9 @@ final class LibrarySync {
         /// Albums holding at least one retained track. They outlive the server's
         /// deletion too, because their cover is what those tracks' rows show.
         var albumsWithRetainedTracks = Set<ObjectIdentifier>()
+        /// Every playlist slot, read once per sync, so a track that goes can hand
+        /// its slots their video id and let them go before its row is deleted.
+        var slots: [PlaylistEntry] = []
         var problems: [String] = []
     }
 
@@ -162,6 +160,7 @@ final class LibrarySync {
         var changes = Changes()
         let albums = try context.fetch(FetchDescriptor<StoredAlbum>())
         let tracks = try context.fetch(FetchDescriptor<StoredTrack>())
+        changes.slots = try context.fetch(FetchDescriptor<PlaylistEntry>())
         var albumsByID = Dictionary(albums.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
         var tracksByID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
         var listedTrackIDs = Set<String>()
@@ -313,6 +312,18 @@ final class LibrarySync {
         }
         if let problem = downloads.discardLocalData(for: track) {
             changes.problems.append(problem)
+        }
+        // A playlist slot outlives its track. Each slot pointing at this row is
+        // given the video id, if an older build left it without one, and detached,
+        // so deleting the row removes nothing from any playlist: the slot stays as
+        // a line that resolves again when the track is back in the library. No sync,
+        // full or delta, removes a playlist entry; only the user does.
+        let leaving = ObjectIdentifier(track)
+        for slot in changes.slots where slot.track.map({ ObjectIdentifier($0) == leaving }) ?? false {
+            if slot.videoID == nil {
+                slot.videoID = track.serverID
+            }
+            slot.track = nil
         }
         // Before the row goes: the queue keeps ids, and the players keep this very
         // object, so both must let go while it can still be read.

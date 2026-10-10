@@ -5,6 +5,7 @@ struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(ThemeEngine.self) private var theme
     @Environment(ServerReachability.self) private var reachability
+    @Environment(CollectionSync.self) private var collection
     @Environment(\.prismaInk) private var ink
 
     @State private var draft = ""
@@ -14,6 +15,18 @@ struct SettingsView: View {
     @State private var testGeneration = 0
 
     private let buildInfo = BuildInfo(bundle: .main)
+
+    /// Favourites and playlists against the server: why the last sync failed, when
+    /// there is a reason, otherwise when one last worked.
+    private var collectionValue: String {
+        if let problem = collection.problem {
+            return PlainLanguage.message(for: problem)
+        }
+        guard let last = collection.lastSyncedAt else {
+            return "Non ancora eseguita"
+        }
+        return "Ultima riuscita: " + last.formatted(date: .abbreviated, time: .shortened)
+    }
 
     /// The recorded reachability answer, short enough for a value row. The whole
     /// sentence, with the reason, is `ServerReachability.statusLine`, which
@@ -132,6 +145,15 @@ struct SettingsView: View {
                 Text(reachabilityValue)
                     .foregroundStyle(ink.secondary)
                     .multilineTextAlignment(.trailing)
+            }
+
+            hairline
+
+            valueRow("Sincronizzazione") {
+                Text(collectionValue)
+                    .foregroundStyle(collection.problem == nil ? ink.secondary : ink.primary)
+                    .multilineTextAlignment(.trailing)
+                    .padding(.vertical, 10)
             }
 
             if case .loaded(let response) = test {

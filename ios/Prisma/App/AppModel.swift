@@ -47,10 +47,11 @@ final class AppModel {
                 downloads.serverAddressChanged(from: previous, to: new)
                 // The recorded answer was about a different server.
                 reachability.addressChanged()
-                // So was the version of the collection: the next sync merges again.
+                // The same server by another name: nothing the collection remembers
+                // is dropped, but a pass in flight must not write what the old
+                // client hears back.
                 collection.addressChanged()
             }
-            sync.onSucceeded = { [collection] in collection.localChanged() }
             let playback = PlaybackEngine(
                 context: container.mainContext, settings: settings,
                 downloads: downloads, reachability: reachability
@@ -64,7 +65,7 @@ final class AppModel {
                 // Changes made while the server was away are pushed now. Not a retry
                 // timer: this is the server coming back.
                 if reachable {
-                    collection.syncNow()
+                    collection.serverBecameReachable()
                 }
             }
             // Starts the network-path watch, whose first update is the first probe
@@ -73,7 +74,6 @@ final class AppModel {
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
             playlists.onCollectionChange = { [collection] in collection.localChanged() }
-            collection.announce = { [playlists] text in playlists.announce(text) }
             // Created here but idle: it only runs once RootView reports the app is
             // in the foreground, never during a background launch.
             let acquisitions = AcquisitionCoordinator(

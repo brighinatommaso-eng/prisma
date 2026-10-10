@@ -3,8 +3,8 @@ import Observation
 import SwiftData
 import SwiftUI
 
-/// Every change to playlists and favourites. Stored only on this iPhone: no
-/// backend, no sync.
+/// Every change to playlists and favourites. Saved on this iPhone first, always;
+/// `CollectionSync` then keeps the server's copy in step behind it.
 @Observable
 final class PlaylistStore {
     /// The last failed action, shown until dismissed.
@@ -61,9 +61,8 @@ final class PlaylistStore {
     ///
     /// A slot added from Cerca names a track that exists nowhere yet. Once it has
     /// been acquired the sync writes a `StoredTrack` with that same id, and from that
-    /// moment the slot should be an ordinary slot: it plays, it downloads, and it
-    /// goes when the server drops the track, because the cascade on
-    /// `StoredTrack.playlistEntries` finally has something to cascade. Doing it here
+    /// moment the slot should be an ordinary slot: it plays and it downloads. The
+    /// same happens to a slot whose track left the library and came back. Doing it here
     /// means every action goes through it — play, download, add, remove, reorder —
     /// and nothing else has to know that two kinds of slot ever existed.
     ///
@@ -128,9 +127,8 @@ final class PlaylistStore {
     }
 
     /// Deletes the playlists and, by the cascade on `Playlist.entries`, their slots.
-    /// Nothing else: the tracks stay in the library and on the phone, the favourites
-    /// stay in Preferiti, and the server is not asked anything — playlists live only
-    /// on this iPhone.
+    /// Nothing else: the tracks stay in the library and on the phone, and the
+    /// favourites stay in Preferiti. The server's copy of the collection follows.
     func delete(_ playlists: [Playlist]) {
         guard !playlists.isEmpty else { return }
         let names = playlists.map(\.name)
@@ -246,9 +244,9 @@ final class PlaylistStore {
         }
     }
 
-    /// Entries that name nothing at all. Deleting a track cascades to its entries,
-    /// so this should find nothing; it runs at launch as a safety net and reports
-    /// what it removes.
+    /// Entries that name nothing at all. A slot keeps its video id when its track
+    /// leaves the library, so this should find nothing; it runs at launch as a
+    /// safety net and reports what it removes.
     ///
     /// A slot with no `track` is not an orphan by itself any more: one added from
     /// Cerca has only a video id until its track is acquired, and it is a real line
@@ -356,9 +354,9 @@ final class PlaylistStore {
     // MARK: - Favourites
 
     /// Preferiti is a collection of its own: a `FavouriteTrack` keyed by video id,
-    /// which exists whether or not the track does. `StoredTrack.favouritedAt` is
-    /// kept in step here, and only here, so every row projection keeps reading one
-    /// field and an older build still finds its favourites.
+    /// which exists whether or not the track does, and whose existence is the only
+    /// thing that decides whether a track is a favourite. `StoredTrack.favouritedAt`
+    /// is still written here so an older build finds its favourites; nothing reads it.
     ///
     /// Takes values, not a track: Cerca favourites a result that is in no library.
     func toggleFavourite(_ draft: FavouriteDraft) {
@@ -489,11 +487,6 @@ final class PlaylistStore {
 
     func clearNotice() {
         notice = nil
-    }
-
-    /// A line from outside the store, shown where its own notices are.
-    func announce(_ text: String) {
-        notice = text
     }
 
     @discardableResult

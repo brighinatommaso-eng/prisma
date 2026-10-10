@@ -41,6 +41,7 @@ struct RootView: View {
                     .environment(services.playlists)
                     .environment(services.deletion)
                     .environment(services.reachability)
+                    .environment(services.collection)
                     .environment(presenter)
                     .modelContainer(services.container)
                     .preferredColorScheme(colorScheme)
@@ -53,6 +54,7 @@ struct RootView: View {
             .environment(services.acquisitions)
             .environment(services.deletion)
             .environment(services.reachability)
+            .environment(services.collection)
             .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every
@@ -62,14 +64,16 @@ struct RootView: View {
             // acquisition left unfinished by the last run.
             .task {
                 services.acquisitions.resume()
-                services.collection.syncNow()
+                // The interface is on screen. A background launch never gets here,
+                // so nothing is synced by one.
+                services.collection.appBecameActive()
             }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active:
                     services.downloads.checkTransfers(reason: "apertura dell'app")
                     services.acquisitions.resume()
-                    services.collection.syncNow()
+                    services.collection.appBecameActive()
                     // Coming back is an event, so the server is asked again — but
                     // only if the last answer is older than the freshness window,
                     // so switching apps twice in a row costs one request.

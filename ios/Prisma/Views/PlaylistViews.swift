@@ -51,9 +51,12 @@ struct FavouriteButton: View {
     }
 }
 
-/// Errors and notices from playlist actions, with a way to dismiss them.
+/// Errors and notices from playlist actions, with a way to dismiss them. What the
+/// collection sync did to the collection has a line of its own here, so the next
+/// playlist action cannot replace it before it has been read.
 struct PlaylistStoreMessages: View {
     @Environment(PlaylistStore.self) private var store
+    @Environment(CollectionSync.self) private var collection
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
@@ -71,6 +74,16 @@ struct PlaylistStoreMessages: View {
                     .foregroundStyle(ink.secondary)
                     .padding(.top, 8)
                 DismissLink { store.clearNotice() }
+            }
+            .prismaRow()
+        }
+        if let notice = collection.notice {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.top, 8)
+                DismissLink { collection.clearNotice() }
             }
             .prismaRow()
         }
@@ -572,12 +585,15 @@ struct AddToPlaylistSheet: View {
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var tracks: [StoredTrack]
     @Query private var entries: [PlaylistEntry]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var newName = ""
 
     var body: some View {
         // The one place this sheet reads the store.
-        let data = Projection.addToPlaylist(trackID: trackID, tracks: tracks, playlists: playlists, entries: entries)
+        let data = Projection.addToPlaylist(
+            trackID: trackID, tracks: tracks, playlists: playlists, entries: entries, favourites: favourites
+        )
 
         NavigationStack {
             List {

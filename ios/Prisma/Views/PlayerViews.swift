@@ -48,11 +48,13 @@ struct MiniPlayerView: View {
 
     @Environment(PlaybackEngine.self) private var playback
     @Environment(\.prismaInk) private var ink
+    /// The heart is whether the playing track is in Preferiti, which only this says.
+    @Query private var favourites: [FavouriteTrack]
 
     var body: some View {
         // The one place this view reads the store: the engine's fetch, projected
         // before anything below it sees the result.
-        if let track = playback.currentTrack.map({ Projection.row(of: $0) }) {
+        if let track = Projection.nowPlaying(playback.currentTrack, favourites: favourites) {
             VStack(spacing: 0) {
                 HStack(spacing: 4) {
                     Button(action: openPlayer) {
@@ -183,13 +185,15 @@ struct FullPlayerView: View {
     @Environment(PlayerPresenter.self) private var presenter
     @Environment(\.dismiss) private var dismiss
     @Environment(\.prismaInk) private var ink
+    /// The heart is whether the playing track is in Preferiti, which only this says.
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var showingQueue = false
     @State private var addingToPlaylist = false
 
     var body: some View {
         // The one place this screen reads the store.
-        let track = playback.currentTrack.map { Projection.row(of: $0) }
+        let track = Projection.nowPlaying(playback.currentTrack, favourites: favourites)
 
         GeometryReader { proxy in
             ScrollView {

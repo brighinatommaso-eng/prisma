@@ -464,7 +464,10 @@ enum Projection {
         return AlbumCover(palette: album.palette, fileName: album.coverFileName, savedAt: album.coverSavedAt)
     }
 
-    static func row(of track: StoredTrack, acquisition: AcquisitionData? = nil) -> TrackRowData {
+    /// `isFavourite` is whether a `FavouriteTrack` exists for this track's video id.
+    /// It is asked of the caller, with no default, because the track itself does not
+    /// know: every screen that draws a heart reads Preferiti to decide it.
+    static func row(of track: StoredTrack, isFavourite: Bool, acquisition: AcquisitionData? = nil) -> TrackRowData {
         let album = track.album
         return TrackRowData(
             id: track.serverID,
@@ -475,7 +478,7 @@ enum Projection {
             durationS: track.durationS,
             downloadState: track.downloadState,
             failureCause: track.failureCause,
-            isFavourite: track.isFavourite,
+            isFavourite: isFavourite,
             cover: cover(of: album),
             artworkURL: nil,
             presence: track.serverDroppedAt == nil ? .inLibrary : .phoneOnly,
@@ -504,6 +507,14 @@ enum Projection {
             acquisition: acquisition,
             downloadToken: nil
         )
+    }
+
+    /// The mini-player and the full player: the track the engine holds, with the
+    /// heart decided by Preferiti.
+    static func nowPlaying(_ track: StoredTrack?, favourites: [FavouriteTrack]) -> TrackRowData? {
+        guard let track else { return nil }
+        let id = track.serverID
+        return row(of: track, isFavourite: favourites.contains { $0.videoID == id })
     }
 
     static func acquisition(_ record: PendingAcquisition) -> AcquisitionData {
@@ -556,7 +567,7 @@ enum Projection {
             .sorted { $0.addedAt > $1.addedAt }
             .map { favourite in
                 if let track = byID[favourite.videoID] {
-                    return row(of: track, acquisition: pending[favourite.videoID])
+                    return row(of: track, isFavourite: true, acquisition: pending[favourite.videoID])
                 }
                 return row(of: favourite, acquisition: pending[favourite.videoID])
             }
@@ -622,13 +633,15 @@ enum Projection {
     /// that names nothing at all, has nothing to show.
     private static func slot(_ entry: PlaylistEntry, in index: SlotIndex) -> PlaylistRowData {
         if let track = entry.track {
-            return PlaylistRowData(entryID: entry.id, track: row(of: track), missing: nil)
+            let isFavourite = index.favourites[track.serverID] != nil
+            return PlaylistRowData(entryID: entry.id, track: row(of: track, isFavourite: isFavourite), missing: nil)
         }
         guard let videoID = entry.videoID else {
             return PlaylistRowData(entryID: entry.id, track: nil, missing: .leftTheLibrary)
         }
         if let track = index.tracks[videoID] {
-            return PlaylistRowData(entryID: entry.id, track: row(of: track), missing: nil)
+            let isFavourite = index.favourites[videoID] != nil
+            return PlaylistRowData(entryID: entry.id, track: row(of: track, isFavourite: isFavourite), missing: nil)
         }
         if let favourite = index.favourites[videoID] {
             return PlaylistRowData(entryID: entry.id, track: row(of: favourite), missing: nil)
@@ -641,9 +654,11 @@ enum Projection {
         trackID: String,
         tracks: [StoredTrack],
         playlists: [Playlist],
-        entries: [PlaylistEntry]
+        entries: [PlaylistEntry],
+        favourites: [FavouriteTrack]
     ) -> AddToPlaylistData {
         let track = tracks.first { $0.serverID == trackID }
+        let isFavourite = favourites.contains { $0.videoID == trackID }
         let albumLine = track?.album.map { "\($0.artist) · \($0.title)" }
         let byPlaylist = group(entries)
         let targets = playlists.map { playlist in
@@ -655,7 +670,11 @@ enum Projection {
                 holdsTrack: listed.contains { $0.track?.serverID == trackID }
             )
         }
-        return AddToPlaylistData(track: track.map { row(of: $0) }, albumLine: albumLine, targets: targets)
+        return AddToPlaylistData(
+            track: track.map { row(of: $0, isFavourite: isFavourite) },
+            albumLine: albumLine,
+            targets: targets
+        )
     }
 
     /// The Downloads tab: device downloads first by state, then by when they were
@@ -666,7 +685,12 @@ enum Projection {
     /// one download. A Telefono acquisition outlives its handoff — it still has the
     /// server's copy to delete — and that last step is its own row again, because
     /// nothing else says it is happening.
-    static func downloads(tracks: [StoredTrack], acquisitions: [PendingAcquisition]) -> DownloadsData {
+    static func downloads(
+        tracks: [StoredTrack],
+        acquisitions: [PendingAcquisition],
+        favourites: [FavouriteTrack]
+    ) -> DownloadsData {
+        let favouriteIDs = Set(favourites.map(\.videoID))
         let ordered = tracks.sorted {
             // Downloading before queued, then by when they were asked for.
             if $0.downloadState != $1.downloadState {
@@ -674,7 +698,7 @@ enum Projection {
             }
             return ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast)
         }
-        let rows = ordered.map { row(of: $0) }
+        let rows = ordered.map { row(of: $0, isFavourite: favouriteIDs.contains($0.serverID)) }
         let transferring: Set<DownloadState> = [.queued, .downloading, .downloaded]
         let started = Set(rows.filter { transferring.contains($0.downloadState) }.map(\.id))
         let records = acquisitions
@@ -714,10 +738,14 @@ enum Projection {
                 alreadyIn: Set(listed.compactMap(\.trackID))
             )
         }
+        let favouriteIDs = Set(favourites.map(\.videoID))
         return SearchIndex(
-            tracks: Dictionary(tracks.map { ($0.serverID, row(of: $0)) }, uniquingKeysWith: { first, _ in first }),
+            tracks: Dictionary(
+                tracks.map { ($0.serverID, row(of: $0, isFavourite: favouriteIDs.contains($0.serverID))) },
+                uniquingKeysWith: { first, _ in first }
+            ),
             acquisitions: Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first }),
-            favourites: Set(favourites.map(\.videoID)),
+            favourites: favouriteIDs,
             playlist: target
         )
     }

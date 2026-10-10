@@ -13,10 +13,11 @@ struct DownloadsView: View {
     @Environment(\.prismaInk) private var ink
 
     @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
 
     var body: some View {
         // The one place this screen reads the store.
-        let data = Projection.downloads(tracks: tracks, acquisitions: acquisitions)
+        let data = Projection.downloads(tracks: tracks, acquisitions: acquisitions, favourites: favourites)
         let inProgress = data.tracks(in: [.downloading, .queued])
         let failed = data.tracks(in: [.failed])
         let cancelled = data.tracks(in: [.cancelled])
