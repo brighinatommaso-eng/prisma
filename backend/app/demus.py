@@ -31,7 +31,10 @@ from .artwork import upsized_artwork_url
 # Lyrics add a few KB of text per song, so these leave room for a playlist of
 # thousands of songs and still bound what a hostile file can cost.
 MAX_COMPRESSED_BYTES = 4 * 1024 * 1024
-MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
+MAX_DECOMPRESSED_BYTES = 16 * 1024 * 1024
+# The byte limits do not bound this on their own: a song can be a dozen bytes,
+# and a file of nothing but those compresses thousands to one.
+MAX_SONGS = 10_000
 # Enough for the dictionary of `xz -9`, the largest an ordinary file asks for.
 DECODER_MEMORY_LIMIT_BYTES = 128 * 1024 * 1024
 DECOMPRESS_CHUNK_BYTES = 64 * 1024
@@ -62,8 +65,10 @@ async def read_body(chunks: AsyncIterator[bytes], content_length: str | None,
     """
     too_long = DemusError(f"The file is larger than the {limit} byte limit on the "
                           "compressed size.")
-    if content_length is not None and content_length.isdecimal() and int(content_length) > limit:
-        raise too_long
+    if content_length is not None and content_length.isdecimal():
+        # A length too long to be worth converting is over the limit already.
+        if len(content_length) > len(str(limit)) or int(content_length) > limit:
+            raise too_long
     body = bytearray()
     async for chunk in chunks:
         if len(body) + len(chunk) > limit:
@@ -149,7 +154,7 @@ def _artwork_url(value: str | None) -> str | None:
     host that text is something else -- on a video thumbnail it is a signature
     -- so the URL is passed through as it is.
     """
-    if not value:
+    if not value or any(character.isspace() for character in value):
         return None
     try:
         parts = urlsplit(value)
@@ -157,7 +162,9 @@ def _artwork_url(value: str | None) -> str | None:
         return None
     if parts.scheme not in ("http", "https") or not parts.hostname:
         return None
-    if parts.hostname.endswith(".googleusercontent.com"):
+    # With a query or a fragment, the last "=" is theirs and not a rendition.
+    plain = not parts.query and not parts.fragment
+    if plain and parts.hostname.endswith(".googleusercontent.com"):
         return upsized_artwork_url(value) or value
     return value
 
@@ -223,9 +230,21 @@ def _parse(data: bytes) -> dict[str, Any]:
     songs = document.get("songs")
     if not isinstance(songs, list):
         raise DemusError("The playlist has no 'songs' list.")
+    if len(songs) > MAX_SONGS:
+        raise DemusError(f"The playlist has {len(songs)} songs, more than the "
+                         f"{MAX_SONGS} songs one import may carry.")
 
-    return {
+    playlist = {
         "name": title,
         "created_at": _created_at(document.get("createdDate")),
         "songs": [_song(raw, position) for position, raw in enumerate(songs, start=1)],
     }
+    try:
+        # JSON can spell half of a surrogate pair as an escape. Such a string
+        # cannot be written back out, so it is refused here, as bad input,
+        # rather than failing later as the response is serialised.
+        json.dumps(playlist, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise DemusError("The playlist contains text that is not valid Unicode "
+                         "(an unpaired surrogate).") from None
+    return playlist

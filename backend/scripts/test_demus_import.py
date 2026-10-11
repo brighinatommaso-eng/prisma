@@ -8,18 +8,36 @@ scripts/fixtures (lyrics removed):
     docker compose exec -T backend python scripts/test_demus_import.py
 
 Plain asserts in test_* functions, like the other scripts. The parser touches
-neither the database nor the library, so there is no scratch directory here.
+neither the database nor the library. The endpoint tests call the FastAPI app
+directly as an ASGI application, with no HTTP client; they need the whole app
+to import, so on a machine without ytmusicapi they are skipped and the parser
+ones still run.
 """
 
 import asyncio
 import json
 import lzma
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
+
+# Must happen before anything under app/ is imported: config reads the
+# environment once, at import time. Only importing app.main needs it.
+_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-demus-"))
+os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
+os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
+os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import demus  # noqa: E402
+
+try:
+    from app.main import app
+except ImportError:
+    app = None
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RAP = FIXTURES / "demus-rap.playlist"
@@ -134,6 +152,11 @@ def test_artwork_rewrite_rules():
         # Not googleusercontent, whatever it ends with.
         "https://googleusercontent.com.example.test/abc=w60-h60":
             "https://googleusercontent.com.example.test/abc=w60-h60",
+        # A query string: its last "=" belongs to a parameter, not a size.
+        "https://lh3.googleusercontent.com/a?x=1&sig=abc":
+            "https://lh3.googleusercontent.com/a?x=1&sig=abc",
+        "https://lh3.googleusercontent.com/abc=w60-h60\n": None,
+        "https://lh3.googleusercontent.com/a b=w60-h60": None,
         "javascript:alert(1)": None,
         "file:///etc/passwd": None,
         "": None,
@@ -232,7 +255,31 @@ def test_song_with_a_wrong_typed_field():
         assert "Song 1" in message and repr(field) in message, message
 
 
+def test_text_that_is_not_valid_unicode():
+    # JSON can spell half of a surrogate pair; no response could carry it.
+    for document in (_playlist(title="\ud800"),
+                     _playlist(songs=[{**SONG, "id": "\udfff"}]),
+                     _playlist(songs=[{**SONG, "albumTitle": "a\ud83d"}])):
+        assert "not valid Unicode" in _refused(_xz(document))
+    # A whole pair, written as escapes, is an ordinary character.
+    paired = lzma.compress(json.dumps(_playlist(title="\U0001f3b5")).encode("ascii"))
+    assert demus.parse(paired)["name"] == "\U0001f3b5"
+
+
 # --- size limits ---------------------------------------------------------
+
+def test_too_many_songs():
+    # Tiny songs compress thousands to one, so the byte limits alone would
+    # still admit millions of them.
+    document = _playlist(songs=[{"id": "a"}] * (demus.MAX_SONGS + 1))
+    data = _xz(document)
+    assert len(data) < 10_000, len(data)
+    message = _refused(data)
+    assert str(demus.MAX_SONGS) in message and "songs" in message, message
+    at_the_limit = demus.parse(_xz(_playlist(songs=[{"id": "a"}] * demus.MAX_SONGS)))
+    assert len(at_the_limit["songs"]) == demus.MAX_SONGS
+
+
 
 def test_oversized_compressed_input_is_refused_before_decompressing():
     calls = []
@@ -338,12 +385,92 @@ def test_declared_length_over_the_limit_is_refused_unread():
     assert served == []
 
 
+def test_absurd_declared_length_is_refused_not_an_error():
+    message, served = _read([10], "9" * 5000)
+    assert "compressed" in message, message
+    assert served == []
+
+
 def test_stream_longer_than_the_limit_stops_being_read():
     # Content-Length absent, or lying: the count while reading is what holds.
     for declared in (None, "10", "not-a-number"):
         message, served = _read([60, 30, 30, 30, 30], declared)
         assert "compressed" in message and "100" in message, message
         assert served == [60, 30, 30], served
+
+
+# --- the endpoint --------------------------------------------------------
+
+def _post(chunks, headers=()):
+    """POST /import/demus with the body delivered in `chunks`. Returns the
+    status, the decoded JSON body, and how many chunks the app asked for."""
+    pending = list(chunks)
+    asked = []
+    sent = []
+
+    async def receive():
+        asked.append(1)
+        if not pending:
+            return {"type": "http.disconnect"}
+        return {"type": "http.request", "body": pending.pop(0), "more_body": bool(pending)}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+             "method": "POST", "scheme": "http", "path": "/import/demus",
+             "raw_path": b"/import/demus", "query_string": b"", "root_path": "",
+             "headers": [(k.lower().encode(), v.encode()) for k, v in headers],
+             "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000)}
+    asyncio.run(app(scope, receive, send))
+    status = [m["status"] for m in sent if m["type"] == "http.response.start"][0]
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, json.loads(body), len(asked)
+
+
+def test_endpoint_returns_the_playlist():
+    if app is None:
+        print("      (skipped: the app does not import here)")
+        return
+    data = RAP.read_bytes()
+    status, body, _ = _post([data[:1000], data[1000:]],
+                            [("Content-Length", str(len(data)))])
+    assert status == 200, body
+    assert body == demus.parse(data)
+    assert set(body) == {"name", "created_at", "songs"}
+    assert (body["name"], body["created_at"], len(body["songs"])) == ("Rap", 1782052736, 33)
+
+
+def test_endpoint_answers_422_with_the_reason():
+    if app is None:
+        return
+    for chunks, expected in (
+        ([b""], "empty"),
+        ([b"not a playlist"], "not an xz file"),
+        ([RAP.read_bytes()[:500]], "truncated"),
+        ([lzma.compress(b"[1]")], "not a JSON object"),
+        ([_xz(_playlist(songs=[{"title": "no id"}]))], "Song 1 has no 'id'"),
+        ([_xz(_playlist(title="\ud800"))], "not valid Unicode"),
+    ):
+        status, body, _ = _post(chunks)
+        assert status == 422, (status, body)
+        assert isinstance(body["detail"], str) and expected in body["detail"], body
+
+
+def test_endpoint_refuses_an_oversized_upload_without_reading_it_all():
+    if app is None:
+        return
+    megabyte = b"\0" * (1024 * 1024)
+    limit_mb = demus.MAX_COMPRESSED_BYTES // len(megabyte)
+    # Declared honestly: refused before the body is asked for at all.
+    status, body, asked = _post([megabyte] * (limit_mb + 4),
+                                [("Content-Length", str(len(megabyte) * (limit_mb + 4)))])
+    assert status == 422 and "compressed" in body["detail"], body
+    assert asked == 0, asked
+    # Not declared: refused on the chunk that crosses the limit, the rest unread.
+    status, body, asked = _post([megabyte] * (limit_mb + 4))
+    assert status == 422 and "compressed" in body["detail"], body
+    assert asked == limit_mb + 1, asked
 
 
 def main() -> int:
@@ -362,6 +489,7 @@ def main() -> int:
         else:
             print(f"ok    {test.__name__}")
     print(f"\n{len(tests) - failures}/{len(tests)} passed")
+    shutil.rmtree(_SCRATCH, ignore_errors=True)
     return 1 if failures else 0
 
 

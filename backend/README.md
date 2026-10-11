@@ -142,9 +142,10 @@ curl.exe -s --data-binary "@Rap.playlist" -H "Content-Type: application/octet-st
   itself. Lyrics, genre and the artist fields are ignored too.
 
 The file is xz-compressed JSON, and both sizes are capped so a hostile file cannot
-exhaust memory: **4 MiB compressed** and **32 MiB decompressed**. The first is
+exhaust memory: **4 MiB compressed** and **16 MiB decompressed**. The first is
 enforced while the request is read and the second while the data is unpacked, so
-neither is ever held in full past its limit. The constants are in `app/demus.py`.
+neither is ever held in full past its limit. A playlist may carry at most
+**10,000 songs**. The constants are in `app/demus.py`.
 
 Anything that is not a readable export answers **422**, with a `detail` string
 saying what is wrong — for example:
@@ -157,8 +158,10 @@ saying what is wrong — for example:
 | `The decompressed content is not JSON` | xz, but not a Demus export |
 | `The playlist has no 'songs' list` | JSON of some other shape |
 | `Song 7 has no 'id'` | a song that cannot be matched to a track; the number is its position in the file |
+| `The playlist contains text that is not valid Unicode` | a string holding half of a surrogate pair |
+| `The playlist has 10001 songs, more than the 10000 songs one import may carry` | over the song cap |
 | `The file is larger than the 4194304 byte limit on the compressed size` | over the compressed cap |
-| `The file decompresses to more than the 33554432 byte limit on the decompressed size` | over the decompressed cap |
+| `The file decompresses to more than the 16777216 byte limit on the decompressed size` | over the decompressed cap |
 
 ## Download pacing and the bot-wall cooldown
 
@@ -201,7 +204,9 @@ The three durations are constants at the top of `app/worker.py`.
 ## Tests
 
 The scripts in `scripts/` are plain Python, each printing `N/N passed`. These need
-neither the network nor YouTube and also run on a bare development machine:
+neither the network nor YouTube and also run on a bare development machine
+(where `test_demus_import.py` skips its three endpoint tests, which need the whole
+app to import, and still runs the parser's):
 
 ```powershell
 python scripts/test_demus_import.py
