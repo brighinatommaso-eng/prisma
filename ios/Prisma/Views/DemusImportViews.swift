@@ -190,7 +190,7 @@ struct DemusImportSheet: View {
                     }
                 }
                 if preview.repeated > 0 {
-                    Text(Self.repeated(preview.repeated))
+                    Text(Self.repeated(preview.repeated, distinct: preview.trackCount))
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -210,7 +210,7 @@ struct DemusImportSheet: View {
                     .createNew,
                     symbol: "plus.rectangle.on.rectangle",
                     title: "Crea una nuova playlist",
-                    explanation: "Nasce una seconda playlist con lo stesso nome e tutti i brani del file, nel loro ordine. Quella che c'è resta com'è."
+                    explanation: "Nasce una seconda playlist con lo stesso nome e tutte le voci del file, nel loro ordine. Quella che c'è resta com'è."
                 )
             } header: {
                 Text("Esiste già una playlist “\(preview.name)”").textCase(nil)
@@ -281,20 +281,22 @@ struct DemusImportSheet: View {
         return Formatting.trackCount(count) + ", sul server e sul telefono"
     }
 
-    private static func repeated(_ count: Int) -> String {
-        count == 1
-            ? "Un brano compare due volte nel file: nella playlist entra una volta sola."
-            : "\(count) voci del file ripetono un brano già elencato: nella playlist ogni brano entra una volta sola."
+    /// Why the counts above are out of fewer tracks than the playlist is long.
+    private static func repeated(_ count: Int, distinct: Int) -> String {
+        let what = count == 1
+            ? "Una voce del file ripete un brano già elencato"
+            : "\(count) voci del file ripetono brani già elencati"
+        return what + ": la playlist le tiene tutte, come in Demus, mentre preferiti e download contano ogni brano una volta sola, quindi \(distinct)."
     }
 
     private static func updateExplanation(_ existing: DemusExistingPlaylist) -> String {
         switch existing.missingCount {
         case 0:
-            return "Contiene già tutti i brani del file, quindi resta com'è. I brani vengono comunque messi nei preferiti e scaricati."
+            return "Contiene già tutte le voci del file, quindi resta com'è. I brani vengono comunque messi nei preferiti e scaricati."
         case 1:
-            return "Aggiunge in fondo l'unico brano del file che non contiene ancora."
+            return "Aggiunge in fondo l'unica voce del file che non contiene ancora."
         default:
-            return "Aggiunge in fondo, nell'ordine del file, i \(existing.missingCount) brani che non contiene ancora."
+            return "Aggiunge in fondo, nell'ordine del file, le \(existing.missingCount) voci che non contiene ancora."
         }
     }
 }
@@ -349,12 +351,18 @@ enum ImportText {
 
     /// The second line: why nothing seems to move, or what is left to do. nil while
     /// the import is simply under way.
-    static func detail(_ data: ImportProgressData, queueResumesAt: Date?) -> String? {
+    ///
+    /// The server being away comes before its queue resting: nothing is known
+    /// about a queue that cannot be asked.
+    static func detail(_ data: ImportProgressData, queueResumesAt: Date?, serverUnreachable: Bool = false) -> String? {
         if data.isFinished {
             let missing = data.failed == 1
                 ? "un brano non è arrivato"
                 : "\(data.failed) brani non sono arrivati"
             return "L'importazione è finita, ma \(missing) sul telefono. Restano nella playlist e nei preferiti; quelli elencati qui sotto in Non riuscito dicono perché, e hanno Riprova."
+        }
+        if serverUnreachable {
+            return "Il server non è raggiungibile: l'importazione è ferma dov'era, senza che nulla sia fallito, e riprende da sola quando il server torna."
         }
         if let queueResumesAt {
             return "YouTube ha chiesto di rallentare, quindi il server ha messo in pausa i download: riprendono alle \(queueResumesAt.formatted(date: .omitted, time: .shortened)). Non serve fare nulla, i brani in coda non sono persi."
@@ -378,9 +386,11 @@ struct ImportProgressLine: View {
 
     var body: some View {
         let resumesAt = queueResumesAt
+        // Tracks still to arrive, and the chain that fetches them has nobody to ask.
+        let unreachable = !data.isFinished && acquisitions.isWaitingForServer
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
-                icon(resting: resumesAt != nil)
+                icon(resting: resumesAt != nil, unreachable: unreachable)
                     .frame(width: 22, height: 22)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
@@ -389,7 +399,7 @@ struct ImportProgressLine: View {
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                         .foregroundStyle(ink.primary)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let detail = ImportText.detail(data, queueResumesAt: resumesAt) {
+                    if let detail = ImportText.detail(data, queueResumesAt: resumesAt, serverUnreachable: unreachable) {
                         Text(detail)
                             .font(.footnote)
                             .foregroundStyle(ink.secondary)
@@ -418,11 +428,15 @@ struct ImportProgressLine: View {
     }
 
     @ViewBuilder
-    private func icon(resting: Bool) -> some View {
+    private func icon(resting: Bool, unreachable: Bool) -> some View {
         if data.isFinished {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 15))
                 .foregroundStyle(ink.favourite)
+        } else if unreachable {
+            Image(systemName: "pause.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(ink.secondary)
         } else if resting {
             Image(systemName: "clock")
                 .font(.system(size: 15, weight: .medium))

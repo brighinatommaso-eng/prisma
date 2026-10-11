@@ -895,7 +895,15 @@ private struct FavouriteStateSlot: View {
 
     @ViewBuilder
     private var content: some View {
-        if let record = data.acquisition, record.isActive {
+        if let record = data.acquisition, record.isActive,
+           AcquisitionText.isWaitingForServer(record, pollFailures: acquisitions.pollFailures) {
+            // Held up by the server being away: standing still, so nothing turns.
+            Image(systemName: "pause.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(ink.secondary)
+                .frame(width: 44, height: 44)
+                .accessibilityLabel("In attesa: il server non è raggiungibile")
+        } else if let record = data.acquisition, record.isActive {
             ProgressRing(fraction: record.stage == .onServer ? record.serverProgress : nil, color: ink.accent, side: 18)
                 .frame(width: 44, height: 44)
                 .accessibilityLabel(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))

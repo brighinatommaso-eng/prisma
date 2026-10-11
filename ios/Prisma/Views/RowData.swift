@@ -413,7 +413,8 @@ struct DemusExistingPlaylist: Equatable {
     let id: UUID
     /// How many playlists carry the name. More than one means `id` was chosen.
     let sameNameCount: Int
-    /// The tracks of the file it does not hold yet: what an update would append.
+    /// The slots an update would append: for each track, how many more times the
+    /// file lists it than the playlist holds it (`PlaylistStore.appendMissing`).
     let missingCount: Int
 }
 
@@ -422,7 +423,8 @@ struct DemusExistingPlaylist: Equatable {
 struct DemusPreviewData: Equatable {
     /// The name the playlist will have.
     let name: String
-    /// The songs as the file lists them, a repeated one counted each time.
+    /// The songs as the file lists them, a repeated one counted each time: the
+    /// length the playlist will have.
     let songCount: Int
     /// The distinct tracks among them: what is favourited and acquired.
     let trackCount: Int
@@ -838,10 +840,11 @@ enum Projection {
     /// The import preview: a parsed Demus file against Preferiti, the library and
     /// the playlists. Nothing is written by looking.
     ///
-    /// Counted over distinct video ids, because that is what importing acts on: a
-    /// favourite and an acquisition exist once per track however often the file
-    /// lists it, and a playlist filled through `PlaylistStore.add(_:to:)` holds a
-    /// track once.
+    /// Two counts, because importing acts on two things. The playlist is a copy
+    /// of the file, so its length and its duration count every line, repeats
+    /// included. A favourite and an acquisition exist once per track however often
+    /// the file lists it, so what is already in Preferiti, what is already on the
+    /// phone and what there is to download are counted over distinct video ids.
     ///
     /// With several playlists of the same name, the one an update goes into is the
     /// first in the user's own order of playlists (`sortPosition`), then the oldest,
@@ -875,11 +878,24 @@ enum Projection {
             }
         var existing: DemusExistingPlaylist?
         if let target = sameName.first {
-            let held = Set((group(entries)[ObjectIdentifier(target)] ?? []).compactMap(\.trackID))
+            var held: [String: Int] = [:]
+            for id in (group(entries)[ObjectIdentifier(target)] ?? []).compactMap(\.trackID) {
+                held[id, default: 0] += 1
+            }
+            // The same multiset difference `PlaylistStore.appendMissing` applies.
+            var seenInFile: [String: Int] = [:]
+            var missingCount = 0
+            for song in file.songs {
+                let occurrence = (seenInFile[song.videoID] ?? 0) + 1
+                seenInFile[song.videoID] = occurrence
+                if occurrence > (held[song.videoID] ?? 0) {
+                    missingCount += 1
+                }
+            }
             existing = DemusExistingPlaylist(
                 id: target.id,
                 sameNameCount: sameName.count,
-                missingCount: ids.filter { !held.contains($0) }.count
+                missingCount: missingCount
             )
         }
 

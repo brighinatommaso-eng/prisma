@@ -220,6 +220,67 @@ final class PlaylistStore {
         notice = what + (skipped == 0 ? "" : alreadyThere)
     }
 
+    /// Makes a playlist hold everything an imported file lists, repeats included,
+    /// by appending what it does not hold yet.
+    ///
+    /// Unlike `add(_:to:)`, which is a picker's action and never puts a track in
+    /// twice, this is a copy of somebody else's list: a playlist may hold the same
+    /// track more than once, and one imported from Demus has to come out the same
+    /// length and in the same order as it was there.
+    ///
+    /// The rule is a difference between two multisets, taken in the file's order.
+    /// If the file lists a track N times and the playlist already holds it M times,
+    /// max(0, N − M) slots are appended for it, and they are the file's later
+    /// occurrences: the first M are taken to be the ones already there. So:
+    ///
+    /// - into an empty playlist, every line of the file becomes a slot, in order;
+    /// - importing the same file again into the same playlist appends nothing;
+    /// - a track the playlist holds more often than the file lists it is left
+    ///   alone, and so is everything the playlist holds that the file does not.
+    ///
+    /// Each appended track is made a favourite if it is not one yet, as every way
+    /// into a playlist does. Saves once, and the collection hook follows.
+    func appendMissing(_ drafts: [FavouriteDraft], to playlist: Playlist) {
+        guard !drafts.isEmpty else { return }
+        let listed = entries(of: playlist)
+        var held: [String: Int] = [:]
+        for id in listed.compactMap(\.trackID) {
+            held[id, default: 0] += 1
+        }
+        // One read of the library for the whole file, not one per line.
+        let libraryRows = ModelLookup.tracks(Array(Set(drafts.map(\.videoID))), in: context)
+        let rowByID = Dictionary(libraryRows.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var next = (listed.map(\.position).max() ?? -1) + 1
+        var seenInFile: [String: Int] = [:]
+        var favourited = Set<String>()
+        var added = 0
+        for draft in drafts {
+            let occurrence = (seenInFile[draft.videoID] ?? 0) + 1
+            seenInFile[draft.videoID] = occurrence
+            guard occurrence > (held[draft.videoID] ?? 0) else { continue }
+            if favourited.insert(draft.videoID).inserted {
+                addFavourite(draft)
+            }
+            if let track = rowByID[draft.videoID] {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, track: track))
+            } else {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, videoID: draft.videoID))
+            }
+            next += 1
+            added += 1
+        }
+        guard added > 0 else {
+            notice = "“\(playlist.name)” contiene già tutti i brani del file, quindi è rimasta com'è."
+            return
+        }
+        playlist.updatedAt = Date()
+        guard save("importing \(added) tracks into “\(playlist.name)”") else { return }
+        notice = added == 1
+            ? "1 brano importato in “\(playlist.name)”."
+            : "\(added) brani importati in “\(playlist.name)”."
+    }
+
     func remove(_ entries: [PlaylistEntry], from playlist: Playlist) {
         for entry in entries {
             context.delete(entry)

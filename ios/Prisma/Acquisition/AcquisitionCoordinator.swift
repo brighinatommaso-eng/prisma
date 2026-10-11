@@ -23,6 +23,16 @@ import SwiftData
 ///
 /// Runs only in the foreground, as one loop that stops as soon as nothing is in
 /// progress. Never starts playback.
+///
+/// Only an answer fails a record. A job the server reports as failed, a request it
+/// refuses, a reply that cannot be read: those are answers, and the record that got
+/// one is failed and shown as failed. A request that reached nobody — the server is
+/// off, the network is, the address is missing, the server answered that it is
+/// itself in trouble — is not one (`isUnreachable`). The record stays exactly where
+/// it was, the pass stops there so that nothing else is sent into the void, and the
+/// chain goes on from the same step when `ServerReachability` reports the server
+/// back or the app returns to the foreground. That is not a retry: nothing failed.
+/// A record that did fail is never picked up again by anything but the user.
 @Observable
 final class AcquisitionCoordinator {
     /// The last failure outside any single record, e.g. the store could not be read.
@@ -30,8 +40,15 @@ final class AcquisitionCoordinator {
     /// For the technical details: whether the loop is running, and its last poll.
     private(set) var isRunning = false
     private(set) var lastPollAt: Date?
-    /// Consecutive failed polls of GET /downloads, shown while it retries.
+    /// Requests in a row that reached nobody. Above zero, the records waiting on
+    /// the server are waiting for the server itself, and their rows say so. Back to
+    /// zero the moment anything is answered. (The name is older than the meaning:
+    /// it used to count failed polls only.)
     private(set) var pollFailures = 0
+    /// Why the records are waiting, while they are: the server could not be
+    /// reached, and how. Not `lastError`, because nothing failed and nobody has to
+    /// close it: the first answer from the server withdraws it.
+    private(set) var unreachableNotice: APIError?
     /// When the server said its download queue starts again, while it is resting
     /// after YouTube's bot wall; nil when it is not resting, or when nothing has
     /// had a reason to ask. Read by the rows of the tracks waiting in that queue,
@@ -42,8 +59,16 @@ final class AcquisitionCoordinator {
     static let serverPollInterval: Double = 2
     /// Between checks while the device download is starting.
     static let handoffCheckInterval: Double = 1
-    /// Consecutive failed polls before the records waiting on the server fail.
+    /// Consecutive polls the server answered with something that is not a list of
+    /// jobs — an error status, an unreadable body — before the records waiting on it
+    /// fail. A poll that reached nobody is not counted here and fails nothing.
     static let maxPollFailures = 3
+    /// The longest pause between two attempts while the server is said to be
+    /// reachable and still does not answer this chain: 2, 4, 8 … up to this.
+    static let longestUnansweredPause: Double = 64
+    /// How far a server's clock and this phone's may disagree when deciding whether
+    /// a job was created by a request this phone sent.
+    static let clockSkewAllowance: TimeInterval = 10
     /// How long the device download may take to report anything once asked.
     static let handoffStartDeadline: TimeInterval = 20
     /// POST attempts for one acquisition before a lost job counts as a failure.
@@ -68,6 +93,9 @@ final class AcquisitionCoordinator {
     /// before anything is fetched, so the collection is right even if the chain
     /// never finishes.
     @ObservationIgnored private let playlists: PlaylistStore
+    /// Asked to look again whenever a request of this chain reaches nobody, so that
+    /// its answer turns to "unreachable" and its later turn back is an event.
+    @ObservationIgnored private let reachability: ServerReachability
 
     @ObservationIgnored private var loop: Task<Void, Never>?
     @ObservationIgnored private var loopToken = UUID()
@@ -84,19 +112,31 @@ final class AcquisitionCoordinator {
     @ObservationIgnored private var cooldownAskedAt: Date?
     /// The one /health request in flight, so a second is never started beside it.
     @ObservationIgnored private var cooldownCheck: Task<Void, Never>?
+    /// Set by the pass in progress when one of its requests reached nobody: the
+    /// rest of the pass sends nothing more.
+    @ObservationIgnored private var unanswered = false
+    /// Polls in a row answered with something other than the jobs.
+    @ObservationIgnored private var unreadablePolls = 0
 
     init(
         context: ModelContext,
         settings: AppSettings,
         sync: LibrarySync,
         downloads: DownloadManager,
-        playlists: PlaylistStore
+        playlists: PlaylistStore,
+        reachability: ServerReachability
     ) {
         self.context = context
         self.settings = settings
         self.sync = sync
         self.downloads = downloads
         self.playlists = playlists
+        self.reachability = reachability
+    }
+
+    /// The records waiting on the server are waiting for the server itself.
+    var isWaitingForServer: Bool {
+        pollFailures > 0
     }
 
     // MARK: - Lifecycle
@@ -104,6 +144,32 @@ final class AcquisitionCoordinator {
     /// The app is in the foreground: continue whatever is pending.
     func resume() {
         inForeground = true
+        startLoopIfNeeded()
+    }
+
+    /// `ServerReachability` reports the server back. Whatever was left where it was
+    /// when the server went away goes on from there.
+    ///
+    /// The loop is either gone, parked until exactly this, and is started; or still
+    /// there, sleeping out the pause after a request that reached nobody, and is
+    /// replaced so that the news is acted on now rather than a minute from now. A
+    /// request that loop still had in flight is disowned the way `pause` disowns
+    /// one: its error is ignored, and the record it was for is looked at again.
+    func serverBecameReachable() {
+        guard inForeground else { return }
+        if loop != nil, isWaitingForServer {
+            foregroundGeneration += 1
+            loop?.cancel()
+            loop = nil
+            isRunning = false
+        }
+        startLoopIfNeeded()
+    }
+
+    /// The user asked whether the server is back, from the notice that says it is
+    /// not. One probe, and one more attempt at whatever is waiting.
+    func checkServer() {
+        reachability.retry()
         startLoopIfNeeded()
     }
 
@@ -282,7 +348,6 @@ final class AcquisitionCoordinator {
             // or looked up first if it may already have been sent.
             record.stage = record.jobID == nil ? .requesting : .onServer
         }
-        pollFailures = 0
         handoffsThisProcess.remove(videoID)
         guard save("retrying “\(record.title ?? videoID)”") else { return }
         startLoopIfNeeded()
@@ -313,13 +378,17 @@ final class AcquisitionCoordinator {
     }
 
     private func run(token: UUID) async {
+        // Stopped on purpose with records still pending, to wait for the server.
+        var parked = false
         defer {
             // A pause followed by a resume may already have started a new loop.
             if loopToken == token {
                 loop = nil
                 isRunning = false
-                // Something tapped while this pass was deciding to stop.
-                startLoopIfNeeded()
+                if !parked {
+                    // Something tapped while this pass was deciding to stop.
+                    startLoopIfNeeded()
+                }
             }
         }
         while !Task.isCancelled {
@@ -330,46 +399,74 @@ final class AcquisitionCoordinator {
                 // Cancelled by pause(); the records keep their stage.
                 return
             }
+            // A request of that pass reached nobody, and by now the probe it set
+            // off has usually answered. If the answer is that the server is not
+            // there, this loop ends here with every record where it was: there is
+            // nothing to poll, and what ends the wait is an event —
+            // `serverBecameReachable`, or the app coming back to the foreground —
+            // never a timer. If the answer is that the server is there, it was one
+            // lost request, or something only this chain cannot reach, and the pass
+            // is simply run again after the pause above, which grows each time.
+            if unanswered, reachability.isReachable == false {
+                parked = true
+                return
+            }
         }
     }
 
     /// One pass over every active record. Returns the delay before the next pass,
     /// or nil when nothing is left to do.
+    ///
+    /// The steps run in the order of the chain, and every one of them after a
+    /// request that reached nobody is skipped: the first `POST` that cannot reach
+    /// the server is the last thing this pass sends, so fifty records do not each
+    /// wait out their own timeout, and no device download is handed over to fail its
+    /// pre-flight against a server known to be away.
     private func step() async -> Double? {
         let generation = foregroundGeneration
+        unanswered = false
 
         for videoID in activeRecords().filter({ $0.stage == .requesting }).map(\.videoID) {
             await request(videoID, generation: generation)
             guard generation == foregroundGeneration else { return nil }
+            if unanswered { break }
         }
 
-        if activeRecords().contains(where: { $0.stage == .onServer }) {
+        if !unanswered, activeRecords().contains(where: { $0.stage == .onServer }) {
             await pollServer(generation: generation)
             guard generation == foregroundGeneration else { return nil }
         }
 
-        if activeRecords().contains(where: { $0.stage == .syncing }) {
+        if !unanswered, activeRecords().contains(where: { $0.stage == .syncing }) {
             await syncPending(generation: generation)
             guard generation == foregroundGeneration else { return nil }
         }
 
-        handOff()
+        if !unanswered {
+            handOff()
+        }
 
-        if activeRecords().contains(where: { $0.stage == .deletingFromServer }) {
+        if !unanswered, activeRecords().contains(where: { $0.stage == .deletingFromServer }) {
             await deleteServerCopies(generation: generation)
             guard generation == foregroundGeneration else { return nil }
         }
 
         let remaining = activeRecords()
         if remaining.isEmpty {
-            // Nothing of this phone's is waiting in the server's queue any more.
+            // Nothing of this phone's is waiting in the server's queue any more,
+            // nor for the server.
             queueIdleSince = nil
             forgetCooldown()
+            forgetWaiting()
             return nil
         }
+        if unanswered {
+            // 2, 4, 8 … s. `run` decides after it whether there is anyone to ask.
+            let doublings = Double(min(max(pollFailures, 1) - 1, 8))
+            return min(Self.longestUnansweredPause, Self.serverPollInterval * pow(2, doublings))
+        }
         if remaining.contains(where: { $0.stage == .requesting || $0.stage == .onServer }) {
-            // Back off while polls fail: 2, 4, 8 s.
-            return Self.serverPollInterval * pow(2, Double(min(pollFailures, 3)))
+            return Self.serverPollInterval
         }
         if remaining.contains(where: { $0.stage == .deletingFromServer }) {
             // A 409 means the server is busy with this track or with its library, so
@@ -389,24 +486,48 @@ final class AcquisitionCoordinator {
         do {
             client = try settings.makeClient()
         } catch {
-            fail(record, .noAddress, .from(error))
+            // No address is nobody to ask. The record waits; the notice says why.
+            serverDidNotAnswer(.from(error))
             return
         }
 
-        if record.requestSentAt != nil {
+        // A request for this record went out before and nothing is known of what
+        // became of it: the app was closed, or the request timed out — and a
+        // request that timed out may still have arrived. The server makes a new job
+        // for every POST it receives for a track it does not have, so asking again
+        // blindly could queue the track twice. What the server lists decides — and
+        // it is asked for every job it has, not only the recent ones, because the
+        // phone may have been away for longer than the server keeps a finished job
+        // in its short list.
+        if let sentAt = record.requestSentAt {
             let jobs: APIResponse<[ServerJob]>
             do {
-                jobs = try await client.downloadJobs()
+                jobs = try await client.downloadJobs(all: true)
             } catch {
                 guard generation == foregroundGeneration, let current = pendingRecord(videoID), current.stage == .requesting else { return }
                 let apiError = APIError.from(error)
-                fail(current, Self.cause(of: apiError), apiError)
+                if Self.isUnreachable(apiError) {
+                    serverDidNotAnswer(apiError)
+                } else {
+                    serverAnswered()
+                    fail(current, Self.cause(of: apiError), apiError)
+                }
                 return
             }
+            serverAnswered()
             guard let current = pendingRecord(videoID), current.stage == .requesting else { return }
-            if let job = Self.newestLiveJob(for: videoID, in: jobs.value) {
+            if let job = Self.newestLiveJob(for: videoID, in: jobs.value, since: sentAt) {
                 adopt(job, into: current)
                 save("recording the server job for “\(current.title ?? videoID)”")
+                return
+            }
+            // No job still going. If one made by that request has already ended
+            // badly, the request did arrive and this is its outcome: a failure, to
+            // be shown as one. Asking again here would be the app retrying a failed
+            // download by itself, which it never does.
+            if let ended = Self.newestEndedJob(for: videoID, in: jobs.value, since: sentAt) {
+                failForEndedJob(current, ended, url: jobs.url.absoluteString)
+                save("recording how the server job for “\(current.title ?? videoID)” ended")
                 return
             }
         }
@@ -433,9 +554,21 @@ final class AcquisitionCoordinator {
             // attempt finds the job instead of queueing a second one.
             guard generation == foregroundGeneration, let failed = pendingRecord(videoID), failed.stage == .requesting else { return }
             let apiError = APIError.from(error)
-            fail(failed, Self.cause(of: apiError), apiError)
+            if Self.isUnreachable(apiError) {
+                // Nobody answered, so this attempt proves nothing about the server
+                // losing jobs and is not counted as one. The record stays
+                // `requesting`, in its place, and the look-up above speaks first
+                // when the chain goes on.
+                failed.requestAttempts = max(0, failed.requestAttempts - 1)
+                save("recording that the download request got no answer")
+                serverDidNotAnswer(apiError)
+            } else {
+                serverAnswered()
+                fail(failed, Self.cause(of: apiError), apiError)
+            }
             return
         }
+        serverAnswered()
 
         // A successful reply is applied even if the app left the foreground meanwhile.
         guard let answered = pendingRecord(videoID), answered.stage == .requesting else { return }
@@ -467,10 +600,7 @@ final class AcquisitionCoordinator {
         do {
             client = try settings.makeClient()
         } catch {
-            let apiError = APIError.from(error)
-            for record in activeRecords() where record.stage == .onServer {
-                fail(record, .noAddress, apiError)
-            }
+            serverDidNotAnswer(.from(error))
             return
         }
 
@@ -480,15 +610,24 @@ final class AcquisitionCoordinator {
         } catch {
             guard generation == foregroundGeneration else { return }
             let apiError = APIError.from(error)
-            pollFailures += 1
-            guard pollFailures >= Self.maxPollFailures else { return }
-            pollFailures = 0
+            if Self.isUnreachable(apiError) {
+                // The jobs are where they were, on a server that cannot be asked.
+                // Nothing fails for that, however many times it happens.
+                serverDidNotAnswer(apiError)
+                return
+            }
+            // It answered, with something that is not the jobs.
+            serverAnswered()
+            unreadablePolls += 1
+            guard unreadablePolls >= Self.maxPollFailures else { return }
+            unreadablePolls = 0
             for record in activeRecords() where record.stage == .onServer {
                 fail(record, Self.cause(of: apiError), apiError)
             }
             return
         }
-        pollFailures = 0
+        serverAnswered()
+        unreadablePolls = 0
         lastPollAt = Date()
 
         let jobsByID = Dictionary(response.value.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -620,6 +759,16 @@ final class AcquisitionCoordinator {
         }
     }
 
+    /// The only state left over once nothing is pending.
+    private func forgetWaiting() {
+        if pollFailures != 0 {
+            pollFailures = 0
+        }
+        if unreachableNotice != nil {
+            unreachableNotice = nil
+        }
+    }
+
     /// Written only when it changes: every write wakes the rows that read it, and
     /// this is reached on every poll.
     private func forgetCooldown() {
@@ -637,6 +786,7 @@ final class AcquisitionCoordinator {
         await sync.refresh()
         guard generation == foregroundGeneration else { return }
 
+        var unreachable: APIError?
         for record in activeRecords() where record.stage == .syncing {
             // Server needs no hash: nothing on this phone will verify a file it is
             // never going to receive.
@@ -651,7 +801,14 @@ final class AcquisitionCoordinator {
                 continue
             }
             if case .failed(let error) = sync.status {
-                fail(record, .syncFailed, error, saving: false)
+                if Self.isUnreachable(error) {
+                    // The sync reached nobody. The track is on the server and the
+                    // record is still `syncing`; it is synced again when the
+                    // server is back, and this pass is not counted against it.
+                    unreachable = error
+                } else {
+                    fail(record, .syncFailed, error, saving: false)
+                }
                 continue
             }
             record.syncAttempts += 1
@@ -668,6 +825,11 @@ final class AcquisitionCoordinator {
             }
         }
         save("recording the library sync result")
+        if let unreachable {
+            serverDidNotAnswer(unreachable)
+        } else {
+            serverAnswered()
+        }
     }
 
     /// Hands each track now in the library to the existing device download.
@@ -692,6 +854,17 @@ final class AcquisitionCoordinator {
                 continue
             }
             let requestedHere = handoffsThisProcess.contains(record.videoID)
+            if requestedHere, let refusal = downloads.refusals[id], Self.isUnreachable(refusal) {
+                // Refused for want of a server address, before anything was tried:
+                // there is nobody to download from, which is waiting, not failing.
+                // The track is as it was, so asking again later is the first
+                // attempt, not a second one.
+                handoffsThisProcess.remove(record.videoID)
+                record.handoffRequestedAt = nil
+                changed = true
+                serverDidNotAnswer(refusal)
+                break
+            }
             if requestedHere, let refusal = downloads.refusals[id] {
                 handoffsThisProcess.remove(record.videoID)
                 fail(record, .deviceDownloadRefused, refusal, saving: false)
@@ -756,6 +929,7 @@ final class AcquisitionCoordinator {
         for videoID in activeRecords().filter({ $0.stage == .deletingFromServer }).map(\.videoID) {
             await deleteServerCopy(videoID, generation: generation)
             guard generation == foregroundGeneration else { return }
+            if unanswered { return }
         }
     }
 
@@ -793,7 +967,7 @@ final class AcquisitionCoordinator {
         do {
             client = try settings.makeClient()
         } catch {
-            fail(record, .noAddress, .from(error))
+            serverDidNotAnswer(.from(error))
             return
         }
 
@@ -809,6 +983,17 @@ final class AcquisitionCoordinator {
             guard generation == foregroundGeneration,
                   let current = pendingRecord(videoID), current.stage == .deletingFromServer else { return }
             let apiError = APIError.from(error)
+            if Self.isUnreachable(apiError) {
+                // Nobody answered, so nothing is known and nothing is counted. The
+                // claim stays, on purpose: if the request did arrive, the deletion
+                // it caused is one this phone asked for, and the next attempt hears
+                // 404 and finishes. The verified file is on the phone throughout.
+                current.deletionAttempts = max(0, current.deletionAttempts - 1)
+                save("recording that the deletion request for “\(name)” got no answer")
+                serverDidNotAnswer(apiError)
+                return
+            }
+            serverAnswered()
             if apiError.httpStatus == 404 {
                 // The server does not have it, which is where this step was going.
                 finish(current)
@@ -827,6 +1012,7 @@ final class AcquisitionCoordinator {
             return
         }
 
+        serverAnswered()
         guard let done = pendingRecord(videoID) else { return }
         finish(done)
         save("recording that the server deleted its copy of “\(name)”")
@@ -862,13 +1048,123 @@ final class AcquisitionCoordinator {
         }
     }
 
+    // MARK: - Answered, or not
+
+    /// Did this request reach nobody, as opposed to being answered?
+    ///
+    /// The one place that decides it, for every step of the chain.
+    ///
+    /// Nobody: a transport failure of any kind — timed out, could not connect, no
+    /// network, name not found, connection lost — and a request that was cancelled
+    /// under way. Also no usable address: with none saved there is no one to ask,
+    /// so waiting is the honest state, and the notice says what is missing.
+    ///
+    /// Also a 5xx. It is an answer in the narrow sense, but what it says is that the
+    /// server could not deal with the request just now — it is restarting, its
+    /// proxy has no backend, its database is busy — and nothing about the track. It
+    /// is exactly as temporary as a timeout, so it is treated as one.
+    ///
+    /// Everything else is an answer and may fail a record: a 4xx, a body that
+    /// cannot be decoded, a job reported failed or cancelled, a job the server no
+    /// longer lists after being asked again.
+    static func isUnreachable(_ error: APIError) -> Bool {
+        switch error.kind {
+        case .transport, .cancelled, .notConfigured, .invalidAddress:
+            return true
+        case .http:
+            return (error.httpStatus ?? 0) >= 500
+        case .invalidInput, .invalidResponse, .decoding, .notAnImage, .storage, .verification, .unexpected:
+            return false
+        }
+    }
+
+    /// A request of the pass in progress reached nobody.
+    ///
+    /// Nothing is failed and nothing is moved. The pass is told to send no more,
+    /// the notice goes up in place of an error, and `ServerReachability` is asked to
+    /// look for itself — which is what turns its answer to "unreachable", so that
+    /// the server coming back later is a change, and arrives as an event.
+    private func serverDidNotAnswer(_ error: APIError) {
+        unanswered = true
+        pollFailures += 1
+        var notice = error
+        notice.message = "Il server non è raggiungibile, quindi i download in attesa sono fermi dove erano: non è fallito nulla, e ripartono da soli quando il server torna. "
+            + PlainLanguage.message(for: error)
+        unreachableNotice = notice
+        reachability.retry()
+    }
+
+    /// The server answered something, whatever it was: it is there. The waiting
+    /// state ends, and the notice that said it was away is withdrawn with it.
+    private func serverAnswered() {
+        if pollFailures != 0 {
+            pollFailures = 0
+        }
+        if unreachableNotice != nil {
+            unreachableNotice = nil
+        }
+    }
+
+    /// The outcome of a job that ended without this phone watching, recorded as the
+    /// poll would have recorded it.
+    private func failForEndedJob(_ record: PendingAcquisition, _ job: ServerJob, url: String) {
+        record.jobID = job.id
+        record.serverJobState = job.state
+        record.serverProgress = job.progress
+        record.serverError = job.error
+        if job.knownState == .cancelled {
+            fail(record, .serverCancelled, APIError(
+                kind: .unexpected,
+                title: "The download was cancelled on the server",
+                url: url,
+                details: ["Job \(job.id) for \(record.videoID) is cancelled."]
+            ), saving: false)
+        } else {
+            fail(record, .serverDownloadFailed, APIError(
+                kind: .unexpected,
+                title: "The server could not download the track",
+                url: url,
+                details: ["Job \(job.id) for \(record.videoID) failed.", "Server error: \(job.error ?? "(none given)")"],
+                message: Self.serverFailureMessage(job.error)
+            ), saving: false)
+        }
+    }
+
+    /// The newest job for the video that ended in failure or was cancelled, among
+    /// those created no earlier than the request this phone sent at `sentAt`.
+    ///
+    /// The server's clock dates the job and this phone's dated the request, so a
+    /// few seconds are allowed between them. A job older than that belongs to an
+    /// earlier request — typically the failure the user has just tapped Riprova on —
+    /// and says nothing about this one.
+    static func newestEndedJob(for videoID: String, in jobs: [ServerJob], since sentAt: Date) -> ServerJob? {
+        let earliest = sentAt.timeIntervalSince1970 - clockSkewAllowance
+        return jobs
+            .filter { job in
+                guard job.trackID == videoID, Double(job.createdAt) >= earliest else { return false }
+                switch job.knownState {
+                case .failed, .cancelled: return true
+                case .queued, .running, .done, nil: return false
+                }
+            }
+            .max { $0.id < $1.id }
+    }
+
     /// The newest job for the video that is still going or finished.
-    static func newestLiveJob(for videoID: String, in jobs: [ServerJob]) -> ServerJob? {
-        jobs
+    ///
+    /// `since`, when given, leaves out jobs that finished for a request older than
+    /// the one this phone sent then: the full list of jobs reaches back to earlier
+    /// downloads of the same track, and a job done long ago says nothing about a
+    /// track asked for again. A job still queued or running is worth adopting
+    /// whoever asked for it.
+    static func newestLiveJob(for videoID: String, in jobs: [ServerJob], since sentAt: Date? = nil) -> ServerJob? {
+        let earliest = sentAt.map { $0.timeIntervalSince1970 - clockSkewAllowance }
+        return jobs
             .filter { job in
                 guard job.trackID == videoID else { return false }
                 switch job.knownState {
-                case .queued, .running, .done: return true
+                case .queued, .running: return true
+                case .done: return earliest.map { Double(job.createdAt) >= $0 } ?? true
                 case .failed, .cancelled, nil: return false
                 }
             }

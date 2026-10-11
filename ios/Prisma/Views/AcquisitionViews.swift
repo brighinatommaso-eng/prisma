@@ -5,18 +5,20 @@ import SwiftUI
 /// Words for where an acquisition is. Server and device phases say which they are,
 /// so one row reads continuously from the tap in Search to the device download.
 enum AcquisitionText {
-    /// `pollFailures`: failed polls in a row, so a row waiting on the server says the
-    /// server is not answering while the coordinator retries.
+    /// `pollFailures`: requests in a row that reached nobody. Above zero the record
+    /// is not progressing and has not failed: it is where it was, waiting for the
+    /// server to be reachable again, and the line says that instead of a step.
     ///
     /// `queueResumesAt`: when the server said its queue starts again, while it is
     /// resting after YouTube's bot wall. A job queued through half an hour of that
     /// is waiting, not stuck, and the row says until when.
     static func phase(of record: AcquisitionData, pollFailures: Int = 0, queueResumesAt: Date? = nil) -> String {
+        if isWaitingForServer(record, pollFailures: pollFailures) {
+            return "In attesa · server non raggiungibile"
+        }
         switch record.stage {
         case .requesting:
             return "Sul server · invio della richiesta…"
-        case .onServer where pollFailures > 0:
-            return "Sul server · il server non risponde, nuovo tentativo…"
         case .onServer:
             switch record.serverJobState.flatMap({ ServerJob.State(rawValue: $0) }) {
             case .queued:
@@ -36,6 +38,12 @@ enum AcquisitionText {
         case .failed:
             return record.failurePhase ?? "Non riuscito"
         }
+    }
+
+    /// The record is held up by the server being away, whatever step it is at. A
+    /// failed one is not waiting for anything.
+    static func isWaitingForServer(_ record: AcquisitionData, pollFailures: Int) -> Bool {
+        pollFailures > 0 && record.isActive
     }
 
     static func serverPercent(of record: AcquisitionData) -> Int? {
@@ -72,6 +80,12 @@ struct AcquisitionStateIcon: View {
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("Acquisizione non riuscita. Riprova")
+                case _ where AcquisitionText.isWaitingForServer(record, pollFailures: acquisitions.pollFailures):
+                    // Standing still, so nothing that turns.
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(ink.secondary)
+                        .accessibilityLabel("In attesa: il server non è raggiungibile")
                 case .onServer where record.serverJobState == ServerJob.State.queued.rawValue:
                     Image(systemName: "clock")
                         .font(.system(size: 15, weight: .medium))
@@ -144,12 +158,31 @@ struct AcquisitionProblem: View {
 /// Errors from the coordinator itself, e.g. the store could not be written.
 struct AcquisitionCoordinatorError: View {
     @Environment(AcquisitionCoordinator.self) private var acquisitions
+    @Environment(\.prismaInk) private var ink
 
     var body: some View {
         if let error = acquisitions.lastError {
             VStack(alignment: .leading, spacing: 0) {
                 ProblemBlock(error: error)
                 DismissLink { acquisitions.clearError() }
+            }
+        }
+        // Not an error and not closed by hand: it goes when the server answers.
+        // The link asks the server now, for when it is known to be back before
+        // anything has told the app so.
+        if let notice = acquisitions.unreachableNotice {
+            VStack(alignment: .leading, spacing: 0) {
+                ProblemBlock(error: notice)
+                Button {
+                    acquisitions.checkServer()
+                } label: {
+                    Text("Controlla ora")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(ink.accentText)
+                        .frame(minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
             }
         }
     }
@@ -184,7 +217,8 @@ struct AcquisitionRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
-                if let percent = AcquisitionText.serverPercent(of: record) {
+                if !AcquisitionText.isWaitingForServer(record, pollFailures: acquisitions.pollFailures),
+                   let percent = AcquisitionText.serverPercent(of: record) {
                     Text("\(percent)%")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(ink.secondary)
@@ -214,7 +248,11 @@ struct AcquisitionRow: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.45))
                     .frame(width: 44, height: 44)
-                if record.stage == .onServer, record.serverJobState == ServerJob.State.queued.rawValue {
+                if AcquisitionText.isWaitingForServer(record, pollFailures: acquisitions.pollFailures) {
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.white.opacity(0.85))
+                } else if record.stage == .onServer, record.serverJobState == ServerJob.State.queued.rawValue {
                     Image(systemName: "clock")
                         .font(.system(size: 17))
                         .foregroundStyle(Color.white.opacity(0.85))

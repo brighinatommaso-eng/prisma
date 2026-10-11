@@ -143,9 +143,18 @@ nonisolated struct APIClient: Sendable {
         return try await requestJSON("/downloads", method: "POST", body: body, timeout: Timeout.jobs)
     }
 
-    /// GET /downloads: every server job with its state and progress.
-    func downloadJobs() async throws -> APIResponse<[ServerJob]> {
-        try await getJSON("/downloads", timeout: Timeout.jobs)
+    /// GET /downloads: the server's jobs with their state and progress.
+    ///
+    /// By default the server lists the jobs still queued or running and those that
+    /// ended within the last hour, which is all a poll needs. `all` asks for every
+    /// job it has ever had: for the one question a poll cannot answer, what became
+    /// of a request sent before this phone went away for longer than that.
+    func downloadJobs(all: Bool = false) async throws -> APIResponse<[ServerJob]> {
+        try await getJSON(
+            "/downloads",
+            query: all ? [(name: "all", value: "true")] : [],
+            timeout: Timeout.jobs
+        )
     }
 
     /// DELETE /tracks/{id}: deletes the track and its file from the server. The

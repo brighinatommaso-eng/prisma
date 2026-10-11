@@ -272,8 +272,9 @@ final class DemusImporter {
     ///    duplicated, so importing the same file twice adds nothing the second
     ///    time. They are created here, before the slots, so that their order in
     ///    Preferiti is the playlist's (`PlaylistStore.addFavourites`).
-    ///    Then the slots: `PlaylistStore.add(_:to:)` appends the tracks in the
-    ///    file's order and skips the ones the playlist already holds.
+    ///    Then the slots: `PlaylistStore.appendMissing(_:to:)` gives the playlist
+    ///    one slot per line of the file, in the file's order and repeats included,
+    ///    less what it already holds.
     /// 3. The acquisitions, in the file's order, by
     ///    `AcquisitionCoordinator.acquire(_:destination:)`: what is left to fetch
     ///    for each track, which is nothing for one already on the phone and only
@@ -281,8 +282,12 @@ final class DemusImporter {
     /// 4. The record the Downloads tab counts progress from, if anything is left
     ///    to arrive.
     ///
-    /// A song the file lists twice is imported once. No request is made here: the
-    /// acquisition loop makes them, in the background, as it does today.
+    /// A song the file lists twice is two slots of the playlist, and one favourite
+    /// and one acquisition: the playlist is a copy of the list, while a track is
+    /// kept and downloaded once however often it is listed. The progress record
+    /// holds the distinct tracks, so its total is the number of tracks to arrive,
+    /// not the length of the playlist. No request is made here: the acquisition
+    /// loop makes them, in the background, as it does today.
     func confirm(_ choice: PlaylistChoice) {
         guard case .preview(let pending) = phase else { return }
         let name = Self.playlistName(pending.playlist.name)
@@ -307,9 +312,9 @@ final class DemusImporter {
             return
         }
         let requests = songs.map { Self.request(for: $0) }
-        let drafts = requests.map(\.draft)
-        playlists.addFavourites(drafts)
-        playlists.add(drafts, to: playlist)
+        playlists.addFavourites(requests.map(\.draft))
+        // Every line of the file, not the distinct tracks: the playlist keeps repeats.
+        playlists.appendMissing(pending.playlist.songs.map { Self.request(for: $0).draft }, to: playlist)
 
         acquisitions.acquire(requests, destination: .both)
 

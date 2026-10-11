@@ -59,20 +59,6 @@ final class AppModel {
                 downloads: downloads, reachability: reachability
             )
             sync.playback = playback
-            // The single wire between "is the server there" and "what can play".
-            // Only a real change arrives here, so a queue is never reconsidered
-            // because a probe merely repeated itself.
-            reachability.onChange = { [playback, collection] reachable in
-                playback.serverReachabilityChanged(reachable: reachable)
-                // Changes made while the server was away are pushed now. Not a retry
-                // timer: this is the server coming back.
-                if reachable {
-                    collection.serverBecameReachable()
-                }
-            }
-            // Starts the network-path watch, whose first update is the first probe
-            // of the process. Nothing here repeats on a schedule.
-            reachability.start()
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
             playlists.onCollectionChange = { [collection] in collection.localChanged() }
@@ -80,8 +66,25 @@ final class AppModel {
             // in the foreground, never during a background launch.
             let acquisitions = AcquisitionCoordinator(
                 context: container.mainContext, settings: settings, sync: sync,
-                downloads: downloads, playlists: playlists
+                downloads: downloads, playlists: playlists, reachability: reachability
             )
+            // The single wire between "is the server there" and "what can play".
+            // Only a real change arrives here, so a queue is never reconsidered
+            // because a probe merely repeated itself.
+            reachability.onChange = { [playback, collection, acquisitions] reachable in
+                playback.serverReachabilityChanged(reachable: reachable)
+                // Changes made while the server was away are pushed now, and the
+                // acquisitions left where they were go on from there. Not a retry
+                // timer: this is the server coming back.
+                if reachable {
+                    collection.serverBecameReachable()
+                    acquisitions.serverBecameReachable()
+                }
+            }
+            // Starts the network-path watch, whose first update is the first probe
+            // of the process. Nothing here repeats on a schedule. Started only now,
+            // with everything the wire above reaches in existence.
+            reachability.start()
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
             // Idle until a file arrives. It writes through the two services above, so
             // an import is the same playlist change and the same acquisitions a hand
