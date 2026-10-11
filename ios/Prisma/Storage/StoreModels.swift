@@ -60,6 +60,25 @@ enum FailureCause: String, CaseIterable {
         }
     }
 
+    /// Failures that mean nothing more than "the server was not there": the
+    /// pre-flight or the transfer could not reach it, or iOS never got a byte.
+    /// These, and only these, are started again by themselves when
+    /// `ServerReachability` reports the server back, and until then they read as
+    /// waiting rather than failed.
+    ///
+    /// `noAddress` is not one of them. The server coming back changes nothing for
+    /// a download that had no address to go to; saving an address is what revives
+    /// it, and that is `isAddressRelated`.
+    var isReachabilityRelated: Bool {
+        switch self {
+        case .unreachable, .neverStarted:
+            return true
+        case .noAddress, .httpStatus, .verification, .storage, .missingServerData, .serverFileChanged,
+             .fileMissing, .systemCancelled, .other:
+            return false
+        }
+    }
+
     /// Why an address change leaves a failure of this kind alone.
     var notRevivedReason: String {
         switch self {

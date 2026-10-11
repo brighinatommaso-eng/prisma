@@ -176,6 +176,13 @@ struct TrackRowData: Identifiable, Equatable {
         }
     }
 
+    /// The device download stopped because the server was not there, and nothing
+    /// else: it is started again when the server is back, so it is waiting, not
+    /// failed. A failure with any other cause is a failure.
+    var isWaitingForServer: Bool {
+        downloadState == .failed && (failureCause?.isReachabilityRelated ?? false)
+    }
+
     /// The file is here. Plays with no network at all, and is the source chosen
     /// even when the server is one hop away.
     var isOnPhone: Bool { downloadState == .downloaded }
@@ -789,10 +796,12 @@ enum Projection {
     /// Where each import stands, counted from its tracks as they are now.
     ///
     /// A track of an import is in exactly one of three places. It is on the phone:
-    /// done. Something is still fetching it — an acquisition that has not failed,
-    /// or a device download queued or running: on its way. Or neither, and then it
-    /// is not going to arrive by itself: a failed acquisition, a device download
-    /// that failed or was cancelled, a track removed again. That third kind is what
+    /// done. Something is still fetching it, or will again without being asked — an
+    /// acquisition that has not failed, a device download queued or running, or one
+    /// that only the server's absence stopped, which is started again when the
+    /// server is back: on its way. Or neither, and then it is not going to arrive
+    /// by itself: a failed acquisition, a device download that failed for a real
+    /// reason or was cancelled, a track removed again. That third kind is what
     /// keeps a line from running forever, and it is never added to the first.
     ///
     /// An Entrambi acquisition deletes its record the moment the device download
@@ -805,6 +814,11 @@ enum Projection {
     ) -> [ImportProgressData] {
         guard !imports.isEmpty else { return [] }
         let states = Dictionary(tracks.map { ($0.serverID, $0.downloadState) }, uniquingKeysWith: { first, _ in first })
+        let waitingForServer = Set(
+            tracks
+                .filter { $0.downloadState == .failed && ($0.failureCause?.isReachabilityRelated ?? false) }
+                .map(\.serverID)
+        )
         let pending = Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first })
         return imports
             .sorted { $0.startedAt < $1.startedAt }
@@ -822,7 +836,7 @@ enum Projection {
                         if acquisition.stage == .requesting || (acquisition.stage == .onServer && !running) {
                             waitingOnServer += 1
                         }
-                    } else if state != .queued && state != .downloading {
+                    } else if state != .queued && state != .downloading && !waitingForServer.contains(id) {
                         failed += 1
                     }
                 }

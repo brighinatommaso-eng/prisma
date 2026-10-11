@@ -90,9 +90,9 @@ enum PlainLanguage {
         }
         switch cause {
         case .unreachable:
-            return "Il download non è riuscito perché il server non era raggiungibile: controlla l'indirizzo in Impostazioni, che il server sia acceso e che Tailscale sia connesso, poi tocca Riprova."
+            return "Il download è fermo perché il server non era raggiungibile: riparte da solo quando il server torna. Se non torna, controlla l'indirizzo in Impostazioni, che il server sia acceso e che Tailscale sia connesso."
         case .neverStarted:
-            return "iOS non ha mai avviato il trasferimento, di solito perché il server non è raggiungibile: controlla l'indirizzo in Impostazioni, poi tocca Riprova."
+            return "Il download è fermo perché iOS non ha ricevuto nulla dal server, di solito perché non è raggiungibile: riparte da solo quando il server torna. Se non torna, controlla l'indirizzo in Impostazioni."
         case .noAddress:
             return "Il download non è partito perché manca un indirizzo del server valido: impostalo in Impostazioni, poi tocca Riprova."
         case .httpStatus:
@@ -209,7 +209,21 @@ struct DownloadStateIcon: View {
                         .accessibilityLabel("Non scaricato: scaricalo dai Preferiti")
                 }
             case .failed:
-                if data.presence == .inLibrary {
+                if data.presence == .inLibrary, data.isWaitingForServer {
+                    // Stopped by the server being away, and started again when it
+                    // is back: standing still, not failed. Tapping tries now.
+                    Button {
+                        download()
+                    } label: {
+                        Image(systemName: "pause.fill")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(ink.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("In attesa: il server non è raggiungibile. Riprova ora")
+                } else if data.presence == .inLibrary {
                     Button {
                         download()
                     } label: {

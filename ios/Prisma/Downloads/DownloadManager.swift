@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import SwiftData
+import UIKit
 
 /// Owns the app's single background URLSession and every change to download state.
 ///
@@ -64,6 +65,18 @@ final class DownloadManager {
     /// download token, and when one of them was last seen to have received more.
     @ObservationIgnored private var bytesAtLastCheck: [String: Int64] = [:]
     @ObservationIgnored private var lastTransferMovement: Date?
+    /// Called when a download failed because the server could not be reached, so
+    /// that whoever keeps the answer to "is the server there" can ask again.
+    /// `AppModel` points it at `ServerReachability.retry`: that is what turns the
+    /// answer to "unreachable", and makes the server's return a change, which is
+    /// the event `serverBecameReachable` waits for. A closure rather than the
+    /// object, because this class is created before it and needs nothing else of it.
+    @ObservationIgnored var onServerUnreachable: (() -> Void)?
+    /// The revival set off by the server coming back, while it runs.
+    @ObservationIgnored private var serverBackRevival: Task<Void, Never>?
+    /// The server came back while the app was not on screen: the revival waits for
+    /// the next transfer check made with the app active.
+    @ObservationIgnored private var revivalOwed = false
 
     init(context: ModelContext, settings: AppSettings) {
         self.context = context
@@ -280,6 +293,10 @@ final class DownloadManager {
             let tasks = await session.allTasks
             let toRestart = runCheck(tasks: tasks, reason: reason)
             isChecking = false
+            // The server came back while nothing was on screen. Now something may be.
+            if revivalOwed {
+                serverBecameReachable()
+            }
             // Ids, not tracks: every restart awaits its own pre-flight, and a sync
             // running meanwhile can delete any of the ones still waiting their turn.
             for id in toRestart {
@@ -619,6 +636,9 @@ final class DownloadManager {
         track.failureCause = cause
         track.downloadState = .failed
         save("recording a failed download")
+        if cause.isReachabilityRelated {
+            onServerUnreachable?()
+        }
     }
 
     // MARK: - Server address changes
@@ -639,11 +659,76 @@ final class DownloadManager {
     /// progress away. If one later fails, Retry uses the new address.
     func serverAddressChanged(from previous: String, to new: String) {
         Task {
-            await retarget(from: previous, to: new)
+            await revive(.addressChanged(previous: previous, new: new))
         }
     }
 
-    private func retarget(from previous: String, to new: String) async {
+    /// Called when `ServerReachability` reports the server back.
+    ///
+    /// A device download that failed for no other reason than the server being
+    /// away — `FailureCause.isReachabilityRelated`: unreachable, or never started —
+    /// is sent through the pre-flight again, by the same code and in the same order
+    /// as after an address change. This is the one place the app starts a failed
+    /// download again by itself, and it is for those two causes and this one event:
+    /// a file that did not verify, a status the server answered, a full disk stay
+    /// failed until Riprova.
+    ///
+    /// It cannot go round in circles. A revived download that fails again stays
+    /// failed until the *next* time the server comes back, and "comes back" is only
+    /// ever a change from unreachable to reachable: there is no timer here and no
+    /// second attempt. While one revival is running another is not started; a
+    /// download that fails again during it waits for the next event like any other.
+    ///
+    /// Only with the app active. The server is also found reachable during a
+    /// launch in the background, made by iOS to deliver finished transfers, and
+    /// that is no moment to start pre-flights that the app may be suspended in the
+    /// middle of: the revival is owed instead, and paid by the next transfer check
+    /// that runs with the app on screen.
+    func serverBecameReachable() {
+        guard UIApplication.shared.applicationState == .active else {
+            revivalOwed = true
+            return
+        }
+        revivalOwed = false
+        guard serverBackRevival == nil else { return }
+        serverBackRevival = Task {
+            await revive(.serverBack)
+            serverBackRevival = nil
+        }
+    }
+
+    /// What sets a revival off, which decides what it takes and what it says.
+    private enum Revival {
+        /// A different address was saved. Queued transfers built against the old
+        /// one are re-targeted, and failures an address can fix are tried again.
+        case addressChanged(previous: String, new: String)
+        /// The same address answers again. Only failures the server's absence
+        /// caused are tried again; nothing queued is touched.
+        case serverBack
+    }
+
+    /// The one revival, for both triggers: stop what must be stopped, then send
+    /// every candidate through the pre-flight again, in its original queue order.
+    private func revive(_ trigger: Revival) async {
+        let previous: String
+        let new: String
+        let isServerBack: Bool
+        switch trigger {
+        case .addressChanged(let from, let to):
+            previous = from
+            new = to
+            isServerBack = false
+        case .serverBack:
+            previous = settings.savedAddress
+            new = settings.savedAddress
+            isServerBack = true
+        }
+        // Which failures this trigger can have cured, by their recorded cause.
+        func isRevivable(_ cause: FailureCause?) -> Bool {
+            guard let cause else { return false }
+            return isServerBack ? cause.isReachabilityRelated : cause.isAddressRelated
+        }
+
         let tracks: [StoredTrack]
         do {
             tracks = try context.fetch(FetchDescriptor<StoredTrack>())
@@ -663,10 +748,10 @@ final class DownloadManager {
             $0.downloadState == .queued && $0.targetAddress != new && preflights[$0.serverID] == nil
         }
         let revivable = tracks.filter {
-            $0.downloadState == .failed && ($0.failureCause?.isAddressRelated ?? false) && preflights[$0.serverID] == nil
+            $0.downloadState == .failed && isRevivable($0.failureCause) && preflights[$0.serverID] == nil
         }
         let leftAlone = tracks.filter {
-            $0.downloadState == .failed && !($0.failureCause?.isAddressRelated ?? false)
+            $0.downloadState == .failed && !isRevivable($0.failureCause)
         }
         let running = tracks.filter { $0.downloadState == .downloading && $0.targetAddress != new }
         let wasQueued = Set(queued.map(\.serverID))
@@ -719,7 +804,7 @@ final class DownloadManager {
             }
             let unchanged = fromQueue
                 ? track.downloadState == .queued
-                : track.downloadState == .failed && (track.failureCause?.isAddressRelated ?? false)
+                : track.downloadState == .failed && isRevivable(track.failureCause)
             guard unchanged else {
                 skipped += 1
                 continue
@@ -739,9 +824,13 @@ final class DownloadManager {
                 automatic: true,
                 note: fromQueue
                     ? "Re-targeted to \(new) after the server address changed."
-                    : "Retried automatically against \(new) after the server address changed; it had failed because the server could not be reached.",
+                    : isServerBack
+                        ? "Retried automatically when the server became reachable again; it had failed because the server could not be reached."
+                        : "Retried automatically against \(new) after the server address changed; it had failed because the server could not be reached.",
                 keepQueuePosition: true,
-                failureLead: "The server address changed to \(new), and retrying this download against it failed."
+                failureLead: isServerBack
+                    ? "The server was reported reachable again, and retrying this download failed."
+                    : "The server address changed to \(new), and retrying this download against it failed."
             )
             // Read back again: the pre-flight above awaited, so the track may have
             // been deleted while it ran.
@@ -753,6 +842,25 @@ final class DownloadManager {
             default:
                 failedAgain += 1
             }
+        }
+
+        if isServerBack {
+            // Said only when it did something: the server comes back often, and
+            // usually to nothing that was waiting for it.
+            if revived > 0 || failedAgain > 0 {
+                var parts: [String] = []
+                if revived > 0 {
+                    parts.append(revived == 1 ? "1 download fermo è ripartito da solo" : "\(revived) download fermi sono ripartiti da soli")
+                }
+                if failedAgain > 0 {
+                    parts.append(failedAgain == 1
+                        ? "1 non è ripartito e resta in attesa del prossimo ritorno del server"
+                        : "\(failedAgain) non sono ripartiti e restano in attesa del prossimo ritorno del server")
+                }
+                notice("Il server è di nuovo raggiungibile: " + parts.joined(separator: ", ") + ".")
+            }
+            save("reviving downloads now that the server is reachable")
+            return
         }
 
         var lines = ["Indirizzo del server cambiato da \(previous.isEmpty ? "nessuno" : previous) a \(new)."]
@@ -1039,6 +1147,9 @@ final class DownloadManager {
             }
         }
         save("recording a finished download")
+        if track.downloadState == .failed, track.failureCause?.isReachabilityRelated == true {
+            onServerUnreachable?()
+        }
     }
 
     /// An event from an earlier attempt than the track's current one.

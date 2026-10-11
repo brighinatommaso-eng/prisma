@@ -71,15 +71,26 @@ final class AppModel {
             // The single wire between "is the server there" and "what can play".
             // Only a real change arrives here, so a queue is never reconsidered
             // because a probe merely repeated itself.
-            reachability.onChange = { [playback, collection, acquisitions] reachable in
+            reachability.onChange = { [playback, collection, acquisitions, downloads] reachable in
                 playback.serverReachabilityChanged(reachable: reachable)
                 // Changes made while the server was away are pushed now, and the
                 // acquisitions left where they were go on from there. Not a retry
                 // timer: this is the server coming back.
                 if reachable {
                     collection.serverBecameReachable()
+                    // The device downloads the outage failed, before the chain that
+                    // hands new ones over: the revival marks its tracks as being
+                    // checked first, so the coordinator's pass finds them taken and
+                    // leaves them alone, rather than the two meeting on one track.
+                    downloads.serverBecameReachable()
                     acquisitions.serverBecameReachable()
                 }
+            }
+            // A device download that could not reach the server says so here, so
+            // the answer on file turns to "unreachable" and the server's return is
+            // then a change — which is the only thing that revives it.
+            downloads.onServerUnreachable = { [reachability] in
+                reachability.retry()
             }
             // Starts the network-path watch, whose first update is the first probe
             // of the process. Nothing here repeats on a schedule. Started only now,

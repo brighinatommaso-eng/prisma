@@ -23,8 +23,10 @@ struct DownloadsView: View {
         let data = Projection.downloads(
             tracks: tracks, acquisitions: acquisitions, favourites: favourites, imports: imports
         )
-        let inProgress = data.tracks(in: [.downloading, .queued])
-        let failed = data.tracks(in: [.failed])
+        // A device download the server's absence stopped is started again when the
+        // server is back, so it belongs with what is on its way, not with what failed.
+        let inProgress = data.tracks(in: [.downloading, .queued]) + data.tracks(in: [.failed]).filter(\.isWaitingForServer)
+        let failed = data.tracks(in: [.failed]).filter { !$0.isWaitingForServer }
         let cancelled = data.tracks(in: [.cancelled])
         let downloaded = data.tracks(in: [.downloaded])
         let acquiring = data.acquisitions.filter(\.isActive)
@@ -149,6 +151,9 @@ private struct DownloadRow: View {
 
     /// Device-phase rows say so, to read apart from acquisitions still on the server.
     private var subtitle: String {
+        if data.isWaitingForServer, downloads.preflights[data.id] == nil {
+            return "In attesa · server non raggiungibile"
+        }
         if data.downloadState == .failed, downloads.preflights[data.id] == nil {
             return "Download sul telefono non riuscito"
         }
