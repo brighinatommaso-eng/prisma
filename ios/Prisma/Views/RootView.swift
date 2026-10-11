@@ -10,6 +10,9 @@ struct RootView: View {
     var body: some View {
         if let services = model.services {
             let colorScheme = services.theme.resolved.surface.colorScheme
+            // Read here, in the body, so this view is drawn again when a file
+            // arrives or the import ends, and the sheet below follows.
+            let importing = services.importer.isActive
             // Prototype tab bar order: Libreria, Cerca, Download, Impostazioni.
             TabView {
                 Tab("Libreria", systemImage: "books.vertical") {
@@ -42,9 +45,43 @@ struct RootView: View {
                     .environment(services.deletion)
                     .environment(services.reachability)
                     .environment(services.collection)
+                    .environment(services.importer)
                     .environment(presenter)
                     .modelContainer(services.container)
                     .preferredColorScheme(colorScheme)
+            }
+            // The preview of a Demus playlist, here rather than in a tab because the
+            // file may arrive from another app with any tab showing. Presented from
+            // the root like the player, so it is given the same environment by hand.
+            .sheet(isPresented: Binding(
+                get: { importing },
+                set: { if !$0 { services.importer.cancel() } }
+            )) {
+                DemusImportSheet()
+                    .prismaInk()
+                    .environment(model.settings)
+                    .environment(services.downloads)
+                    .environment(services.sync)
+                    .environment(services.playback)
+                    .environment(services.theme)
+                    .environment(services.playlists)
+                    .environment(services.acquisitions)
+                    .environment(services.deletion)
+                    .environment(services.reachability)
+                    .environment(services.collection)
+                    .environment(services.importer)
+                    .environment(presenter)
+                    .modelContainer(services.container)
+                    .preferredColorScheme(colorScheme)
+            }
+            // A `.playlist` file shared from Demus, or opened from Files: iOS hands
+            // over its URL because Info.plist declares the type. The player is put
+            // away first, since a sheet cannot be shown from under it; what is
+            // playing goes on playing.
+            .onOpenURL { url in
+                guard url.isFileURL else { return }
+                presenter.isPresented = false
+                services.importer.open(url)
             }
             .environment(services.downloads)
             .environment(services.sync)
@@ -55,6 +92,7 @@ struct RootView: View {
             .environment(services.deletion)
             .environment(services.reachability)
             .environment(services.collection)
+            .environment(services.importer)
             .environment(presenter)
             .modelContainer(services.container)
             // Spec 5.5: the theme's polarity reaches the system tab bar and every

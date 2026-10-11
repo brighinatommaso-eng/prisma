@@ -373,8 +373,11 @@ final class PlaylistStore {
 
     /// Adds the favourite if it is not already there, without saving. The callers
     /// that also acquire a track save once, after both changes.
-    func addFavourite(_ draft: FavouriteDraft) {
-        let now = Date()
+    ///
+    /// `date` is when it counts as added, which is its place in Preferiti. Now,
+    /// unless several are added together and their order has to be given.
+    func addFavourite(_ draft: FavouriteDraft, at date: Date = Date()) {
+        let now = date
         if let existing = storedFavourite(draft.videoID) {
             // Already a favourite: fill in anything it did not know yet, e.g. a
             // favourite added from search before the album title was known.
@@ -397,6 +400,24 @@ final class PlaylistStore {
         ModelLookup.track(draft.videoID, in: context)?.favouritedAt = now
         // The caller saves right after; the push waits long enough to see it.
         onCollectionChange?()
+    }
+
+    /// Adds several favourites at once, and saves. One already in Preferiti is
+    /// filled in and otherwise left where it is, exactly as `addFavourite` does.
+    ///
+    /// Preferiti is newest first, and these all arrive in the same instant, so the
+    /// order is given rather than left to chance: a millisecond apart, the first one
+    /// newest, so the new ones read in Preferiti in the order they were given —
+    /// which for an imported playlist is the playlist's own. A millisecond because
+    /// that is the precision the collection keeps on the server; anything finer
+    /// would come back from a sync as a tie.
+    func addFavourites(_ drafts: [FavouriteDraft]) {
+        guard !drafts.isEmpty else { return }
+        let now = Date()
+        for (offset, draft) in drafts.enumerated() {
+            addFavourite(draft, at: now.addingTimeInterval(-Double(offset) / 1000))
+        }
+        save("adding \(drafts.count) tracks to the favourites")
     }
 
     private func storedFavourite(_ videoID: String) -> FavouriteTrack? {

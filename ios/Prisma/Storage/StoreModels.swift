@@ -408,3 +408,36 @@ final class SyncRecord {
 
     init() {}
 }
+
+/// One import of a playlist file, kept while its tracks are still arriving.
+///
+/// An import of fifty tracks takes the server the better part of an hour, and
+/// longer when YouTube makes it rest, so the app is closed and reopened long
+/// before it ends. This is what lets the Downloads tab still say
+/// "Importazione «Sad»: 12 di 53" afterwards: which tracks belonged to it, under
+/// which name, since when.
+///
+/// It records what was asked and nothing about how it is going. The counts are
+/// worked out each time from the tracks and the acquisitions themselves
+/// (`Projection.downloads`), so there is no counter here to fall out of step with
+/// them. Deleted when every track is on the phone, or when the user closes the
+/// line of an import that ended with some tracks not downloaded.
+///
+/// A new entity, so the store an earlier build wrote opens with a lightweight
+/// migration.
+@Model
+final class PlaylistImport {
+    @Attribute(.unique) var id: UUID
+    /// The playlist's name as it was imported, for the line.
+    var name: String
+    /// The video ids of the import, each once, in the file's order.
+    var videoIDs: [String]
+    var startedAt: Date
+
+    init(name: String, videoIDs: [String]) {
+        self.id = UUID()
+        self.name = name
+        self.videoIDs = videoIDs
+        self.startedAt = Date()
+    }
+}

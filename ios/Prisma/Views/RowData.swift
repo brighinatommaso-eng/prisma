@@ -362,16 +362,83 @@ struct AcquisitionData: Identifiable, Equatable {
     var isActive: Bool { stage != .failed }
 }
 
+/// One imported playlist whose tracks are still arriving, as the line at the top of
+/// the Downloads tab shows it.
+///
+/// Every number is counted from the tracks and the acquisitions as they are now,
+/// each time the screen is drawn. The import's own record holds only which tracks
+/// it asked for, so nothing here can go stale across a relaunch.
+struct ImportProgressData: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    /// The distinct tracks of the import.
+    let total: Int
+    /// On this phone, which is where an import is going.
+    let done: Int
+    /// Not on this phone, with nothing fetching them: the acquisition failed, the
+    /// device download failed or was cancelled, or the track was taken out again.
+    /// Never counted as done, and never as still on its way.
+    let failed: Int
+    /// Asked of the server and not being downloaded there yet: waiting in its queue.
+    let waitingOnServer: Int
+
+    /// Nothing is on its way any more.
+    var isFinished: Bool { done + failed >= total }
+    /// Every track is on the phone: the line has nothing left to say.
+    var isComplete: Bool { done >= total }
+}
+
 /// The Downloads tab.
 struct DownloadsData: Equatable {
     let tracks: [TrackRowData]
     let acquisitions: [AcquisitionData]
+    /// The imports with something still to say: under way, or ended with tracks
+    /// that did not arrive. Oldest first.
+    let imports: [ImportProgressData]
+    /// Imports whose every track is on the phone. They are not shown; the screen
+    /// hands their ids to `DemusImporter` to be forgotten.
+    let completedImportIDs: [UUID]
 
     func tracks(in states: Set<DownloadState>) -> [TrackRowData] {
         tracks.filter { states.contains($0.downloadState) }
     }
 
-    var isEmpty: Bool { tracks.isEmpty && acquisitions.isEmpty }
+    var isEmpty: Bool { tracks.isEmpty && acquisitions.isEmpty && imports.isEmpty }
+}
+
+/// A playlist of that exact name which is already in Prisma, as the import preview
+/// needs to describe it before asking whether to update it.
+struct DemusExistingPlaylist: Equatable {
+    /// The one an update would go into.
+    let id: UUID
+    /// How many playlists carry the name. More than one means `id` was chosen.
+    let sameNameCount: Int
+    /// The tracks of the file it does not hold yet: what an update would append.
+    let missingCount: Int
+}
+
+/// What the import preview says about a parsed Demus file, set against what this
+/// phone already has.
+struct DemusPreviewData: Equatable {
+    /// The name the playlist will have.
+    let name: String
+    /// The songs as the file lists them, a repeated one counted each time.
+    let songCount: Int
+    /// The distinct tracks among them: what is favourited and acquired.
+    let trackCount: Int
+    let totalDuration: String
+    /// Distinct tracks that already have a favourite.
+    let alreadyFavourite: Int
+    /// Distinct tracks whose file is already on this phone.
+    let onPhone: Int
+    /// What the tracks still to download are estimated to need on this phone.
+    let estimatedBytes: Int64
+    /// What the device downloads already queued or running will take.
+    let queuedBytes: Int64
+    let existing: DemusExistingPlaylist?
+
+    var toDownload: Int { trackCount - onPhone }
+    var repeated: Int { songCount - trackCount }
 }
 
 /// What Search needs to decide, per result, whether it is in the library, already a
@@ -691,7 +758,8 @@ enum Projection {
     static func downloads(
         tracks: [StoredTrack],
         acquisitions: [PendingAcquisition],
-        favourites: [FavouriteTrack]
+        favourites: [FavouriteTrack],
+        imports: [PlaylistImport]
     ) -> DownloadsData {
         let favouriteIDs = Set(favourites.map(\.videoID))
         let ordered = tracks.sorted {
@@ -707,7 +775,125 @@ enum Projection {
         let records = acquisitions
             .map { acquisition($0) }
             .filter { $0.stage != .handingOff || !started.contains($0.id) }
-        return DownloadsData(tracks: rows, acquisitions: records)
+        let progress = importProgress(imports, tracks: tracks, acquisitions: acquisitions)
+        return DownloadsData(
+            tracks: rows,
+            acquisitions: records,
+            imports: progress.filter { !$0.isComplete },
+            completedImportIDs: progress.filter { $0.isComplete }.map(\.id)
+        )
+    }
+
+    /// Where each import stands, counted from its tracks as they are now.
+    ///
+    /// A track of an import is in exactly one of three places. It is on the phone:
+    /// done. Something is still fetching it — an acquisition that has not failed,
+    /// or a device download queued or running: on its way. Or neither, and then it
+    /// is not going to arrive by itself: a failed acquisition, a device download
+    /// that failed or was cancelled, a track removed again. That third kind is what
+    /// keeps a line from running forever, and it is never added to the first.
+    ///
+    /// An Entrambi acquisition deletes its record the moment the device download
+    /// owns the track, so "on its way" has to look at both, and "done" can only be
+    /// the track's own state.
+    private static func importProgress(
+        _ imports: [PlaylistImport],
+        tracks: [StoredTrack],
+        acquisitions: [PendingAcquisition]
+    ) -> [ImportProgressData] {
+        guard !imports.isEmpty else { return [] }
+        let states = Dictionary(tracks.map { ($0.serverID, $0.downloadState) }, uniquingKeysWith: { first, _ in first })
+        let pending = Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first })
+        return imports
+            .sorted { $0.startedAt < $1.startedAt }
+            .map { record -> ImportProgressData in
+                var done = 0
+                var failed = 0
+                var waitingOnServer = 0
+                let ids = record.videoIDs
+                for id in ids {
+                    let state = states[id]
+                    if state == .downloaded {
+                        done += 1
+                    } else if let acquisition = pending[id], acquisition.isActive {
+                        let running = acquisition.serverJobState == ServerJob.State.running.rawValue
+                        if acquisition.stage == .requesting || (acquisition.stage == .onServer && !running) {
+                            waitingOnServer += 1
+                        }
+                    } else if state != .queued && state != .downloading {
+                        failed += 1
+                    }
+                }
+                return ImportProgressData(
+                    id: record.id,
+                    name: record.name,
+                    total: ids.count,
+                    done: done,
+                    failed: failed,
+                    waitingOnServer: waitingOnServer
+                )
+            }
+    }
+
+    /// The import preview: a parsed Demus file against Preferiti, the library and
+    /// the playlists. Nothing is written by looking.
+    ///
+    /// Counted over distinct video ids, because that is what importing acts on: a
+    /// favourite and an acquisition exist once per track however often the file
+    /// lists it, and a playlist filled through `PlaylistStore.add(_:to:)` holds a
+    /// track once.
+    ///
+    /// With several playlists of the same name, the one an update goes into is the
+    /// first in the user's own order of playlists (`sortPosition`), then the oldest,
+    /// then the lowest id: the same answer every time, and the one the user sees
+    /// first in Libreria.
+    static func demusPreview(
+        _ file: DemusPlaylist,
+        favourites: [FavouriteTrack],
+        tracks: [StoredTrack],
+        playlists: [Playlist],
+        entries: [PlaylistEntry]
+    ) -> DemusPreviewData {
+        var seen = Set<String>()
+        let songs = file.songs.filter { seen.insert($0.videoID).inserted }
+        let ids = songs.map(\.videoID)
+
+        let favouriteIDs = Set(favourites.map(\.videoID))
+        let onPhoneIDs = Set(tracks.filter { $0.downloadState == .downloaded }.map(\.serverID))
+        let missing = songs.filter { !onPhoneIDs.contains($0.videoID) }
+        let queuedBytes = tracks
+            .filter { $0.downloadState == .queued || $0.downloadState == .downloading }
+            .reduce(Int64(0)) { $0 + Int64($1.fileBytes ?? 0) }
+
+        let name = DemusImporter.playlistName(file.name)
+        let sameName = playlists
+            .filter { $0.name == name }
+            .sorted { left, right in
+                if left.sortPosition != right.sortPosition { return left.sortPosition < right.sortPosition }
+                if left.createdAt != right.createdAt { return left.createdAt < right.createdAt }
+                return left.id.uuidString < right.id.uuidString
+            }
+        var existing: DemusExistingPlaylist?
+        if let target = sameName.first {
+            let held = Set((group(entries)[ObjectIdentifier(target)] ?? []).compactMap(\.trackID))
+            existing = DemusExistingPlaylist(
+                id: target.id,
+                sameNameCount: sameName.count,
+                missingCount: ids.filter { !held.contains($0) }.count
+            )
+        }
+
+        return DemusPreviewData(
+            name: name,
+            songCount: file.songs.count,
+            trackCount: songs.count,
+            totalDuration: Formatting.totalDuration(file.songs.map(\.durationS)),
+            alreadyFavourite: ids.filter { favouriteIDs.contains($0) }.count,
+            onPhone: ids.filter { onPhoneIDs.contains($0) }.count,
+            estimatedBytes: DemusEstimate.bytes(durations: missing.map(\.durationS)),
+            queuedBytes: queuedBytes,
+            existing: existing
+        )
     }
 
     /// The one line Libreria shows about syncing.

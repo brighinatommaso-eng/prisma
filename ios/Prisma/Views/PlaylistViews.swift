@@ -164,6 +164,8 @@ struct PlaylistsContent: View {
         }
         .destructiveConfirmation($confirmation)
 
+        DemusImportButton()
+
         PlaylistStoreMessages()
 
         if summaries.isEmpty {

@@ -32,6 +32,11 @@ final class AcquisitionCoordinator {
     private(set) var lastPollAt: Date?
     /// Consecutive failed polls of GET /downloads, shown while it retries.
     private(set) var pollFailures = 0
+    /// When the server said its download queue starts again, while it is resting
+    /// after YouTube's bot wall; nil when it is not resting, or when nothing has
+    /// had a reason to ask. Read by the rows of the tracks waiting in that queue,
+    /// so half an hour of "in coda" says why and until when.
+    private(set) var serverCooldownUntil: Date?
 
     /// Between polls of GET /downloads while the server is working.
     static let serverPollInterval: Double = 2
@@ -47,6 +52,13 @@ final class AcquisitionCoordinator {
     /// step gives up. The verified file is on the phone throughout, so giving up
     /// costs the user nothing but space on the server.
     static let maxDeletionAttempts = 10
+    /// How long this phone's jobs may sit queued with nothing running on the
+    /// server before /health is asked whether the queue is resting. Longer than the
+    /// 12-20 s the server leaves between two downloads anyway, so an ordinary gap
+    /// asks nothing.
+    static let queueIdleBeforeAsking: TimeInterval = 25
+    /// At most one such question in this long.
+    static let cooldownCheckInterval: TimeInterval = 60
 
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let settings: AppSettings
@@ -67,6 +79,11 @@ final class AcquisitionCoordinator {
     /// Video ids whose device download was requested by this process, so a refusal
     /// or a silent start is attributed to this handoff and not an older action.
     @ObservationIgnored private var handoffsThisProcess = Set<String>()
+    /// Since when the polls have shown jobs of this phone queued and none running.
+    @ObservationIgnored private var queueIdleSince: Date?
+    @ObservationIgnored private var cooldownAskedAt: Date?
+    /// The one /health request in flight, so a second is never started beside it.
+    @ObservationIgnored private var cooldownCheck: Task<Void, Never>?
 
     init(
         context: ModelContext,
@@ -97,6 +114,8 @@ final class AcquisitionCoordinator {
         loop?.cancel()
         loop = nil
         isRunning = false
+        // Time spent in the background is not time spent watching the queue.
+        queueIdleSince = nil
     }
 
     // MARK: - Actions from the UI
@@ -142,6 +161,70 @@ final class AcquisitionCoordinator {
         record.stage = stage
         context.insert(record)
         guard save("recording the request for “\(request.name)”") else { return }
+        startLoopIfNeeded()
+    }
+
+    /// The same for many tracks at once, in the order given: what importing a
+    /// playlist asks for.
+    ///
+    /// Nothing here talks to the server, so fifty tracks cost one save and return at
+    /// once. Each track that has something left to fetch gets its record, and the
+    /// records are stamped a millisecond apart so that their order is the order
+    /// given and not whatever two equal timestamps would sort to. The loop then does
+    /// what it does for any record: one `POST /downloads` at a time, each awaited
+    /// before the next, in that order — which is therefore the order of the server's
+    /// queue — and after that one `GET /downloads` per pass for all of them
+    /// together. A track the server already has skips the request and goes straight
+    /// to the device download, and one already on the phone gets no record at all:
+    /// `startingStage` decides both, exactly as for a single track.
+    ///
+    /// An id listed twice is acquired once. A track whose earlier acquisition failed
+    /// is picked up again, as it is when its own row is asked for a second time:
+    /// this is the user asking, not the app retrying by itself.
+    func acquire(_ requests: [AcquisitionRequest], destination: AcquisitionDestination) {
+        lastError = nil
+        let existing = Dictionary(
+            allRecords().filter { !$0.isDeleted }.map { ($0.videoID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let now = Date()
+        var seen = Set<String>()
+        var created = 0
+        var failedEarlier: [String] = []
+        for request in requests {
+            guard seen.insert(request.videoID).inserted else { continue }
+            playlists.addFavourite(request.draft)
+
+            if let record = existing[request.videoID] {
+                // Already on its way; a failed one takes the new destination.
+                if record.stage == .failed {
+                    record.destination = destination
+                    failedEarlier.append(request.videoID)
+                }
+                continue
+            }
+            guard let stage = startingStage(for: destination, track: storedTrack(request.videoID)) else {
+                // Nothing left to fetch: the favourite alone was the change.
+                continue
+            }
+            let record = PendingAcquisition(
+                videoID: request.videoID,
+                title: request.title,
+                artist: request.artist,
+                album: request.albumName,
+                durationS: request.durationS,
+                artworkURL: request.artworkURL,
+                destination: destination
+            )
+            record.stage = stage
+            record.createdAt = now.addingTimeInterval(Double(created) / 1000)
+            context.insert(record)
+            created += 1
+        }
+        guard save("recording the requests for \(seen.count) tracks") else { return }
+        for videoID in failedEarlier {
+            retry(videoID: videoID)
+        }
         startLoopIfNeeded()
     }
 
@@ -279,6 +362,9 @@ final class AcquisitionCoordinator {
 
         let remaining = activeRecords()
         if remaining.isEmpty {
+            // Nothing of this phone's is waiting in the server's queue any more.
+            queueIdleSince = nil
+            forgetCooldown()
             return nil
         }
         if remaining.contains(where: { $0.stage == .requesting || $0.stage == .onServer }) {
@@ -406,6 +492,7 @@ final class AcquisitionCoordinator {
         lastPollAt = Date()
 
         let jobsByID = Dictionary(response.value.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var jobFailed = false
         for record in activeRecords() where record.stage == .onServer {
             guard let jobID = record.jobID, let job = jobsByID[jobID], job.trackID == record.videoID else {
                 // The job id is unknown to this server: it was replaced or reset.
@@ -428,6 +515,7 @@ final class AcquisitionCoordinator {
                 record.stage = .syncing
                 record.syncAttempts = 0
             case .failed:
+                jobFailed = true
                 fail(record, .serverDownloadFailed, APIError(
                     kind: .unexpected,
                     title: "The server could not download the track",
@@ -452,6 +540,92 @@ final class AcquisitionCoordinator {
             }
         }
         save("recording server download progress")
+        considerCooldown(jobs: response.value, jobFailed: jobFailed)
+    }
+
+    /// Decides, from the poll that just came back, whether to ask the server if its
+    /// queue is resting.
+    ///
+    /// A job that is `queued` is waiting, and on this phone waiting has no deadline:
+    /// nothing in this class fails a record because its job has been queued for a
+    /// long time, whether behind fifty others or behind half an hour of cooldown.
+    /// What a long wait needs is an explanation, and only /health has it.
+    ///
+    /// It is asked on two events, never on a schedule of its own. A job of this
+    /// phone's has just failed while others are still queued — the bot wall fails
+    /// exactly one job and rests the rest — or the polls have shown jobs queued and
+    /// nothing running for longer than the gap the server leaves between two
+    /// downloads. Either way at most once per `cooldownCheckInterval` unless a job
+    /// has just failed, and not at all while an answer already says when the queue
+    /// starts again. The poll itself already exists and already runs only while
+    /// something is waiting on the server, in the foreground; this adds no timer.
+    private func considerCooldown(jobs: [ServerJob], jobFailed: Bool) {
+        let now = Date()
+        if let until = serverCooldownUntil, until <= now {
+            forgetCooldown()
+        }
+        let anyRunning = jobs.contains { $0.knownState == .running }
+        let anyWaiting = activeRecords().contains {
+            $0.stage == .onServer && $0.serverJobState == ServerJob.State.queued.rawValue
+        }
+        guard anyWaiting, !anyRunning else {
+            queueIdleSince = nil
+            if anyRunning {
+                // The queue is moving, whatever it said before.
+                forgetCooldown()
+            }
+            return
+        }
+        let idleSince = queueIdleSince ?? now
+        queueIdleSince = idleSince
+        guard serverCooldownUntil == nil else { return }
+        if jobFailed {
+            askWhetherQueueIsResting(force: true)
+        } else if now.timeIntervalSince(idleSince) >= Self.queueIdleBeforeAsking {
+            askWhetherQueueIsResting(force: false)
+        }
+    }
+
+    /// One GET /health, off the loop: the loop goes on polling while it is out, and
+    /// a failure here changes nothing — if the server is not answering, the poll is
+    /// what says so.
+    private func askWhetherQueueIsResting(force: Bool) {
+        guard cooldownCheck == nil else { return }
+        if !force, let asked = cooldownAskedAt,
+           Date().timeIntervalSince(asked) < Self.cooldownCheckInterval {
+            return
+        }
+        let client: APIClient
+        do {
+            client = try settings.makeClient()
+        } catch {
+            return
+        }
+        cooldownAskedAt = Date()
+        cooldownCheck = Task { [weak self] in
+            var until: Date?
+            var answered = false
+            do {
+                let health = try await client.health()
+                until = health.value.downloadCooldownEnd
+                answered = true
+            } catch {
+                answered = false
+            }
+            guard let self else { return }
+            self.cooldownCheck = nil
+            if answered, self.serverCooldownUntil != until {
+                self.serverCooldownUntil = until
+            }
+        }
+    }
+
+    /// Written only when it changes: every write wakes the rows that read it, and
+    /// this is reached on every poll.
+    private func forgetCooldown() {
+        if serverCooldownUntil != nil {
+            serverCooldownUntil = nil
+        }
     }
 
     /// A library sync, then each record whose track has arrived moves on: to the

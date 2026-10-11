@@ -19,6 +19,13 @@ final class DownloadManager {
     /// A queued attempt that has received no data after this long is failed as
     /// "never started". Background sessions retry refused or timed-out connections
     /// without reporting them, so without a limit a wrong address waits forever.
+    ///
+    /// Counted from the later of two moments: when the attempt was handed to iOS,
+    /// and when any other transfer of this session last received data or finished.
+    /// iOS runs two transfers at a time, so the third of fifty handed over together
+    /// has received nothing after two minutes for no other reason than its place in
+    /// the line; while the line is moving it is waiting, and only when nothing has
+    /// moved for this long has it never started.
     nonisolated static let startDeadline: TimeInterval = 120
 
     struct Progress {
@@ -53,6 +60,10 @@ final class DownloadManager {
     @ObservationIgnored private var backgroundCompletion: (() -> Void)?
     @ObservationIgnored private var eventsDeliveredBeforeHandler = false
     @ObservationIgnored private var watchdog: Task<Void, Never>?
+    /// What each live transfer had received at the last start-deadline check, by
+    /// download token, and when one of them was last seen to have received more.
+    @ObservationIgnored private var bytesAtLastCheck: [String: Int64] = [:]
+    @ObservationIgnored private var lastTransferMovement: Date?
 
     init(context: ModelContext, settings: AppSettings) {
         self.context = context
@@ -808,15 +819,33 @@ final class DownloadManager {
             }
         }
 
-        let queued: [StoredTrack]
+        let stored: [StoredTrack]
         do {
-            queued = try context.fetch(FetchDescriptor<StoredTrack>()).filter { $0.downloadState == .queued }
+            stored = try context.fetch(FetchDescriptor<StoredTrack>())
         } catch {
             notice("Impossibile leggere i download in coda per controllare quelli che non partono: riavvia l'app.")
             return false
         }
+        let queued = stored.filter { $0.downloadState == .queued }
 
         let now = Date()
+        // Is the line moving? Either a live transfer has received more than it had
+        // at the last check, or one has finished since — which a transfer shorter
+        // than the interval between two checks does without ever being seen live.
+        var bytesNow: [String: Int64] = [:]
+        for (token, task) in tasksByToken {
+            bytesNow[token] = task.countOfBytesReceived
+        }
+        if bytesNow.contains(where: { $0.value > (bytesAtLastCheck[$0.key] ?? 0) }) {
+            lastTransferMovement = now
+        }
+        bytesAtLastCheck = bytesNow
+        let lastFinished = stored
+            .filter { $0.downloadState == .downloaded }
+            .compactMap(\.stateChangedAt)
+            .max()
+        let lastMovement = max(lastTransferMovement ?? .distantPast, lastFinished ?? .distantPast)
+
         var neverStarted: [String] = []
         for track in queued {
             guard preflights[track.serverID] == nil, let started = track.attemptStartedAt else { continue }
@@ -825,7 +854,8 @@ final class DownloadManager {
                 track.downloadState = .downloading
                 continue
             }
-            guard now.timeIntervalSince(started) >= Self.startDeadline else { continue }
+            // Waiting its turn behind transfers that are moving is not "never started".
+            guard now.timeIntervalSince(max(started, lastMovement)) >= Self.startDeadline else { continue }
 
             task?.cancel()
             let minutes = Int(Self.startDeadline / 60)
@@ -837,7 +867,7 @@ final class DownloadManager {
                 title: "Download never started",
                 url: task?.originalRequest?.url?.absoluteString,
                 details: [
-                    "Handed to iOS at \(Formatting.time(started)); no data had arrived after \(minutes) minutes, so the transfer was stopped.",
+                    "Handed to iOS at \(Formatting.time(started)); no data had arrived after \(minutes) minutes in which no other transfer moved either, so the transfer was stopped.",
                     "Transfer state reported by iOS: \(task.map { Self.describe($0.state) } ?? "no transfer found")",
                     "Last problem reported by iOS: \(lastProblem)",
                     track.preflightSummary ?? "No pre-flight result was recorded for this attempt.",

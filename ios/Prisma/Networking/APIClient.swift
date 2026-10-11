@@ -70,6 +70,10 @@ nonisolated struct APIClient: Sendable {
         static let deletion: TimeInterval = 30
         /// GET and PUT /collection only touch one small row.
         static let collection: TimeInterval = 20
+        /// POST /import/demus uploads a file of at most 4 MiB and the server only
+        /// decompresses and reads it. Idle, like the others: a slow uplink that
+        /// keeps sending is not a timeout.
+        static let demusImport: TimeInterval = 30
     }
 
     let address: ServerAddress
@@ -178,6 +182,21 @@ nonisolated struct APIClient: Sendable {
             throw APIError.decoding(error, url: url, body: fetched.data)
         }
         return fetched.status == 409 ? .stale(value) : .accepted(value)
+    }
+
+    /// The largest file POST /import/demus accepts: the backend's limit on the
+    /// compressed size. Checked on the phone first, so a file that cannot be
+    /// accepted is never uploaded.
+    static let demusFileLimit = 4 * 1024 * 1024
+
+    /// POST /import/demus: the bytes of a `.playlist` file exported by Demus, sent
+    /// as they are. The server parses them and changes nothing; an unreadable file
+    /// is a 422 whose `serverDetail` says what is wrong with it.
+    func importDemus(file: Data) async throws -> APIResponse<DemusPlaylist> {
+        try await requestJSON(
+            "/import/demus", method: "POST", body: file,
+            timeout: Timeout.demusImport, contentType: "application/octet-stream"
+        )
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.
@@ -297,10 +316,14 @@ nonisolated struct APIClient: Sendable {
         query: [(name: String, value: String)] = [],
         method: String,
         body: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        contentType: String = "application/json"
     ) async throws -> APIResponse<Value> {
         let url = try address.endpoint(path, query: query)
-        let fetched = try await fetch(url, accept: "application/json", timeout: timeout, method: method, body: body)
+        let fetched = try await fetch(
+            url, accept: "application/json", timeout: timeout,
+            method: method, body: body, contentType: contentType
+        )
         let value: Value
         do {
             value = try JSONDecoder().decode(Value.self, from: fetched.data)
@@ -324,6 +347,7 @@ nonisolated struct APIClient: Sendable {
         headers: [String: String] = [:],
         method: String = "GET",
         body: Data? = nil,
+        contentType bodyType: String = "application/json",
         alsoAccepting extraStatuses: Set<Int> = []
     ) async throws -> Fetched {
         // A conditional request must reach the server, not be answered from the
@@ -337,7 +361,7 @@ nonisolated struct APIClient: Sendable {
         request.httpMethod = method
         if let body {
             request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(bodyType, forHTTPHeaderField: "Content-Type")
         }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         for (name, value) in headers {

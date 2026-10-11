@@ -7,7 +7,11 @@ import SwiftUI
 enum AcquisitionText {
     /// `pollFailures`: failed polls in a row, so a row waiting on the server says the
     /// server is not answering while the coordinator retries.
-    static func phase(of record: AcquisitionData, pollFailures: Int = 0) -> String {
+    ///
+    /// `queueResumesAt`: when the server said its queue starts again, while it is
+    /// resting after YouTube's bot wall. A job queued through half an hour of that
+    /// is waiting, not stuck, and the row says until when.
+    static func phase(of record: AcquisitionData, pollFailures: Int = 0, queueResumesAt: Date? = nil) -> String {
         switch record.stage {
         case .requesting:
             return "Sul server · invio della richiesta…"
@@ -15,7 +19,11 @@ enum AcquisitionText {
             return "Sul server · il server non risponde, nuovo tentativo…"
         case .onServer:
             switch record.serverJobState.flatMap({ ServerJob.State(rawValue: $0) }) {
-            case .queued: return "Sul server · in coda"
+            case .queued:
+                if let queueResumesAt, queueResumesAt > Date() {
+                    return "Sul server · in pausa fino alle " + queueResumesAt.formatted(date: .omitted, time: .shortened)
+                }
+                return "Sul server · in coda"
             case .running: return "Sul server · download da YouTube"
             default: return "Sul server"
             }
@@ -166,7 +174,11 @@ struct AcquisitionRow: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(ink.primary)
                         .lineLimit(1)
-                    Text(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))
+                    Text(AcquisitionText.phase(
+                        of: record,
+                        pollFailures: acquisitions.pollFailures,
+                        queueResumesAt: acquisitions.serverCooldownUntil
+                    ))
                         .font(.caption)
                         .foregroundStyle(ink.secondary)
                         .lineLimit(1)

@@ -20,6 +20,7 @@ final class AppModel {
         let acquisitions: AcquisitionCoordinator
         let deletion: TrackDeletion
         let collection: CollectionSync
+        let importer: DemusImporter
     }
 
     let settings: AppSettings
@@ -31,13 +32,14 @@ final class AppModel {
         let settings = AppSettings()
         self.settings = settings
         do {
-            // FavouriteTrack is a new entity and the fields added to StoredTrack,
-            // SyncRecord and PendingAcquisition are optional or carry a default, so
-            // the library already on the phone opens with a lightweight migration
-            // and nothing in it is rewritten.
+            // FavouriteTrack and PlaylistImport are new entities and the fields added
+            // to StoredTrack, SyncRecord and PendingAcquisition are optional or carry
+            // a default, so the library already on the phone opens with a
+            // lightweight migration and nothing in it is rewritten.
             let container = try ModelContainer(
                 for: StoredAlbum.self, StoredTrack.self, SyncRecord.self,
-                Playlist.self, PlaylistEntry.self, PendingAcquisition.self, FavouriteTrack.self
+                Playlist.self, PlaylistEntry.self, PendingAcquisition.self, FavouriteTrack.self,
+                PlaylistImport.self
             )
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
@@ -81,7 +83,14 @@ final class AppModel {
                 downloads: downloads, playlists: playlists
             )
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
-            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion, collection: collection)
+            // Idle until a file arrives. It writes through the two services above, so
+            // an import is the same playlist change and the same acquisitions a hand
+            // would have made, fifty at a time.
+            let importer = DemusImporter(
+                context: container.mainContext, settings: settings, playlists: playlists,
+                acquisitions: acquisitions, downloads: downloads
+            )
+            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion, collection: collection, importer: importer)
             playlists.removeOrphanedEntries()
             // Preferiti is now the only place a track is browsed, so everything
             // already on this phone becomes a favourite once. Runs before any view
