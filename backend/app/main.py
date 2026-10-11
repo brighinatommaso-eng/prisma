@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from . import collection, db, deletion, diagnostics, worker, ytm
+from . import collection, db, deletion, demus, diagnostics, worker, ytm
 from .config import MUSIC_DIR
 
 log = logging.getLogger("prisma.api")
@@ -82,6 +82,11 @@ class Health(BaseModel):
     po_token_provider_active: bool
     # Unix time; None until the first download succeeds.
     last_successful_download_at: int | None
+    # The queue is resting after YouTube's bot wall; see worker.py. Read from
+    # the database, never from YouTube. `until` is Unix time, None when the
+    # queue is not resting.
+    download_cooldown_active: bool
+    download_cooldown_until: int | None
 
 
 class SongResult(BaseModel):
@@ -92,6 +97,26 @@ class SongResult(BaseModel):
     duration_s: int | None
     artwork_url: str | None
     artwork_url_small: str | None
+
+
+class DemusSong(BaseModel):
+    # The YouTube video id, exactly as exported: the key POST /downloads takes.
+    video_id: str
+    title: str | None
+    artist: str | None
+    album: str | None
+    # Rewritten to the larger rendition where that is safe, but not verified:
+    # parsing makes no request. See demus.py.
+    artwork_url: str | None
+    duration_s: int | None
+
+
+class DemusPlaylist(BaseModel):
+    name: str
+    # Unix seconds, from the export's ISO 8601 createdDate; None if it has none.
+    created_at: int | None
+    # In the file's order. A song listed twice appears twice.
+    songs: list[DemusSong]
 
 
 class DownloadRequest(BaseModel):
@@ -219,6 +244,7 @@ async def health() -> Health:
     )
     counts = await asyncio.to_thread(db.counters)
     last_success = await asyncio.to_thread(db.last_successful_download_at)
+    cooldown_until = await asyncio.to_thread(db.download_cooldown_until)
     return Health(
         ytdlp_version=_installed_version("yt-dlp"),
         ytmusicapi_version=_installed_version("ytmusicapi"),
@@ -228,6 +254,8 @@ async def health() -> Health:
         js_runtime=environment.js_runtime,
         po_token_provider_active=environment.po_token_provider_active,
         last_successful_download_at=last_success,
+        download_cooldown_active=cooldown_until is not None,
+        download_cooldown_until=cooldown_until,
     )
 
 
@@ -245,6 +273,33 @@ async def search(
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"YouTube Music search failed: {exc}")
     return [SongResult(**r) for r in results]
+
+
+@app.post(
+    "/import/demus",
+    response_model=DemusPlaylist,
+    openapi_extra={"requestBody": {
+        "required": True,
+        "description": "The .playlist file exported by Demus, as the raw body.",
+        "content": {"application/octet-stream": {
+            "schema": {"type": "string", "format": "binary"}}},
+    }},
+)
+async def import_demus(request: Request) -> DemusPlaylist:
+    """Parse a playlist exported by Demus and return it.
+
+    Parsing only: nothing is downloaded, queued or stored, and no request
+    leaves the server. The body is the file itself, not a multipart form.
+    Anything that is not a readable export is a 422 whose detail says what is
+    wrong with it, including a file over either size limit.
+    """
+    try:
+        body = await demus.read_body(request.stream(), request.headers.get("content-length"))
+        # Decompression and JSON parsing are CPU work; keep them off the loop.
+        playlist = await asyncio.to_thread(demus.parse, body)
+    except demus.DemusError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return DemusPlaylist(**playlist)
 
 
 @app.post("/downloads", status_code=202)

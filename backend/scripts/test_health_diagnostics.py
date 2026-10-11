@@ -366,6 +366,49 @@ def test_health_carries_new_fields_and_keeps_old_ones():
     assert payload["last_successful_download_at"] == 4242
 
 
+def test_health_reports_the_download_cooldown():
+    """Before, during and after a bot-wall cooldown, from the database alone."""
+    import time
+
+    from app import diagnostics, main
+
+    def cooldown_fields(until):
+        with db._lock:
+            conn = db.connect()
+            conn.execute("DELETE FROM worker_state")
+            conn.commit()
+        if until is not None:
+            db.set_download_cooldown_until(until)
+        payload = asyncio.run(main.health()).model_dump()
+        return payload["download_cooldown_active"], payload["download_cooldown_until"]
+
+    calls, probe = _counting_reachable()
+    saved_reachable = diagnostics.ytm.reachable
+    saved_probe = diagnostics._probe
+    diagnostics.ytm.reachable = probe
+    diagnostics._probe = lambda: diagnostics.NOT_DETECTED
+    diagnostics._YTDLP_CACHE.entry = None
+    diagnostics._REACHABLE_CACHE.entry = None
+    MUSIC_DIR.mkdir(parents=True, exist_ok=True)
+    ahead = int(time.time()) + 600
+    try:
+        assert cooldown_fields(None) == (False, None)
+        assert cooldown_fields(ahead) == (True, ahead)
+        assert cooldown_fields(int(time.time()) - 5) == (False, None)
+    finally:
+        diagnostics.ytm.reachable = saved_reachable
+        diagnostics._probe = saved_probe
+        diagnostics._YTDLP_CACHE.entry = None
+        diagnostics._REACHABLE_CACHE.entry = None
+        with db._lock:
+            conn = db.connect()
+            conn.execute("DELETE FROM worker_state")
+            conn.commit()
+
+    # Three polls, cooldown or not: still the one cached YouTube Music probe.
+    assert len(calls) == 1, calls
+
+
 def test_health_asks_youtube_music_once_however_often_it_is_polled():
     """The iOS client polls /health; YouTube must not see one search per poll."""
     from app import diagnostics, main

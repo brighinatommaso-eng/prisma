@@ -19,8 +19,10 @@ Every command below is runnable as written once you have.
 
 | Path | Purpose |
 |---|---|
-| `app/main.py` | FastAPI app: `GET /health`, `GET /search` |
+| `app/main.py` | FastAPI app: `GET /health`, `GET /search`, `POST /import/demus` |
 | `app/ytm.py` | the only module that talks to YouTube Music |
+| `app/demus.py` | parser for a Demus playlist export; no network, no database |
+| `app/worker.py` | the download worker: one job at a time, paced, with the bot-wall cooldown |
 | `app/config.py` | reads `PRISMA_MUSIC_DIR`, `PRISMA_HOST`, `PRISMA_PORT` |
 | `scripts/smoke_download.py` | manual yt-dlp spike, **not** wired into the API |
 | `Dockerfile` | python:3.12-slim + ffmpeg + deno (yt-dlp's JS runtime) |
@@ -31,11 +33,16 @@ Every command below is runnable as written once you have.
 GET /health
   -> { ytdlp_version, ytmusicapi_version, music_free_bytes, youtube_music_reachable,
        track_count, album_count, total_bytes_stored,
-       js_runtime, po_token_provider_active, last_successful_download_at }
+       js_runtime, po_token_provider_active, last_successful_download_at,
+       download_cooldown_active, download_cooldown_until }
 
 GET /search?q=<string>&limit=<1..50>     limit defaults to 20
   -> [ { video_id, title, artist, album, duration_s,
          artwork_url, artwork_url_small }, ... ]
+
+POST /import/demus                       body: the .playlist file, raw
+  -> { name, created_at,
+       songs: [ { video_id, title, artist, album, artwork_url, duration_s }, ... ] }
 ```
 
 `/health` always answers 200. `youtube_music_reachable` goes `false` on a failed or
@@ -48,7 +55,8 @@ iOS client polls `/health` every few seconds and one search per poll is exactly 
 repetition that provokes "Sign in to confirm you're not a bot". A probe that fails
 is cached for the same 60 seconds, so a YouTube Music outage is not hammered either.
 
-The last three fields exist to date and explain a yt-dlp breakage (spec section 3.6),
+`js_runtime`, `po_token_provider_active` and `last_successful_download_at` exist
+to date and explain a yt-dlp breakage (spec section 3.6),
 typically "Sign in to confirm you're not a bot":
 
 | Field | Meaning |
@@ -56,6 +64,11 @@ typically "Sign in to confirm you're not a bot":
 | `js_runtime` | The JavaScript runtime yt-dlp would use for YouTube's player challenges, e.g. `"deno 2.9.7"`. The image ships deno, so this is `null` only if something is wrong. A runtime too old for yt-dlp is still named, suffixed ` (unsupported)`. |
 | `po_token_provider_active` | `true` only when a PO token provider plugin is registered with yt-dlp **and** reports itself available — installed-but-unusable counts as `false`. |
 | `last_successful_download_at` | Unix time the most recent download job finished with state `done`; `null` if none ever has. |
+
+The two `download_cooldown_*` fields say whether the download queue is resting
+after a bot wall, and until when (Unix time; `null` when it is not). They are read
+from the database and cost no request. See
+[Download pacing and the bot-wall cooldown](#download-pacing-and-the-bot-wall-cooldown).
 
 `js_runtime` and `po_token_provider_active` are asked of yt-dlp itself, built with
 the download pipeline's own options, so they show what a download would really use.
@@ -90,6 +103,119 @@ with a real image, so it is accepted rather than rejected: the field guarantees
 
 Verification costs one HEAD per result, run concurrently with 8 workers. A
 `limit=5` search takes about 0.75s end to end.
+
+### Importing a Demus playlist
+
+`POST /import/demus` reads a playlist exported by the Demus app and returns what is
+in it. It **only parses**: nothing is downloaded, queued or stored, and the server
+makes no request. Deciding what to download is left to the client, which queues
+each song through `POST /downloads` with the `video_id` it was given.
+
+The body is the `.playlist` file itself — not a multipart form:
+
+```powershell
+curl.exe -s --data-binary "@Rap.playlist" -H "Content-Type: application/octet-stream" "http://YOUR_SERVER_IP:8000/import/demus"
+```
+
+```json
+{"name":"Rap","created_at":1782052736,
+ "songs":[{"video_id":"DbWqfUPVoOo","title":"Yung 3p 3","artist":"Kid Yugi",
+           "album":"The Globe",
+           "artwork_url":"https://yt3.googleusercontent.com/...=w544-h544-l90-rj",
+           "duration_s":118}]}
+```
+
+- `songs` is in the file's order, and a song listed twice appears twice.
+- `video_id` is the export's `id`, untouched: the YouTube video id, which is
+  Prisma's own track key.
+- `created_at` is the export's ISO 8601 `createdDate` as Unix seconds, like every
+  other timestamp in the API; `null` if the export has none.
+- `title`, `artist`, `album`, `artwork_url` and `duration_s` are `null` when the
+  export does not carry them.
+- `artwork_url` is rewritten to `=w544-h544-l90-rj` for a googleusercontent URL
+  and passed through unchanged for any other host. Unlike `/search` it is **not**
+  HEAD-verified, because this endpoint makes no request; the rewrite is limited to
+  the host where a larger size than exists is answered with the source size
+  rather than an error.
+- The export's `albumId` is deliberately not returned. In real exports it is
+  sometimes a channel id, not an album; the download pipeline resolves the album
+  itself. Lyrics, genre and the artist fields are ignored too.
+
+The file is xz-compressed JSON, and both sizes are capped so a hostile file cannot
+exhaust memory: **4 MiB compressed** and **32 MiB decompressed**. The first is
+enforced while the request is read and the second while the data is unpacked, so
+neither is ever held in full past its limit. The constants are in `app/demus.py`.
+
+Anything that is not a readable export answers **422**, with a `detail` string
+saying what is wrong — for example:
+
+| `detail` begins | Cause |
+|---|---|
+| `The request body is empty` | no file was sent |
+| `This is not an xz file` | some other file, or the JSON sent uncompressed |
+| `The xz data is truncated` / `is corrupt` | an incomplete or damaged upload |
+| `The decompressed content is not JSON` | xz, but not a Demus export |
+| `The playlist has no 'songs' list` | JSON of some other shape |
+| `Song 7 has no 'id'` | a song that cannot be matched to a track; the number is its position in the file |
+| `The file is larger than the 4194304 byte limit on the compressed size` | over the compressed cap |
+| `The file decompresses to more than the 33554432 byte limit on the decompressed size` | over the decompressed cap |
+
+## Download pacing and the bot-wall cooldown
+
+Downloads run one at a time. Importing a playlist queues dozens of them at once,
+which is the volume that has provoked "Sign in to confirm you're not a bot"
+before, so the worker (`app/worker.py`) paces itself:
+
+- **A gap between downloads.** After a download attempt ends — done or failed —
+  the next one starts no sooner than a random 12 to 20 seconds later. A job that
+  arrives after the queue has been idle for longer than that starts at once.
+- **A cooldown after a bot wall.** When a job fails with the bot wall, or with an
+  HTTP 429 from YouTube, that job fails as any other does, error text intact, and
+  is **not retried**. The rest of the queue then waits for **30 minutes** instead
+  of being run into the same wall one job after another. Waiting jobs stay
+  `queued`; none is failed or cancelled, and when the cooldown ends the worker
+  carries on with the next one.
+
+The end of the cooldown is stored in the database, so it **survives a restart**: a
+redeploy is usually what follows a bot wall, and the queue must not go straight
+back to YouTube because the container is new. `/health` shows it:
+
+```json
+{"download_cooldown_active":true,"download_cooldown_until":1789499782}
+```
+
+Everything else keeps working during a cooldown. `POST /downloads` still queues,
+`DELETE /downloads/{id}` still cancels a queued job, and tracks can be deleted.
+The gap, unlike the cooldown, is held in memory: the first download after a
+restart starts without waiting.
+
+The container log records it:
+
+```
+job 41 hit YouTube's bot wall: queued downloads wait until 1789499782 (1800 s); the failed job is not retried
+download cooldown in force until 1789499782; queued jobs wait
+```
+
+The three durations are constants at the top of `app/worker.py`.
+
+## Tests
+
+The scripts in `scripts/` are plain Python, each printing `N/N passed`. These need
+neither the network nor YouTube and also run on a bare development machine:
+
+```powershell
+python scripts/test_demus_import.py
+python scripts/test_download_pacing.py
+python scripts/test_collection.py
+python scripts/test_track_deletion.py
+```
+
+`test_health_diagnostics.py` and `test_album_normalisation.py` import yt-dlp and
+ytmusicapi, so they run inside the image:
+
+```powershell
+ssh YOUR_USER@YOUR_SERVER_IP "cd /opt/prisma && docker compose exec -T backend python scripts/test_health_diagnostics.py"
+```
 
 ## Configuration
 
@@ -194,7 +320,8 @@ A healthy `/health`:
  "music_free_bytes":283578765312,"youtube_music_reachable":true,
  "track_count":9,"album_count":8,"total_bytes_stored":35138452,
  "js_runtime":"deno 2.9.7","po_token_provider_active":false,
- "last_successful_download_at":1789497982}
+ "last_successful_download_at":1789497982,
+ "download_cooldown_active":false,"download_cooldown_until":null}
 ```
 
 A `js_runtime` of `null` means deno is missing from the image or yt-dlp stopped

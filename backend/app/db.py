@@ -100,6 +100,19 @@ CREATE TABLE IF NOT EXISTS collection (
 )
 """
 
+# What the download worker has to remember across a restart, as integers under
+# a key. Today that is one row, the end of a bot-wall cooldown: a redeploy is
+# what usually follows a bot wall, and a cooldown held in memory would end
+# with the old container and send the queue straight back at YouTube.
+_WORKER_STATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS worker_state (
+    key   TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+)
+"""
+
+_COOLDOWN_UNTIL_KEY = "download_cooldown_until"
+
 # Columns added after an earlier release. Additive only.
 _EXPECTED_TRACK_COLUMNS = {
     "album_raw": "TEXT",
@@ -151,6 +164,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_ALBUMS_SCHEMA)
     conn.execute(_JOBS_SCHEMA)
     conn.execute(_COLLECTION_SCHEMA)
+    conn.execute(_WORKER_STATE_SCHEMA)
     present = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
     for column, sql_type in _EXPECTED_TRACK_COLUMNS.items():
         if column not in present:
@@ -625,6 +639,42 @@ def last_successful_download_at() -> int | None:
     return int(row["t"]) if row["t"] is not None else None
 
 
+# --- download cooldown ----------------------------------------------------
+
+def _store_cooldown_until(conn: sqlite3.Connection, until: int) -> None:
+    # MAX: a cooldown is only ever extended, never cut short by a later write.
+    conn.execute(
+        "INSERT INTO worker_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = MAX(value, excluded.value)",
+        (_COOLDOWN_UNTIL_KEY, int(until)),
+    )
+
+
+def set_download_cooldown_until(until: int) -> None:
+    """Pause the download queue until `until` (Unix time)."""
+    with _lock:
+        conn = connect()
+        with conn:
+            _store_cooldown_until(conn, until)
+
+
+def download_cooldown_until(now: int | float | None = None) -> int | None:
+    """Unix time the download cooldown in force at `now` ends, or None.
+
+    None both when there has never been a cooldown and when the stored one is
+    over: the row is left in place and simply stops applying. The worker asks
+    with its own clock; /health asks without one.
+    """
+    with _lock:
+        row = connect().execute(
+            "SELECT value FROM worker_state WHERE key = ?", (_COOLDOWN_UNTIL_KEY,)
+        ).fetchone()
+    if row is None:
+        return None
+    until = int(row["value"])
+    return until if until > (_now() if now is None else now) else None
+
+
 # --- jobs -----------------------------------------------------------------
 
 def create_job(video_id: str) -> int:
@@ -698,15 +748,24 @@ def set_progress(job_id: int, progress: float) -> None:
 
 
 def finish_job(job_id: int, state: str, error: str | None = None,
-               progress: float | None = None) -> None:
+               progress: float | None = None,
+               cooldown_until: int | None = None) -> None:
+    """Record how a job ended.
+
+    cooldown_until is for a job that ended at YouTube's bot wall: the cooldown
+    is stored in the same transaction as the failure, so a crash between the
+    two cannot leave the job failed and the queue free to run into the wall.
+    """
     with _lock:
         conn = connect()
-        conn.execute(
-            "UPDATE jobs SET state = ?, error = ?, progress = COALESCE(?, progress), "
-            "updated_at = ? WHERE id = ?",
-            (state, error, progress, _now(), job_id),
-        )
-        conn.commit()
+        with conn:
+            conn.execute(
+                "UPDATE jobs SET state = ?, error = ?, progress = COALESCE(?, progress), "
+                "updated_at = ? WHERE id = ?",
+                (state, error, progress, _now(), job_id),
+            )
+            if cooldown_until is not None:
+                _store_cooldown_until(conn, cooldown_until)
 
 
 def cancel_queued_job(job_id: int) -> str | None:
@@ -735,6 +794,10 @@ def fail_interrupted_jobs() -> int:
 
     No automatic retry: a silent retry loop would hide a broken yt-dlp, which
     spec section 3.6 calls the most predictable failure in the project.
+
+    Only `running` is touched. The worker never holds a claimed job while it
+    waits out a gap or a cooldown, so a queued job stays queued through any
+    number of restarts.
     """
     with _lock:
         conn = connect()

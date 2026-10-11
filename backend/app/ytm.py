@@ -7,7 +7,6 @@ ytmusicapi is synchronous and blocking. Every public helper here is therefore
 called from a worker thread by the API layer, never directly on the event loop.
 """
 
-import re
 import threading
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -15,16 +14,8 @@ from typing import Any
 
 from ytmusicapi import YTMusic
 
-# Search results only ever carry a 120x120 thumbnail, which is unusable both for
-# cover display and for the palette extraction in spec section 3.3.
-# googleusercontent encodes the rendition in a suffix after the final "=", so the
-# larger variant is a URL rewrite rather than a second API call.
-#
-# Note that googleusercontent will not upscale: for an album whose source art is
-# smaller than 544px it serves the source size instead. That is still correct and
-# still far better than 120px, so it is accepted rather than rejected.
-ARTWORK_SIZE_SUFFIX = "w544-h544-l90-rj"
-_ARTWORK_SUFFIX_RE = re.compile(r"=[\w-]+$")
+from .artwork import upsized_artwork_url as _upsized_artwork_url
+
 ARTWORK_PROBE_TIMEOUT_S = 5.0
 _ARTWORK_PROBE_WORKERS = 8
 
@@ -82,17 +73,6 @@ def _album_name(item: dict[str, Any]) -> str | None:
     if isinstance(album, str):
         return album or None
     return None
-
-
-def _upsized_artwork_url(url: str | None) -> str | None:
-    """Rewrite the googleusercontent size suffix to ARTWORK_SIZE_SUFFIX.
-
-    Returns None when there is no size suffix to rewrite, so the caller keeps
-    the URL it already has.
-    """
-    if not url or not _ARTWORK_SUFFIX_RE.search(url):
-        return None
-    return _ARTWORK_SUFFIX_RE.sub("=" + ARTWORK_SIZE_SUFFIX, url)
 
 
 def _is_fetchable_image(url: str) -> bool:
