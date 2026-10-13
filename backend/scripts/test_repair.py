@@ -768,20 +768,23 @@ def test_missing_files_is_null_when_the_scan_outlasts_the_probe_timeout():
     assert diagnostics.missing_files() == 1
 
 
-def test_a_scan_still_running_reports_the_last_count_or_null():
+def test_a_scan_still_running_reports_the_last_count_or_null_without_waiting():
+    """The first scan can take far longer than a probe, and /health is polled
+    all the while: a poll must not sit out the usual lock wait each time."""
     _reset()
-    saved_wait = diagnostics.LOCK_WAIT_S
-    diagnostics.LOCK_WAIT_S = 0.05
+    assert diagnostics.LOCK_WAIT_S >= 1.0
     # Stands in for a scan that is still hashing while holding the lock.
     diagnostics._MISSING_CACHE.lock.acquire()
     try:
+        started = time.monotonic()
         diagnostics._MISSING_CACHE.entry = None
         assert diagnostics.missing_files() is None
         diagnostics._MISSING_CACHE.entry = (0.0, 7)
         assert diagnostics.missing_files() == 7
+        assert _health()["missing_files"] == 7
+        assert time.monotonic() - started < diagnostics.LOCK_WAIT_S / 2
     finally:
         diagnostics._MISSING_CACHE.lock.release()
-        diagnostics.LOCK_WAIT_S = saved_wait
         diagnostics._MISSING_CACHE.entry = None
 
 
