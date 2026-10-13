@@ -69,26 +69,40 @@ def _with_video_id(title_seg: str, video_id: str) -> str:
     return title_seg[:room].rstrip(" .") + suffix
 
 
+def bracketed_sibling(audio_path: Path, video_id: str) -> Path:
+    """The `Title [video_id]` path beside audio_path, for a track that is
+    recorded at audio_path and has to give it up."""
+    return audio_path.with_name(_with_video_id(audio_path.stem, video_id) + audio_path.suffix)
+
+
 def track_paths(artist: str | None, album: str | None, title: str | None,
                 video_id: str) -> tuple[Path, Path]:
     """Return (audio_path, cover_path) for a download of video_id.
 
-    Two different video ids never get the same audio path, and no file that is
-    not this track's own is ever the target: yt-dlp does not replace a file
+    Two different video ids never get the same audio path, and an .m4a that
+    may be another track's is never the target: yt-dlp does not replace a file
     already at its output path, it reports it as downloaded, and the pipeline
-    would then tag and record someone else's audio as this track.
+    would then tag and record someone else's audio as this track. That is
+    exactly how a path shared by two live ids came to hold one id's audio
+    under the other id's tags and hash.
 
-    A track that is live in the catalogue goes back to the path on its row,
-    provided that path is still its own: either the file there is the audio it
-    recorded (same SHA-256), or there is no file and no lower live id is
-    recorded at the same path. That second rule is what separates two ids
-    already recorded at one path once the file is gone. Otherwise, and for a
-    track that is new or was deleted, the natural path Artist/Album/Title.m4a
-    is used when it is free, and `Title [video_id].m4a` beside it when it is
-    not. Nothing is ever renamed or moved to make room.
+    A track that is live in the catalogue goes back to the path on its row
+    when that path is in the folder its metadata names today and is still its
+    own. With a file there, that means no other live id is recorded at the
+    path and the file has the track's recorded SHA-256; a file two live rows
+    point at belongs to neither, whichever hash matches. With no file there,
+    it means no lower live id is recorded at the same path, which is what
+    separates two ids recorded at one path once the file is gone. Otherwise,
+    and for a track that is new or was deleted, the natural path
+    Artist/Album/Title.m4a is used when it is free, and `Title [video_id].m4a`
+    beside it when it is not. Nothing is ever renamed, moved or removed to
+    make room: a file that is nobody's any more simply stays.
 
-    Raises PathConflict when the track's own bracketed path holds a file that
-    is not its recorded audio: there is no further name to fall back to.
+    The bracketed path carries the id, so only this track's own downloads ever
+    write there, and a file found at it is taken to be what an earlier attempt
+    left. The exception raises PathConflict: the row already records that
+    path and the file there is not the recorded audio, so there is no further
+    name to fall back to.
     """
     from . import db
     from .integrity import sha256_of
@@ -103,16 +117,22 @@ def track_paths(artist: str | None, album: str | None, title: str | None,
     bracketed = album_dir / f"{_with_video_id(title_seg, video_id)}.m4a"
 
     own = db.get_track(video_id)
-    if own is not None and own.get("deleted_at") is None and own.get("file_path"):
+    live = own is not None and own.get("deleted_at") is None and own.get("file_path")
+    # A row filed under an older reading of the artist or album is not sent
+    # back there: the cover and the album row follow today's metadata, and the
+    # audio goes with them.
+    if live and Path(own["file_path"]).parent == album_dir:
         recorded = Path(own["file_path"])
+        # The string as stored, which is what the other rows were matched on
+        # when they were written.
+        others = [c["id"] for c in db.path_claims(own["file_path"])
+                  if c["live"] and c["id"] != video_id]
         if recorded.exists():
-            still_own = (recorded.is_file() and own.get("sha256") is not None
+            still_own = (not others and recorded.is_file()
+                         and own.get("sha256") is not None
                          and sha256_of(recorded) == own["sha256"])
         else:
-            # The string as stored, which is what the other rows were matched
-            # on when they were written.
-            claims = db.path_claims(own["file_path"])
-            still_own = not any(c["live"] and c["id"] < video_id for c in claims)
+            still_own = not any(other < video_id for other in others)
         if still_own:
             return recorded, cover_path
         if recorded == bracketed:

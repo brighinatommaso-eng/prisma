@@ -41,6 +41,14 @@ final name is always a complete backup. Rotation happens after that, and only
 then: a run that fails removes nothing. It deletes nothing but directories of
 its own, recognised by their exact name and their backup.json.
 
+Two verified backups are still not allowed to rotate anything out, and count
+as failures so that somebody looks. One is a catalogue with no tracks while an
+earlier backup has some: that is what a wiped state directory looks like once
+the server has started again on a fresh catalogue, and a week of such nights
+would otherwise replace every real backup with an empty one. The other is a
+backup whose name does not sort last, which means the clock was wrong then or
+is wrong now. In both cases the new copy is kept and nothing is removed.
+
 Exit code 0 and one line starting "prisma-backup OK" on success; non-zero and
 one line starting "prisma-backup FAILED" on standard error otherwise.
 
@@ -96,8 +104,12 @@ def read_env_file(path):
             line = line[len("export "):].lstrip()
         key, value = line.split("=", 1)
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        if value[:1] in ("\"", "'") and value.find(value[0], 1) > 0:
+            # Quoted: everything up to the closing quote, # included.
+            value = value[1:value.find(value[0], 1)]
+        else:
+            # Unquoted: a # after whitespace starts a comment, as in compose.
+            value = re.split(r"\s+#", value, maxsplit=1)[0].strip()
         values[key.strip()] = value
     return values
 
@@ -128,6 +140,16 @@ def _is_own_directory(entry, pattern):
     return bool(pattern.match(entry.name)) and entry.is_dir() and not entry.is_symlink()
 
 
+def _recorded_tracks(backup):
+    """The track count a completed backup wrote in its manifest, or None."""
+    try:
+        with open(str(backup / MANIFEST), encoding="utf-8") as handle:
+            tracks = json.load(handle).get("tracks")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return tracks if isinstance(tracks, int) else None
+
+
 def completed_backups(backup_dir):
     """This script's finished backups in backup_dir, newest first."""
     if not backup_dir.is_dir():
@@ -149,9 +171,19 @@ def stale_partials(backup_dir, older_than):
 
 
 def _open_read_only(catalogue):
-    # mode=ro: SQLite will not write to the database or its WAL through this
-    # connection, and will not create either.
-    return sqlite3.connect(Path(catalogue).resolve().as_uri() + "?mode=ro", uri=True)
+    """A connection that cannot write to the database.
+
+    While the server has the catalogue open there is a -wal beside it, and
+    mode=ro reads through it without writing to it or to the database. With
+    no -wal the server is not running and everything is in the main file; but
+    the file still says "WAL mode", and a plain read-only connection would
+    create an empty -wal and -shm next to it -- inside the music folder.
+    immutable=1 makes SQLite read the file as it is and create nothing.
+    """
+    uri = Path(catalogue).resolve().as_uri() + "?mode=ro"
+    if not os.path.exists(str(catalogue) + "-wal"):
+        uri += "&immutable=1"
+    return sqlite3.connect(uri, uri=True)
 
 
 def _count_tracks(conn):
@@ -279,8 +311,19 @@ def backup(state_dir, backup_dir, now):
         raise
 
     # Reached only with a complete, checked backup in place.
+    ordered = completed_backups(backup_dir)
+    if ordered[0].name != name:
+        raise BackupError(
+            "%s was written, but %s holds backups with newer names (%s): the clock is "
+            "or was wrong. Nothing was rotated; sort that out by hand."
+            % (name, backup_dir, ordered[0].name))
+    if not tracks and any((_recorded_tracks(old) or 0) > 0 for old in ordered[1:]):
+        raise BackupError(
+            "the catalogue has no tracks, but earlier backups do. The copy was kept as "
+            "%s and nothing was rotated, so the earlier backups stay until this is "
+            "looked at." % name)
     removed = 0
-    for old in completed_backups(backup_dir)[KEEP:]:
+    for old in ordered[KEEP:]:
         shutil.rmtree(str(old))
         removed += 1
     for leftover in stale_partials(backup_dir, older_than=name):

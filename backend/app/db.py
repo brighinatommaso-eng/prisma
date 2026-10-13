@@ -495,6 +495,50 @@ def mark_track_deleted(video_id: str) -> dict[str, Any] | None:
     }
 
 
+def repoint_track(video_id: str, from_path: str, to_path: str) -> bool:
+    """Record a live track at to_path instead of from_path. Row only.
+
+    For a track recorded at a path that turned out to be another track's, or
+    nobody's; see downloader._send_to_own_paths. Conditional on the row still being live
+    and still at from_path, so it cannot undo a download that got there first.
+    updated_at moves so a client mirror hears about it.
+    """
+    with _lock:
+        conn = connect()
+        with conn:
+            cursor = conn.execute(
+                "UPDATE tracks SET file_path = ?, updated_at = ? "
+                "WHERE id = ? AND file_path = ? AND deleted_at IS NULL",
+                (to_path, _now(), video_id, from_path),
+            )
+            return cursor.rowcount > 0
+
+
+def retire_album_if_empty(album_id: int) -> bool:
+    """Soft-delete an album that has no live track left. Returns whether it did.
+
+    For a track that a new download filed under a different album: the album
+    it left follows the same rule as after a deletion, or it would stay in the
+    library with nothing in it. Only the row changes; no file is touched.
+    """
+    stamp = _now()
+    with _lock:
+        conn = connect()
+        with conn:
+            live = conn.execute(
+                "SELECT COUNT(*) c FROM tracks WHERE album_id = ? AND deleted_at IS NULL",
+                (album_id,),
+            ).fetchone()["c"]
+            if live:
+                return False
+            cursor = conn.execute(
+                "UPDATE albums SET deleted_at = ?, updated_at = ? "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (stamp, stamp, album_id),
+            )
+            return cursor.rowcount > 0
+
+
 def clear_album_cover(album_id: int, cover_path: str) -> None:
     """Forget a deleted album's cover once its file is gone from disk.
 

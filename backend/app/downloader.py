@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from . import db, metadata, palette, tagging
 from .integrity import sha256_of
-from .paths import make_dir_owned, set_owner, track_paths
+from .paths import bracketed_sibling, make_dir_owned, set_owner, track_paths
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
 FALLBACK_BITRATE = "192k"
@@ -105,6 +105,31 @@ def _download_audio(video_id: str, audio_path: Path, on_progress: ProgressCallba
         return Path(ydl.prepare_filename(info))
 
 
+def _send_to_own_paths(shared_path: str, except_id: str | None = None) -> None:
+    """Record every live track at shared_path, bar except_id, at its own
+    bracketed path instead. Rows only; no file is touched.
+
+    A path belongs to one track. When two live rows name the same one, this
+    is what ends it, at the two moments something is known for certain:
+
+    - a track has just been written to the path (except_id). It is that
+      track's file now, and no other row may keep pointing at it;
+    - a track has just been downloaded away from a file it shared (no
+      except_id). That file is one track's audio under another one's tags, and
+      the row left behind would otherwise look like its rightful owner -- all
+      the more if its hash is the one that matches.
+
+    The rows moved name a path with no file at it yet, so they read as
+    missing, which is true, and their own download puts them right.
+    """
+    for claim in db.path_claims(shared_path):
+        if not claim["live"] or claim["id"] == except_id:
+            continue
+        own_path = str(bracketed_sibling(Path(shared_path), claim["id"]))
+        if own_path != shared_path:
+            db.repoint_track(claim["id"], shared_path, own_path)
+
+
 def run_pipeline(video_id: str, job_id: int | None = None) -> dict[str, Any]:
     """Download, tag, file and record one track. Returns the stored row.
 
@@ -116,6 +141,7 @@ def run_pipeline(video_id: str, job_id: int | None = None) -> dict[str, Any]:
             db.set_progress(job_id, fraction)
 
     meta = metadata.fetch_track_metadata(video_id)
+    previous = db.get_track(video_id)
 
     audio_path, cover_path = track_paths(
         artist=meta.get("artist"),
@@ -185,5 +211,14 @@ def run_pipeline(video_id: str, job_id: int | None = None) -> dict[str, Any]:
     }
     # restore: a track deleted earlier and downloaded again reappears.
     db.upsert_track(track, restore=True)
+    _send_to_own_paths(track["file_path"], except_id=video_id)
+    if previous is not None and previous.get("deleted_at") is None:
+        left = previous.get("file_path")
+        if left and left != track["file_path"] and Path(left).exists():
+            _send_to_own_paths(left)
+        # A live track downloaded again can land in another album than the one
+        # its row named, when the album's title is read differently today.
+        if previous.get("album_id") not in (None, album_id):
+            db.retire_album_if_empty(previous["album_id"])
     report(1.0)
     return track

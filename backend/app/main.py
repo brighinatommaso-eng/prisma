@@ -274,11 +274,16 @@ async def _missing_files() -> int | None:
         return await asyncio.wait_for(
             asyncio.to_thread(diagnostics.missing_files), timeout=HEALTH_PROBE_TIMEOUT_S
         )
-    except Exception:
-        # The timeout: the first scan after a start hashes the whole library.
-        # It keeps running in its thread and fills the cache for a later call;
-        # until then the honest answer is "not known".
+    except asyncio.TimeoutError:
+        # The first scan after a start hashes the whole library. It keeps
+        # running in its thread and fills the cache for a later call; until
+        # then the honest answer is "not known".
         log.warning("missing files scan exceeded %ss", HEALTH_PROBE_TIMEOUT_S)
+        return None
+    except Exception:
+        # The probe catches its own failures; whatever this is, /health still
+        # answers, and does not claim a count it does not have.
+        log.exception("missing files probe failed")
         return None
 
 

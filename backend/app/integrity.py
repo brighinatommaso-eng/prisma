@@ -19,8 +19,8 @@ The pipeline restores a deleted track, so a job is only created for a track
 that is still live at that moment.
 
 Nothing in this module deletes, moves or overwrites a file. A file that is not
-the audio its row recorded is left where it is; paths.track_paths gives the
-track another path to be downloaded to.
+the audio its row recorded, or that two rows both claim, is left where it is;
+paths.track_paths gives each track another path to be downloaded to.
 
 Hashing is the expensive part, and the library only grows, so a file is hashed
 once and then again only when its size or modification time changes. The memo
@@ -31,6 +31,7 @@ Everything here blocks on disk or on the database; callers run it in a thread.
 
 import hashlib
 import threading
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -103,18 +104,33 @@ def classify() -> dict[str, list[str]]:
     """Every live track's id under "missing", "mismatch", "unverified" or "ok".
 
     missing: the row has no path, or no file is at it. mismatch: a file is
-    there and its SHA-256 is not the stored one. unverified: a file is there
-    and the row has no stored SHA-256. Deleted tracks are not looked at. Each
-    list is sorted by id.
+    there and its SHA-256 is not the stored one, or the file is recorded for
+    more than one live track. unverified: a file is there and the row has no
+    stored SHA-256. Deleted tracks are not looked at. Each list is sorted by
+    id.
+
+    A shared file is a mismatch for every track recorded at it, including the
+    one whose hash matches. yt-dlp leaves an existing file alone, so the
+    second download of a colliding pair did not replace the first one's audio:
+    it was tagged into it and recorded the result. The hash that still matches
+    is therefore the one on the wrong audio, and comparing hashes would report
+    exactly that track as fine.
 
     Raises OSError if a file that is there cannot be read: an unreadable
     library is not a count of anything.
     """
     rows = db.live_track_files()
+    claims = Counter(row["file_path"] for row in rows if row["file_path"])
     found: dict[str, list[str]] = {MISSING: [], MISMATCH: [], UNVERIFIED: [], OK: []}
     for row in rows:
-        found[_state_of(row["file_path"], row["sha256"])].append(row["id"])
-    live_paths = {row["file_path"] for row in rows}
+        path = row["file_path"]
+        if path and claims[path] > 1:
+            state = MISMATCH if Path(path).is_file() else MISSING
+        else:
+            state = _state_of(path, row["sha256"])
+        found[state].append(row["id"])
+    # In the form the memo is keyed by.
+    live_paths = {str(Path(row["file_path"])) for row in rows if row["file_path"]}
     with _memo_lock:
         for stale in [key for key in _memo if key not in live_paths]:
             del _memo[stale]

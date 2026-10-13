@@ -86,10 +86,11 @@ does not match the SHA-256 stored for it. It is computed with the other probes a
 **cached for 60 seconds**; it reads the local disk only and never contacts YouTube.
 Hashing is remembered per file and repeated only when a file's size or modification
 time changes, so after the first pass a re-count costs one `stat` per track. That
-first pass, after each start, hashes the whole library. The field is **`null` when
-the count is not known** — the scan failed, or it is still running when the probe
-timeout (8 s) expires — and never `0` in that case: read `null` as "ask again", not
-as "nothing is missing". `/health` only counts; it never starts a repair. See
+first pass, after each start, hashes the whole library; a poll that arrives while a
+scan is running does not wait for it and gets the previous count. The field is
+**`null` when the count is not known** — the scan failed, or the first one has not
+finished yet — and never `0` in that case: read `null` as "ask again", not as
+"nothing is missing". `/health` only counts; it never starts a repair. See
 [Missing files and repair](#missing-files-and-repair).
 
 `js_runtime` and `po_token_provider_active` are asked of yt-dlp itself, built with
@@ -196,7 +197,7 @@ classification:
 | State | Meaning | Counted in `missing_files` | Queued by `POST /repair` |
 |---|---|---|---|
 | `missing` | no file at the recorded path (or the row has no path) | yes | yes |
-| `mismatch` | a file is there, and its SHA-256 is not the stored one | yes | yes |
+| `mismatch` | a file is there, and its SHA-256 is not the stored one — or two live tracks are recorded at it | yes | yes |
 | `unverified` | a file is there, and the row has no stored SHA-256 to compare | no | no, only listed |
 | `ok` | a file is there and its SHA-256 matches | no | no |
 
@@ -231,9 +232,12 @@ curl.exe -s -X POST "http://YOUR_SERVER_IP:8000/repair"
   12 to 20 second gap, they wait out a bot-wall cooldown like any other job, and a
   job that fails **is not retried** — the track simply shows up again in the next
   `/repair`, which you have to ask for.
-- A repaired track keeps its row and its album; its `file_bytes`, `sha256` and
-  `updated_at` change, so the next `GET /library?since=` carries it. The album's
-  `cover.jpg` is written again if it is not there.
+- A repaired track keeps its row and, unless its album title is read differently
+  now, its album; its `file_bytes`, `sha256` and `updated_at` change, so the next
+  `GET /library?since=` carries it. The album's `cover.jpg` is written again if it
+  is not there — provided the artwork can be fetched; if it cannot, the download
+  still succeeds and the cover stays missing until another track of that album is
+  downloaded.
 - The scan hashes files, in a worker thread; on a large library the first call
   after a start can take a while.
 
@@ -261,22 +265,45 @@ title is shortened if needed so that the id always fits. `cover.jpg` is unchange
 one per album folder, shared by every track in it.
 
 A track downloaded again goes back to the path on its row, as long as that path is
-still its own: the file there has its recorded SHA-256, or there is no file and no
-lower video id is recorded at the same path. Otherwise it gets its bracketed path.
-**Nothing is ever renamed, moved, deleted or written over to make room** — a file
-that is not a track's recorded audio is left exactly where it is, and stays on disk
-unreferenced if no row points at it any more. That rule is also what separates two
-ids that were recorded at one path before this was fixed:
+in the folder its metadata names today and is still its own: no other live track is
+recorded there and the file has its recorded SHA-256, or there is no file and no
+lower video id is recorded at the same path. Otherwise it gets the natural path if
+that is free, and its bracketed path if not. **Nothing is ever renamed, moved,
+deleted or written over to make room** — a file that is not a track's recorded
+audio is left exactly where it is, and stays on disk unreferenced if no row points
+at it any more.
 
-- If the file is still there, the id whose stored SHA-256 matches it keeps the
-  shared path and is not touched; the other one is `mismatch`, and a repair
-  downloads it to its bracketed path.
-- If the file is gone, both are `missing`; the **lower video id** (plain string
-  order) keeps the shared path and the other one gets its bracketed path, whichever
-  of the two jobs runs first.
+#### Two ids already recorded at one path
 
-If the bracketed path itself holds a file that is not the track's recorded audio,
+That is the state the old rule could leave behind (delete A, download B to the
+freed path, download A again), and it is worse than a wrong hash. yt-dlp does not
+replace a file that is already at its output path, so the second download never
+wrote its audio: the pipeline tagged the file that was there and recorded the
+result. The file is one id's audio carrying the other id's tags, and **the stored
+hash that still matches belongs to the id whose audio is not in it**. So neither
+row is believed:
+
+- **The file is still there.** Both ids are `mismatch`, whichever hash matches, and
+  a repair downloads each to its own bracketed path. As soon as the first of them
+  is done, the other row is pointed at its own bracketed path too — where there is
+  no file yet, so it reads `missing` until its own download lands — because left
+  alone at the shared file it would pass for its owner. The shared file is not
+  touched and ends up with no row pointing at it; delete it by hand once both
+  tracks play correctly.
+- **The file is gone.** Both are `missing`. The **lower video id** (plain string
+  order) is downloaded to the shared path and the other one to its bracketed path,
+  whichever of the two jobs runs first.
+
+If a job fails, that track stays reported (`mismatch` or `missing`), nothing is
+deleted, and the next `POST /repair` you ask for queues it again.
+
+If a track's own bracketed path already holds a file that is not its recorded audio,
 the job fails with `PathConflict` and says which file; nothing is downloaded.
+
+A track whose album title is read differently now than when it was first
+downloaded is filed where the album is today, cover included. The album it left is
+dropped from the library once no track is in it, exactly as after a deletion; its
+folder is not touched.
 
 ## Download pacing and the bot-wall cooldown
 
@@ -454,7 +481,9 @@ What it does, and what it will not do:
   are in `catalog.db-wal` and **a plain `cp` of `catalog.db` is not a usable
   backup**. The script copies through SQLite's backup API from a read-only
   connection: one consistent snapshot, taken while the server keeps working, with
-  nothing written to the database.
+  nothing written to the database or its WAL (the `-shm` lock file beside them is
+  used as by any reader). With the server stopped there is no `-wal`, and the file
+  is read as it is, so nothing is created in `.prisma` either.
 - The copy is verified with `PRAGMA integrity_check` and taken out of WAL mode, so
   each backup's `catalog.db` is a single self-contained file.
 - Each backup is a directory `prisma-state-<UTC timestamp>` holding `catalog.db`,
@@ -462,6 +491,14 @@ What it does, and what it will not do:
   count). It is built as `...Z.partial` and renamed only once verified.
 - Rotation runs only after that. **A backup that fails removes nothing**, so a
   broken catalogue cannot push the good copies out.
+- Neither can an empty one. If the catalogue has **no tracks** while an earlier
+  backup has some — what a wiped `.prisma` looks like once the server has started
+  again on a fresh catalogue — the copy is kept, **nothing is rotated**, and the run
+  ends `prisma-backup FAILED` every night until somebody looks. Backups then pile
+  up instead of thinning out; remove the empty ones by hand once the cause is
+  understood.
+- The same goes for a backup whose name does not sort last, which means the clock
+  was wrong when an existing backup was made, or is wrong now.
 - It deletes only directories it made itself, in the backup directory: exactly
   named `prisma-state-<timestamp>` and containing `backup.json`, beyond the newest
   seven, plus `.partial` leftovers of earlier runs that were killed. Anything else

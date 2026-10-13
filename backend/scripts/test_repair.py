@@ -122,15 +122,15 @@ def _path(title):
     return MUSIC_DIR / ARTIST / ALBUM / (title + ".m4a")
 
 
-def _add(video_id, state="ok", title=None, path=None):
+def _add(video_id, state="ok", title=None, path=None, album=ALBUM):
     """A live track in one of the classifier's four states."""
     path = path or _path(title or video_id)
     content = b"audio:" + video_id.encode() + b"|tags:" + video_id.encode()
     cover = path.parent / COVER_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    album_id = db.upsert_album(ARTIST, ALBUM, ALBUM, None, 2022, str(cover), ["#101010"])
+    album_id = db.upsert_album(ARTIST, album, album, None, 2022, str(cover), ["#101010"])
     db.upsert_track({
-        "id": video_id, "title": title or video_id, "artist": ARTIST, "album": ALBUM,
+        "id": video_id, "title": title or video_id, "artist": ARTIST, "album": album,
         "album_id": album_id, "file_path": str(path), "file_bytes": len(content),
         "sha256": None if state == "unverified" else hashlib.sha256(content).hexdigest(),
     })
@@ -218,6 +218,72 @@ def test_classifier_tells_missing_mismatch_ok_and_unverified_apart():
         "unverified": ["nosha-1"],
         "ok": ["ok-1"],
     }, found
+
+
+def test_two_tracks_recorded_at_one_file_are_both_mismatched():
+    """A file two live rows point at cannot be both tracks, and the hash that
+    still matches is the one the second download left on the first one's
+    audio. Neither row is believed."""
+    _reset()
+    shared = _add("pair-a", title="Kabuki")
+    _add("pair-b", title="Kabuki")
+    # pair-b was tagged into pair-a's file and recorded the result.
+    retagged = shared.read_bytes() + b"|tags:pair-b"
+    shared.write_bytes(retagged)
+    with db._lock:
+        conn = db.connect()
+        conn.execute("UPDATE tracks SET sha256 = ? WHERE id = 'pair-b'",
+                     (hashlib.sha256(retagged).hexdigest(),))
+        conn.commit()
+    _add("ok-1")
+
+    found = integrity.classify()
+    assert found["mismatch"] == ["pair-a", "pair-b"] and found["ok"] == ["ok-1"], found
+
+    report = asyncio.run(api.repair_library(dry_run=False))
+    assert [q["video_id"] for q in report["queued"]] == ["pair-a", "pair-b"]
+    _run_queued_jobs()
+
+    assert integrity.classify()["ok"] == ["ok-1", "pair-a", "pair-b"]
+    assert shared.read_bytes() == retagged
+    for video_id in ("pair-a", "pair-b"):
+        own = Path(db.get_track(video_id)["file_path"])
+        assert own == _path("Kabuki [" + video_id + "]"), own
+        assert own.read_bytes().startswith(b"audio:" + video_id.encode() + b"|tags:")
+
+
+def test_when_one_of_a_pair_fails_the_other_is_fixed_and_it_stays_reported():
+    """Whichever of the two fails, it must not be left looking like the owner
+    of the file they shared."""
+    for failing, fixed in (("pair-a", "pair-b"), ("pair-b", "pair-a")):
+        _reset()
+        shared = _add("pair-a", title="Kabuki")
+        _add("pair-b", title="Kabuki")
+        retagged = shared.read_bytes() + b"|tags:pair-b"
+        shared.write_bytes(retagged)
+        with db._lock:
+            conn = db.connect()
+            conn.execute("UPDATE tracks SET sha256 = ? WHERE id = 'pair-b'",
+                         (hashlib.sha256(retagged).hexdigest(),))
+            conn.commit()
+        _fail_download.add(failing)
+
+        asyncio.run(api.repair_library(dry_run=False))
+        _run_queued_jobs()
+
+        found = integrity.classify()
+        assert found["ok"] == [fixed] and found["missing"] + found["mismatch"] == [failing], found
+        assert shared.read_bytes() == retagged
+        assert _status_of(api.track_file(fixed)) == 200
+        report = asyncio.run(api.repair_library(dry_run=True))
+        assert report["missing"] + report["mismatch"] == [failing], report
+
+
+def test_a_shared_path_with_no_file_is_missing_for_both():
+    _reset()
+    _add("pair-a", "missing", title="Kabuki")
+    _add("pair-b", "missing", title="Kabuki")
+    assert integrity.classify()["missing"] == ["pair-a", "pair-b"]
 
 
 def test_a_file_without_a_stored_hash_is_not_hashed_at_all():
@@ -452,6 +518,50 @@ def test_repair_jobs_restore_the_files_and_the_catalogue_follows():
     assert len(delta["albums"]) == 1 and delta["deleted_track_ids"] == []
     shas = {t["id"]: t["sha256"] for t in delta["albums"][0]["tracks"]}
     assert shas == {v: db.get_track(v)["sha256"] for v in ("ok-1", "gone-1", "wrong-1")}
+
+
+def test_a_track_whose_album_is_named_differently_now_follows_the_new_name():
+    """The row's path is from an older reading of the album title. The file
+    goes where the album and its cover are today, in one download, and the
+    album the track left is no longer listed once it is empty."""
+    _reset()
+    old_path = MUSIC_DIR / ARTIST / "The Globe (Deluxe)" / "gone-1.m4a"
+    _add("gone-1", "missing", path=old_path, album="The Globe (Deluxe)")
+    old_album = db.get_track("gone-1")["album_id"]
+    since = int(time.time()) - 1
+    with db._lock:
+        conn = db.connect()
+        conn.execute("UPDATE albums SET updated_at = ?", (since - 100,))
+        conn.commit()
+
+    asyncio.run(api.repair_library(dry_run=False))
+    _run_queued_jobs()
+
+    assert [j["state"] for j in _jobs()] == [db.DONE], _jobs()
+    assert _pipeline_runs == ["gone-1"], _pipeline_runs
+    row = db.get_track("gone-1")
+    assert row["file_path"] == str(_path("gone-1")) and Path(row["file_path"]).is_file()
+    assert (_path("gone-1").parent / COVER_FILENAME).read_bytes() == COVER
+    assert row["album_id"] != old_album
+    assert list(old_path.parent.iterdir()) == []
+    assert integrity.classify()["ok"] == ["gone-1"]
+    delta = db.library(since)
+    assert delta["deleted_album_ids"] == [old_album], delta
+    assert [a["id"] for a in db.library()["albums"]] == [row["album_id"]]
+
+
+def test_an_album_that_still_has_tracks_is_kept_when_one_leaves_it():
+    _reset()
+    old_dir = MUSIC_DIR / ARTIST / "The Globe (Deluxe)"
+    _add("gone-1", "missing", path=old_dir / "gone-1.m4a", album="The Globe (Deluxe)")
+    _add("ok-1", path=old_dir / "ok-1.m4a", album="The Globe (Deluxe)")
+    old_album = db.get_track("ok-1")["album_id"]
+
+    asyncio.run(api.repair_library(dry_run=False))
+    _run_queued_jobs()
+
+    assert db.get_album(old_album)["deleted_at"] is None
+    assert db.get_track("ok-1")["album_id"] == old_album
 
 
 def test_a_failed_repair_job_is_not_retried_and_the_track_stays_reported():

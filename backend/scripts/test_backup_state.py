@@ -405,6 +405,97 @@ def test_a_half_backup_left_by_a_killed_run_is_cleared_by_the_next_good_one():
     assert site.completed() == ["prisma-state-20261001T031500Z"]
 
 
+def test_an_emptied_catalogue_never_pushes_the_good_backups_out():
+    """The incident this script exists for: the folder is emptied, the server
+    starts on a fresh, valid, empty catalogue, and every night's backup of
+    nothing would otherwise retire one night's backup of everything."""
+    site = Site()
+    site.start_server(tracks=3)
+    try:
+        for day in range(3):
+            assert _run(site, now=DAY + datetime.timedelta(days=day))[0] == 0
+    finally:
+        site.stop_server()
+    good = site.completed()
+
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(site.catalogue) + suffix).unlink(missing_ok=True)
+    site.start_server(tracks=0)
+    try:
+        for day in range(3, 13):
+            code, out, err = _run(site, now=DAY + datetime.timedelta(days=day))
+            assert code != 0 and out == "", (day, code, out)
+            assert err.startswith("prisma-backup FAILED") and "no tracks" in err, err
+    finally:
+        site.stop_server()
+
+    kept = site.completed()
+    assert kept[:3] == good and len(kept) == 13, kept
+    for name in good:
+        assert len(_track_ids(site.backups / name / "catalog.db")) == 3
+
+
+def test_an_empty_catalogue_with_nothing_to_protect_is_backed_up_normally():
+    site = Site()
+    site.start_server(tracks=0)
+    try:
+        for day in range(9):
+            code, out, err = _run(site, now=DAY + datetime.timedelta(days=day))
+            assert code == 0 and "tracks=0" in out, (day, code, err)
+    finally:
+        site.stop_server()
+    assert len(site.completed()) == 7
+
+
+def test_backups_named_in_the_future_do_not_cost_the_new_one():
+    """A clock that was once ahead left names that sort after today's."""
+    site = Site()
+    site.start_server()
+    try:
+        for day in range(7):
+            assert _run(site, now=DAY + datetime.timedelta(days=1800 + day))[0] == 0
+        ahead = site.completed()
+
+        code, out, err = _run(site)
+    finally:
+        site.stop_server()
+    assert code != 0 and out == "", (code, out)
+    assert err.startswith("prisma-backup FAILED") and "newer" in err, err
+    assert site.completed() == ["prisma-state-20261001T031500Z"] + ahead
+    assert _track_ids(site.backups / "prisma-state-20261001T031500Z" / "catalog.db")
+
+
+def test_with_the_server_stopped_nothing_appears_in_the_state_directory():
+    """A read-only connection to a WAL database with no -wal beside it would
+    create one, and a -shm, inside the music folder."""
+    site = Site()
+    site.start_server(tracks=3)
+    site.stop_server()
+    before = _tree(site.music)
+    assert before == [".prisma", os.path.join(".prisma", "catalog.db")], before
+
+    code, out, err = _run(site, argv=["--dry-run"])
+    assert code == 0 and "tracks=3" in out, (code, err)
+    assert _tree(site.music) == before
+
+    code, out, err = _run(site)
+    assert code == 0, err
+    assert _tree(site.music) == before
+    assert len(_track_ids(site.backups / site.completed()[0] / "catalog.db")) == 3
+
+
+def test_env_file_values_may_carry_a_comment():
+    env_file = _SCRATCH / "commented.env"
+    env_file.write_text(
+        "PRISMA_BACKUP_DIR=/srv/backups   # outside the library\n"
+        'PRISMA_MUSIC_HOST_DIR="/srv/my music #1"  # quoted, so the # stays\n'
+        "PRISMA_PORT=8000\n", encoding="utf-8")
+    values = backup_state.read_env_file(env_file)
+    assert values["PRISMA_BACKUP_DIR"] == "/srv/backups", values
+    assert values["PRISMA_MUSIC_HOST_DIR"] == "/srv/my music #1", values
+    assert values["PRISMA_PORT"] == "8000", values
+
+
 # --- dry run --------------------------------------------------------------
 
 def test_dry_run_checks_everything_and_writes_nothing():

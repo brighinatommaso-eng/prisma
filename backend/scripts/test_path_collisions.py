@@ -8,8 +8,9 @@ the real library:
 
 The cases are the four pairs found on the server: two recordings with the same
 artist, album and title and different video ids, both recorded at one path, so
-the second download was tagged into the first one's file and one stored hash
-of each pair stopped matching.
+the second download was tagged into the first one's file. One stored hash of
+each pair stopped matching, and the one that still matches belongs to the id
+whose audio is not in the file.
 
 downloader.run_pipeline itself is run -- it is what chooses the path and writes
 the row -- with only its network parts replaced: the metadata lookup, the
@@ -135,24 +136,30 @@ def _bracketed(artist, album, title, video_id):
     return MUSIC_DIR / artist / album / f"{title} [{video_id}].m4a"
 
 
-def _record_collided(first, second, artist, album, title, file_owner):
-    """The state found on the server: both rows live at one path. The file, if
-    any, holds file_owner's audio and only file_owner's hash matches it."""
+def _record_collided(written_by, tagged_by, artist, album, title, with_file):
+    """The state found on the server: both rows live at one path.
+
+    written_by downloaded the file. tagged_by came second: yt-dlp left the
+    file in place and the pipeline wrote tagged_by's tags into it and recorded
+    its hash. So the file is written_by's audio, and the only stored hash that
+    matches it is tagged_by's.
+    """
     shared = _natural(artist, album, title)
     cover = shared.parent / COVER_FILENAME
     album_id = db.upsert_album(artist, album, album, None, 2024, str(cover), ["#101010"])
-    for video_id in (first, second):
+    original = _audio(written_by) + b"|tags:" + written_by.encode()
+    retagged = original + b"|tags:" + tagged_by.encode()
+    for video_id, recorded in ((written_by, original), (tagged_by, retagged)):
         _describe(video_id, artist, album, title)
-        content = _audio(video_id) + b"|tags:" + video_id.encode()
         db.upsert_track({
             "id": video_id, "title": title, "artist": artist, "album": album,
-            "album_id": album_id, "file_path": str(shared), "file_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "album_id": album_id, "file_path": str(shared), "file_bytes": len(recorded),
+            "sha256": hashlib.sha256(recorded).hexdigest(),
         })
-        if video_id == file_owner:
-            shared.parent.mkdir(parents=True, exist_ok=True)
-            shared.write_bytes(content)
-            cover.write_bytes(COVER)
+    if with_file:
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_bytes(retagged)
+        cover.write_bytes(COVER)
     return shared
 
 
@@ -238,29 +245,48 @@ def test_a_deleted_track_coming_back_does_not_take_a_path_now_in_use():
 
 # --- undoing a collision already in the catalogue ---------------------------
 
-def test_collided_pair_with_the_file_present_is_separated_without_touching_it():
+def test_collided_pair_with_the_file_present_leaves_it_to_neither():
+    """The file is one id's audio under the other id's tags and hash, so it is
+    neither track's: both are downloaded to their own paths and the file stays
+    exactly as it was, with no row pointing at it."""
     for first, second, artist, album, title in PAIRS:
-        for file_owner, other in ((second, first), (first, second)):
-            _reset()
-            shared = _record_collided(first, second, artist, album, title, file_owner)
-            held = shared.read_bytes()
-            owner_row = db.get_track(file_owner)
+        for written_by, tagged_by in ((first, second), (second, first)):
+            for order in ((first, second), (second, first)):
+                _reset()
+                shared = _record_collided(written_by, tagged_by, artist, album, title,
+                                          with_file=True)
+                held = shared.read_bytes()
+                waiting = db.get_track(order[1])
 
-            downloader.run_pipeline(other)
+                downloader.run_pipeline(order[0])
 
-            # The id whose stored hash matches the file keeps the shared path.
-            assert shared.read_bytes() == held
-            assert db.get_track(file_owner) == owner_row
-            assert db.get_track(other)["file_path"] == str(
-                _bracketed(artist, album, title, other))
-            _assert_separate_and_intact(first, second)
+                assert shared.read_bytes() == held
+                assert db.get_track(order[0])["file_path"] == str(
+                    _bracketed(artist, album, title, order[0]))
+                # The one left behind is no longer recorded at the file either:
+                # alone there, with a hash that may match, it would pass for
+                # its owner. Its row now names a path with nothing at it yet.
+                left = db.get_track(order[1])
+                assert left["file_path"] == str(_bracketed(artist, album, title, order[1]))
+                assert not Path(left["file_path"]).exists()
+                assert (left["sha256"], left["album_id"], left["deleted_at"]) == (
+                    waiting["sha256"], waiting["album_id"], None)
+                assert db.path_claims(str(shared)) == []
+
+                downloader.run_pipeline(order[1])
+
+                paths = _assert_separate_and_intact(first, second)
+                assert paths == [_bracketed(artist, album, title, first),
+                                 _bracketed(artist, album, title, second)], paths
+                assert shared.read_bytes() == held
+                assert db.path_claims(str(shared)) == []
 
 
 def test_collided_pair_with_the_files_gone_is_separated_in_either_order():
     for first, second, artist, album, title in PAIRS:
         for order in ((first, second), (second, first)):
             _reset()
-            shared = _record_collided(first, second, artist, album, title, file_owner=None)
+            shared = _record_collided(first, second, artist, album, title, with_file=False)
             assert not shared.parent.exists()
 
             for video_id in order:
@@ -286,7 +312,7 @@ def test_collided_pair_with_the_files_gone_is_separated_in_either_order():
 def test_a_failed_download_leaves_the_row_and_the_files_as_they_were():
     first, second, artist, album, title = PAIRS[0]
     _reset()
-    shared = _record_collided(first, second, artist, album, title, file_owner=second)
+    shared = _record_collided(first, second, artist, album, title, with_file=True)
     held = shared.read_bytes()
     row = db.get_track(first)
     listing = sorted(p.name for p in shared.parent.iterdir())
@@ -300,6 +326,7 @@ def test_a_failed_download_leaves_the_row_and_the_files_as_they_were():
         raise AssertionError("the pipeline swallowed a failed download")
 
     assert db.get_track(first) == row
+    assert db.get_track(second)["file_path"] == str(shared)
     assert shared.read_bytes() == held
     assert sorted(p.name for p in shared.parent.iterdir()) == listing
 
@@ -310,7 +337,7 @@ def test_a_missing_cover_stays_missing_when_the_artwork_cannot_be_fetched():
     global _artwork_available
     first, second, artist, album, title = PAIRS[2]
     _reset()
-    shared = _record_collided(first, second, artist, album, title, file_owner=None)
+    shared = _record_collided(first, second, artist, album, title, with_file=False)
     _artwork_available = False
 
     downloader.run_pipeline(first)

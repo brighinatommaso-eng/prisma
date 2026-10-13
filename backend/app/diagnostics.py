@@ -85,6 +85,9 @@ class _ProbeCache:
 
     name: str
     ttl_s: float
+    # How long a caller waits for a probe already running before it settles
+    # for the last known result; None means LOCK_WAIT_S.
+    lock_wait_s: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     # (monotonic time the probe ran, what it returned)
     entry: tuple[float, Any] | None = None
@@ -92,7 +95,10 @@ class _ProbeCache:
 
 _YTDLP_CACHE = _ProbeCache("yt-dlp environment", YTDLP_CACHE_TTL_S)
 _REACHABLE_CACHE = _ProbeCache("YouTube Music reachability", REACHABLE_CACHE_TTL_S)
-_MISSING_CACHE = _ProbeCache("missing files", MISSING_FILES_CACHE_TTL_S)
+# No waiting at all: the first scan after a start hashes the whole library and
+# can take far longer than a probe, and /health is polled throughout. A poll
+# that finds a scan running takes the last count, or "not known", at once.
+_MISSING_CACHE = _ProbeCache("missing files", MISSING_FILES_CACHE_TTL_S, lock_wait_s=0.0)
 
 
 def _cached(cache: _ProbeCache, probe: Callable[[], T], fallback: T) -> T:
@@ -103,9 +109,10 @@ def _cached(cache: _ProbeCache, probe: Callable[[], T], fallback: T) -> T:
     later callers get the last known result -- or `fallback` when there is
     none -- instead of each parking a thread on the lock.
     """
-    if not cache.lock.acquire(timeout=LOCK_WAIT_S):
+    wait = LOCK_WAIT_S if cache.lock_wait_s is None else cache.lock_wait_s
+    if not cache.lock.acquire(timeout=wait):
         log.warning("%s probe still running after %ss; reporting last known result",
-                    cache.name, LOCK_WAIT_S)
+                    cache.name, wait)
         entry = cache.entry
         return entry[1] if entry is not None else fallback
     try:
