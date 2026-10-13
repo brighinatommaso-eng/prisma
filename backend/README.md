@@ -330,7 +330,11 @@ the process was started where the library is:
   or
 - a `.prisma/catalog.db` exists in the inherited `PRISMA_MUSIC_DIR`, wherever that
   is, or an inherited `PRISMA_STATE_DIR` or `PRISMA_DB_PATH` names an existing
-  catalogue.
+  catalogue; or
+- a catalogue exists at `/music/.prisma/catalog.db` or
+  `/opt/prisma/music/.prisma/catalog.db`, whatever the variables say. Overriding
+  `PRISMA_MUSIC_DIR` for one `docker compose exec` does not get a test into the
+  running container.
 
 Past that, the guard sets every path variable to the scratch directory itself, and
 after the application is imported it checks what `app.config` really resolved.

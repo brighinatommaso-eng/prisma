@@ -121,6 +121,18 @@ def test_a_catalogue_named_by_another_inherited_variable_is_production():
         {"PRISMA_MUSIC_DIR": elsewhere, "PRISMA_STATE_DIR": str(music / ".prisma")}) is not None
 
 
+def test_an_override_does_not_hide_a_library_mounted_at_a_production_path():
+    """Setting PRISMA_MUSIC_DIR for one command inside the running container
+    does not make it a different container."""
+    for mounted in ("/music/.prisma/catalog.db", "/opt/prisma/music/.prisma/catalog.db"):
+        reason = guard.production_reason(
+            {"PRISMA_MUSIC_DIR": "/tmp/x"}, realpath=_identity,
+            exists=lambda path: str(path) == mounted)
+        assert reason is not None and mounted in reason, reason
+    assert guard.production_reason(
+        {"PRISMA_MUSIC_DIR": "/tmp/x"}, realpath=_identity, exists=lambda path: False) is None
+
+
 def test_an_ordinary_directory_is_not_production():
     assert _reason("/scratch-not-the-library") is None
     assert _reason("/music-test") is None

@@ -14,7 +14,10 @@ the process was started where the real library is:
   resolves to the mount point inside the container or to the default host
   directory; or
 - a catalogue exists at that inherited location, wherever it is, or at an
-  inherited PRISMA_STATE_DIR or PRISMA_DB_PATH.
+  inherited PRISMA_STATE_DIR or PRISMA_DB_PATH; or
+- a catalogue exists at either of those two production directories, whatever
+  the variables say: overriding PRISMA_MUSIC_DIR for one command inside the
+  running container does not make that container disposable.
 
 The default for an unset PRISMA_MUSIC_DIR is the container's mount point, so a
 container of the production image is refused unless it is told otherwise. The
@@ -52,7 +55,8 @@ def _posix(path: str, realpath) -> str:
     return posixpath.normpath(Path(realpath(path)).as_posix())
 
 
-def production_reason(environ=None, realpath=os.path.realpath) -> str | None:
+def production_reason(environ=None, realpath=os.path.realpath,
+                      exists=os.path.exists) -> str | None:
     """Why this process must be treated as running against the real library,
     or None when it is not. Reads the environment as it is now, so it has to
     be asked before any override. Creates and changes nothing.
@@ -74,8 +78,15 @@ def production_reason(environ=None, realpath=os.path.realpath) -> str | None:
     if environ.get("PRISMA_DB_PATH"):
         catalogues.append(("PRISMA_DB_PATH", Path(environ["PRISMA_DB_PATH"])))
     for variable, catalogue in catalogues:
-        if catalogue.exists():
+        if exists(str(catalogue)):
             return f"a catalogue exists at {catalogue} (from the inherited {variable})"
+
+    # Whatever PRISMA_MUSIC_DIR was set to for this one command, a catalogue
+    # at a production path means the library is mounted in this very place.
+    for production in PRODUCTION_MUSIC_DIRS:
+        catalogue = posixpath.join(production, *CATALOGUE_RELATIVE)
+        if exists(catalogue):
+            return f"the real library is mounted here: a catalogue exists at {catalogue}"
     return None
 
 

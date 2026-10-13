@@ -105,12 +105,14 @@ def track_paths(artist: str | None, album: str | None, title: str | None,
     own = db.get_track(video_id)
     if own is not None and own.get("deleted_at") is None and own.get("file_path"):
         recorded = Path(own["file_path"])
-        claims = db.path_claims(str(recorded))
         if recorded.exists():
             still_own = (recorded.is_file() and own.get("sha256") is not None
                          and sha256_of(recorded) == own["sha256"])
         else:
-            still_own = min(c["id"] for c in claims if c["live"]) == video_id
+            # The string as stored, which is what the other rows were matched
+            # on when they were written.
+            claims = db.path_claims(own["file_path"])
+            still_own = not any(c["live"] and c["id"] < video_id for c in claims)
         if still_own:
             return recorded, cover_path
         if recorded == bracketed:
