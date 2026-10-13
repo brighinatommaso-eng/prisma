@@ -4,28 +4,26 @@
 Runs against a throwaway database, never the real library, and makes no
 network request -- run it with networking off to prove that:
 
-    docker compose exec -T backend python scripts/test_health_diagnostics.py
-    docker run --rm --network none prisma-backend:latest \\
-        python scripts/test_health_diagnostics.py
+    docker run --rm --network none --entrypoint python \\
+        -e PRISMA_MUSIC_DIR=/scratch-not-the-library \\
+        prisma-backend:latest scripts/test_health_diagnostics.py
 
-yt-dlp must be importable, so this runs inside the image rather than on a
-bare dev machine. Plain asserts in test_* functions, like the other scripts.
+yt-dlp must be importable, so this runs in a throwaway container of the image
+rather than on a bare dev machine -- never in the running one, which guard.py
+refuses. Plain asserts in test_* functions, like the other scripts.
 """
 
 import asyncio
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import guard
+
 # Must happen before anything under app/ is imported: config reads the
 # environment once, at import time.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-health-"))
-os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
-os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
-os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
+_SCRATCH = guard.scratch_music_dir("prisma-test-health-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -33,7 +31,7 @@ from app import db  # noqa: E402
 from app.config import MUSIC_DIR  # noqa: E402
 
 # Refuse to run against anything but the scratch directory.
-assert MUSIC_DIR.is_relative_to(_SCRATCH), MUSIC_DIR
+guard.assert_scratch(_SCRATCH)
 
 
 def _set_job_time(job_id, when):

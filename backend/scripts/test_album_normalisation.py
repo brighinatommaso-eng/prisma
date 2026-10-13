@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """Unit tests for the album title normaliser.
 
-Runs with no dependencies:
+The normaliser is pure, but importing it imports ytmusicapi, so this runs in a
+throwaway container of the image -- never in the running one, which guard.py
+refuses:
 
-    python scripts/test_album_normalisation.py
-    docker compose exec -T backend python scripts/test_album_normalisation.py
+    docker run --rm --network none --entrypoint python \\
+        -e PRISMA_MUSIC_DIR=/scratch-not-the-library \\
+        prisma-backend:latest scripts/test_album_normalisation.py
 
 Written as plain asserts in test_* functions, so pytest collects them unchanged
 if pytest is ever added (spec section 8) without adding a dependency now.
 """
 
+import shutil
 import sys
 from pathlib import Path
+
+import guard
+
+# Nothing here touches the library, but the scratch directory is set anyway:
+# every test script starts the same way, so none can be the exception.
+_SCRATCH = guard.scratch_music_dir("prisma-test-album-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.metadata import EDITION_KEYWORDS, normalise_album_title  # noqa: E402
+
+# Refuse to run against anything but the scratch directory.
+guard.assert_scratch(_SCRATCH)
 
 
 def test_plain_title_unchanged():
@@ -111,6 +124,7 @@ def main() -> int:
         else:
             print(f"ok    {test.__name__}")
     print(f"\n{len(tests) - failures}/{len(tests)} passed")
+    shutil.rmtree(_SCRATCH, ignore_errors=True)
     return 1 if failures else 0
 
 

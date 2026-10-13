@@ -5,7 +5,6 @@ Runs with no dependencies, no network and no real waiting, against a throwaway
 database, never the real library:
 
     python scripts/test_download_pacing.py
-    docker compose exec -T backend python scripts/test_download_pacing.py
 
 The worker loop itself is run, with its clock, its sleep and its pipeline
 replaced: time only moves when the worker sleeps or a fake download "runs", so
@@ -15,26 +14,22 @@ asserts in test_* functions, like the other scripts.
 
 import asyncio
 import logging
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
+
+import guard
 
 # Must happen before anything under app/ is imported: config reads the
 # environment once, at import time.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-pacing-"))
-os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
-os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
-os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
+_SCRATCH = guard.scratch_music_dir("prisma-test-pacing-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import db, worker  # noqa: E402
-from app.config import MUSIC_DIR  # noqa: E402
 
 # Refuse to run against anything but the scratch directory.
-assert MUSIC_DIR.is_relative_to(_SCRATCH), MUSIC_DIR
+guard.assert_scratch(_SCRATCH)
 
 # The worker narrates every failure and cooldown; here those are the point of
 # the tests, not news.

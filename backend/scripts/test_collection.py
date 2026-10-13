@@ -4,7 +4,6 @@
 Runs against a throwaway music directory and database, never the real library:
 
     python scripts/test_collection.py
-    docker compose exec -T backend python scripts/test_collection.py
 
 Plain asserts in test_* functions, like test_track_deletion.py. The HTTP layer
 is exercised through Starlette's TestClient, which needs httpx; without it the
@@ -12,24 +11,21 @@ HTTP tests are skipped and the storage ones still run.
 """
 
 import json
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
 
-_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-collection-"))
-os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
-os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
-os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
+import guard
+
+_SCRATCH = guard.scratch_music_dir("prisma-test-collection-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import collection, db, deletion  # noqa: E402
-from app.config import MUSIC_DIR  # noqa: E402
 from app.paths import make_dir_owned, track_paths  # noqa: E402
 
-assert MUSIC_DIR.is_relative_to(_SCRATCH), MUSIC_DIR
+# Refuse to run against anything but the scratch directory.
+guard.assert_scratch(_SCRATCH)
 
 try:
     from fastapi.testclient import TestClient

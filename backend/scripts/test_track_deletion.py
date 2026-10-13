@@ -5,24 +5,20 @@ Runs with no dependencies, against a throwaway music directory and database,
 never the real library:
 
     python scripts/test_track_deletion.py
-    docker compose exec -T backend python scripts/test_track_deletion.py
 
 Written as plain asserts in test_* functions, like test_album_normalisation.py.
 """
 
-import os
 import shutil
 import sys
-import tempfile
 import threading
 from pathlib import Path
 
+import guard
+
 # Must happen before anything under app/ is imported: config reads the
 # environment once, at import time.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-deletion-"))
-os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
-os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
-os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
+_SCRATCH = guard.scratch_music_dir("prisma-test-deletion-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -31,7 +27,7 @@ from app.config import MUSIC_DIR  # noqa: E402
 from app.paths import library_write_lock, make_dir_owned, track_paths  # noqa: E402
 
 # Refuse to run against anything but the scratch directory.
-assert MUSIC_DIR.is_relative_to(_SCRATCH), MUSIC_DIR
+guard.assert_scratch(_SCRATCH)
 
 AUDIO = b"a" * 1000
 COVER = b"c" * 70

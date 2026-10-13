@@ -3,8 +3,18 @@
 
 Deliberately standalone. It is not imported by the API and not wired into any
 endpoint; it exists so that a broken yt-dlp can be diagnosed in one command.
+It writes its download into PRISMA_MUSIC_DIR, so it is meant for a throwaway
+container with no volume, where that directory is not the library:
 
-    docker compose exec prisma-backend python scripts/smoke_download.py dQw4w9WgXcQ
+    docker run --rm --entrypoint python -e PRISMA_MUSIC_DIR=/tmp/prisma-smoke \\
+        prisma-backend:latest scripts/smoke_download.py dQw4w9WgXcQ
+
+Where the real library is, guard.py makes it refuse. Diagnosing the running
+container itself is the one reason to override that, and it has to be asked
+for by name; the file then lands in the library root as <video_id>.m4a, and
+nothing removes it afterwards:
+
+    python scripts/smoke_download.py dQw4w9WgXcQ --write-into-the-real-library
 
 Format choice is locked by the design spec, section 3.2: take the AAC-in-M4A
 track YouTube already serves and do not re-encode it. Only when no m4a exists
@@ -14,6 +24,12 @@ does this transcode, at 192 kbps, as the spec prescribes.
 import subprocess
 import sys
 from pathlib import Path
+
+import guard
+
+# Before app.config is imported, like the test scripts: the refusal is about
+# the directory this process inherited.
+guard.refuse_in_production(opt_in=guard.SMOKE_OPT_IN)
 
 # Importable both as `python scripts/smoke_download.py` from /app and as a
 # module, without depending on the package being installed.
@@ -77,8 +93,10 @@ def ffprobe_audio_stream(path: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
+    argv = [arg for arg in argv if arg != guard.SMOKE_OPT_IN]
     if len(argv) != 2:
-        print(f"usage: {Path(argv[0]).name} <video_id>", file=sys.stderr)
+        print(f"usage: {Path(argv[0]).name} <video_id> [{guard.SMOKE_OPT_IN}]",
+              file=sys.stderr)
         return 2
 
     video_id = argv[1]

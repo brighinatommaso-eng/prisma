@@ -5,7 +5,6 @@ Runs with no dependencies and no network, against the two real exports in
 scripts/fixtures (lyrics removed):
 
     python scripts/test_demus_import.py
-    docker compose exec -T backend python scripts/test_demus_import.py
 
 Plain asserts in test_* functions, like the other scripts. The parser touches
 neither the database nor the library. The endpoint tests call the FastAPI app
@@ -17,22 +16,22 @@ ones still run.
 import asyncio
 import json
 import lzma
-import os
 import shutil
 import sys
-import tempfile
 from pathlib import Path
+
+import guard
 
 # Must happen before anything under app/ is imported: config reads the
 # environment once, at import time. Only importing app.main needs it.
-_SCRATCH = Path(tempfile.mkdtemp(prefix="prisma-test-demus-"))
-os.environ["PRISMA_MUSIC_DIR"] = str(_SCRATCH / "music")
-os.environ["PRISMA_STATE_DIR"] = str(_SCRATCH / "music" / ".prisma")
-os.environ["PRISMA_DB_PATH"] = str(_SCRATCH / "music" / ".prisma" / "catalog.db")
+_SCRATCH = guard.scratch_music_dir("prisma-test-demus-")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import demus  # noqa: E402
+
+# Refuse to run against anything but the scratch directory.
+guard.assert_scratch(_SCRATCH)
 
 try:
     from app.main import app
