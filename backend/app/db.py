@@ -612,6 +612,15 @@ def track_file(video_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def live_track_files() -> list[dict[str, Any]]:
+    """Every live track's id, recorded path and stored hash, ordered by id."""
+    with _lock:
+        rows = connect().execute(
+            "SELECT id, file_path, sha256 FROM tracks WHERE deleted_at IS NULL ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def counters() -> dict[str, int]:
     with _lock:
         conn = connect()
@@ -693,6 +702,70 @@ def create_job(video_id: str) -> int:
         )
         conn.commit()
         return int(cursor.lastrowid)
+
+
+def _active_job(conn: sqlite3.Connection, video_id: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT id, state FROM jobs WHERE track_id = ? AND state IN (?, ?) "
+        "ORDER BY id LIMIT 1",
+        (video_id, QUEUED, RUNNING),
+    ).fetchone()
+
+
+def active_job(video_id: str) -> dict[str, Any] | None:
+    """The oldest queued or running job for a track, as {"id", "state"}."""
+    with _lock:
+        row = _active_job(connect(), video_id)
+    return {"id": int(row["id"]), "state": row["state"]} if row else None
+
+
+def queue_job_once(video_id: str) -> tuple[int, str]:
+    """Queue a job unless one is already queued or running for the track.
+
+    Returns (job id, job state): the existing job's when there is one. Checked
+    and inserted under one lock, so two callers cannot both queue.
+    """
+    with _lock:
+        conn = connect()
+        with conn:
+            job = _active_job(conn, video_id)
+            if job is not None:
+                return int(job["id"]), job["state"]
+            cursor = conn.execute(
+                "INSERT INTO jobs (track_id, state, progress, created_at, updated_at) "
+                "VALUES (?, ?, 0.0, ?, ?)",
+                (video_id, QUEUED, _now(), _now()),
+            )
+            return int(cursor.lastrowid), QUEUED
+
+
+def queue_repair_job(video_id: str) -> tuple[str, int | None, str | None]:
+    """Queue a download for a track that is live right now.
+
+    Returns ("queued", job id, state), ("job_active", job id, state) when a
+    job for it is already queued or running, or ("deleted", None, None) when
+    the track is no longer live: the pipeline restores a deleted track, so
+    queueing one would bring it back. The check and the insert share a lock
+    with mark_track_deleted, and a queued job then blocks the deletion, so the
+    track cannot be deleted between the two.
+    """
+    with _lock:
+        conn = connect()
+        with conn:
+            live = conn.execute(
+                "SELECT 1 FROM tracks WHERE id = ? AND deleted_at IS NULL", (video_id,)
+            ).fetchone()
+            if live is None:
+                return "deleted", None, None
+            job = _active_job(conn, video_id)
+            if job is not None:
+                return "job_active", int(job["id"]), job["state"]
+            cursor = conn.execute(
+                "INSERT INTO jobs (track_id, state, progress, created_at, updated_at) "
+                "VALUES (?, ?, 0.0, ?, ?)",
+                (video_id, QUEUED, _now(), _now()),
+            )
+            return "queued", int(cursor.lastrowid), QUEUED
 
 
 def get_job(job_id: int) -> dict[str, Any] | None:

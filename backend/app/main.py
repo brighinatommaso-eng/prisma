@@ -23,7 +23,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from . import collection, db, deletion, demus, diagnostics, worker, ytm
+from . import collection, db, deletion, demus, diagnostics, integrity, worker, ytm
 from .config import MUSIC_DIR
 
 log = logging.getLogger("prisma.api")
@@ -87,6 +87,40 @@ class Health(BaseModel):
     # queue is not resting.
     download_cooldown_active: bool
     download_cooldown_until: int | None
+    # Live tracks whose file is absent or is not the one recorded (SHA-256).
+    # Cached for a minute, local disk only; see diagnostics.py. None means the
+    # count is not known right now -- never read it as 0.
+    missing_files: int | None
+
+
+class RepairJob(BaseModel):
+    video_id: str
+    job_id: int
+
+
+class RepairSkip(BaseModel):
+    video_id: str
+    # "job_active": a job for the track is already queued or running, named by
+    # job_id and job_state. "deleted": the track was deleted during the scan.
+    reason: str
+    job_id: int | None = None
+    job_state: str | None = None
+
+
+class RepairReport(BaseModel):
+    dry_run: bool
+    # Live tracks looked at.
+    checked: int
+    # No file at the recorded path.
+    missing: list[str]
+    # A file is there and its SHA-256 is not the stored one.
+    mismatch: list[str]
+    # A file is there and the row has no stored SHA-256 to compare it with.
+    # Reported only: never queued.
+    unverified: list[str]
+    # One job per missing or mismatched track; empty on a dry run.
+    queued: list[RepairJob]
+    skipped: list[RepairSkip]
 
 
 class SongResult(BaseModel):
@@ -235,12 +269,26 @@ async def _ytdlp_environment() -> diagnostics.YtdlpEnvironment:
         return diagnostics.NOT_DETECTED
 
 
+async def _missing_files() -> int | None:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(diagnostics.missing_files), timeout=HEALTH_PROBE_TIMEOUT_S
+        )
+    except Exception:
+        # The timeout: the first scan after a start hashes the whole library.
+        # It keeps running in its thread and fills the cache for a later call;
+        # until then the honest answer is "not known".
+        log.warning("missing files scan exceeded %ss", HEALTH_PROBE_TIMEOUT_S)
+        return None
+
+
 @app.get("/health", response_model=Health)
 async def health() -> Health:
     # Concurrent: the first call after a start pays for importing yt-dlp, and
-    # that should not queue behind the YouTube Music probe.
-    reachable, environment = await asyncio.gather(
-        _youtube_music_reachable(), _ytdlp_environment()
+    # that should not queue behind the YouTube Music probe -- nor either of
+    # them behind the first scan of the library.
+    reachable, environment, missing = await asyncio.gather(
+        _youtube_music_reachable(), _ytdlp_environment(), _missing_files()
     )
     counts = await asyncio.to_thread(db.counters)
     last_success = await asyncio.to_thread(db.last_successful_download_at)
@@ -256,6 +304,7 @@ async def health() -> Health:
         last_successful_download_at=last_success,
         download_cooldown_active=cooldown_until is not None,
         download_cooldown_until=cooldown_until,
+        missing_files=missing,
     )
 
 
@@ -306,17 +355,35 @@ async def import_demus(request: Request) -> DemusPlaylist:
 async def create_download(payload: DownloadRequest, response: Response) -> dict[str, Any]:
     """Queue a download.
 
-    A video_id already in the catalogue is returned as-is with 200 and nothing
-    is downloaded again. A deleted track counts as absent: it is downloaded
-    again and reappears in the library.
+    A video_id already in the catalogue, with its file on disk, is returned
+    as-is with 200 and nothing is downloaded again. A deleted track counts as
+    absent: it is downloaded again and reappears in the library. So does a
+    track whose file is gone: it is queued again, and if a job for it is
+    already queued or running that job is returned instead of a second one,
+    with its real state as `status`.
     """
-    existing = await asyncio.to_thread(db.get_track, payload.video_id)
-    if existing is not None and existing.get("deleted_at") is None:
-        response.status_code = 200
-        return {"status": "exists", "track": existing}
+    status_code, body = await asyncio.to_thread(integrity.request_download, payload.video_id)
+    response.status_code = status_code
+    return body
 
-    job_id = await asyncio.to_thread(db.create_job, payload.video_id)
-    return {"status": db.QUEUED, "job_id": job_id, "video_id": payload.video_id}
+
+@app.post("/repair", response_model=RepairReport)
+async def repair_library(
+    dry_run: bool = Query(
+        default=False,
+        description="Only report what is missing or mismatched; queue nothing.",
+    ),
+) -> dict[str, Any]:
+    """Queue a download for every track whose file is gone or is not the one
+    recorded.
+
+    The only way a repair starts: nothing runs it at startup, on a timer or
+    from /health. Each track becomes an ordinary download job, so they run one
+    at a time, with the usual gap and the usual cooldown, and a failed one is
+    not retried. A track that already has a queued or running job is skipped.
+    Nothing is deleted or moved; see integrity.py.
+    """
+    return await asyncio.to_thread(integrity.repair, dry_run)
 
 
 @app.get("/downloads", response_model=list[Job])

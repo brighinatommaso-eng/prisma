@@ -25,7 +25,8 @@ never ran. The end of a cooldown is stored in the database for the same
 reason restarts matter: a redeploy is what usually follows a bot wall.
 
 Every job that reaches the pipeline contacts YouTube: a track already in the
-catalogue is answered by POST /downloads and never becomes a job. The worker
+catalogue with its file on disk is answered by POST /downloads and never
+becomes a job. A repair (integrity.py) is a job like any other. The worker
 therefore paces all of them alike, without asking which ones "really" went
 out.
 """

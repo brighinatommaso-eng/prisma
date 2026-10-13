@@ -21,6 +21,14 @@ iOS client polls /health. One upstream request per poll is exactly the
 repetition that earns a bot check, so it is cached here too, on the same
 mechanism and with a much shorter TTL. The search itself stays in ytm.py.
 
+missing_files is the third thing cached here: how many live tracks have no
+file, or a file that is not the one recorded. It never leaves the machine, but
+it reads the library, and hashing a library on every poll would be absurd. The
+count is cached for a minute like reachability; the hashes behind it are kept
+by integrity.py for as long as each file stays unchanged, so a re-count after
+the minute costs one stat per file. It only counts. Queueing a repair is never
+done from here.
+
 Every probe here is blocking; callers run it off the event loop.
 
 The yt-dlp probes lean on yt-dlp internals (YoutubeDL._js_runtimes and
@@ -36,7 +44,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
-from . import ytm
+from . import integrity, ytm
 from .downloader import YTDLP_OPTIONS
 
 log = logging.getLogger("prisma.diagnostics")
@@ -50,6 +58,9 @@ YTDLP_CACHE_TTL_S = 300.0
 # Reachability does change on its own, so it is re-probed far more often -- but
 # still at most once a minute, however hard the client polls.
 REACHABLE_CACHE_TTL_S = 60.0
+# The library changes by a download, a deletion or a hand on the share; none
+# of that needs to show up sooner than a minute later.
+MISSING_FILES_CACHE_TTL_S = 60.0
 # Longer than a normal probe (about a second cold), shorter than a client's
 # patience with /health.
 LOCK_WAIT_S = 5.0
@@ -81,6 +92,7 @@ class _ProbeCache:
 
 _YTDLP_CACHE = _ProbeCache("yt-dlp environment", YTDLP_CACHE_TTL_S)
 _REACHABLE_CACHE = _ProbeCache("YouTube Music reachability", REACHABLE_CACHE_TTL_S)
+_MISSING_CACHE = _ProbeCache("missing files", MISSING_FILES_CACHE_TTL_S)
 
 
 def _cached(cache: _ProbeCache, probe: Callable[[], T], fallback: T) -> T:
@@ -162,3 +174,24 @@ def youtube_music_reachable() -> bool:
     "not reachable" rather than failing.
     """
     return _cached(_REACHABLE_CACHE, ytm.reachable, False)
+
+
+def _count_missing_files() -> int | None:
+    try:
+        found = integrity.classify()
+    except Exception as exc:
+        # None, not 0: a scan that could not finish has not found the library
+        # intact. The failure is cached like any result, so a share that went
+        # away is not re-read on every poll either.
+        log.warning("missing files scan failed: %s: %s", type(exc).__name__, exc)
+        return None
+    return len(found[integrity.MISSING]) + len(found[integrity.MISMATCH])
+
+
+def missing_files() -> int | None:
+    """How many live tracks have no file, or a file that is not the recorded one.
+
+    Cached for MISSING_FILES_CACHE_TTL_S; blocking, call from a thread. None
+    means "not known": the scan failed, or the first one is still running.
+    """
+    return _cached(_MISSING_CACHE, _count_missing_files, None)
