@@ -10,13 +10,13 @@ anything, so a crash leaves a partial file with an obvious name instead of
 orphaning a temp file somewhere else.
 """
 
-import hashlib
 import subprocess
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
 from . import db, metadata, palette, tagging
+from .integrity import sha256_of
 from .paths import make_dir_owned, set_owner, track_paths
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio"
@@ -38,14 +38,6 @@ YTDLP_OPTIONS: dict[str, Any] = {
     "quiet": True,
     "no_warnings": True,
 }
-
-
-def sha256_of(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _fetch_artwork(url: str | None) -> bytes | None:

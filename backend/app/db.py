@@ -333,13 +333,19 @@ def get_track(video_id: str) -> dict[str, Any] | None:
     return track
 
 
-def track_for_path(file_path: str) -> str | None:
-    """The video_id Prisma has stored at file_path, if any."""
+def path_claims(file_path: str) -> list[dict[str, Any]]:
+    """Every track recorded at file_path, as {"id", "live"}, ordered by id.
+
+    All of them, not the first: a deleted track keeps its old path on its row,
+    so a path can be recorded for a deleted id and a live one at once, and
+    which row a single-row lookup returned is what let two ids share a file.
+    """
     with _lock:
-        row = connect().execute(
-            "SELECT id FROM tracks WHERE file_path = ?", (file_path,)
-        ).fetchone()
-    return row["id"] if row else None
+        rows = connect().execute(
+            "SELECT id, deleted_at IS NULL AS live FROM tracks "
+            "WHERE file_path = ? ORDER BY id", (file_path,)
+        ).fetchall()
+    return [{"id": row["id"], "live": bool(row["live"])} for row in rows]
 
 
 def upsert_track(track: dict[str, Any], restore: bool = False) -> None:

@@ -2,7 +2,9 @@
 
 The on-disk layout is {MUSIC_DIR}/{Artist}/{Album}/{Title}.m4a with a sibling
 cover.jpg per album folder. Because the album name is a path segment, a wrong
-album is a wrong path, not just wrong text -- see albums.py.
+album is a wrong path, not just wrong text -- see albums.py. A track whose
+natural path belongs to another one is filed beside it as
+{Title} [{video_id}].m4a; track_paths has the rule.
 """
 
 import os
@@ -30,6 +32,10 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _WHITESPACE = re.compile(r"\s+")
 
 
+class PathConflict(Exception):
+    """The only path a track may be written to holds a file that is not its own."""
+
+
 def sanitise_segment(raw: str | None, fallback: str) -> str:
     """Make `raw` safe to use as a single path segment on Linux and SMB.
 
@@ -52,34 +58,76 @@ def sanitise_segment(raw: str | None, fallback: str) -> str:
     return text or fallback
 
 
+def _with_video_id(title_seg: str, video_id: str) -> str:
+    """`Title [video_id]`, within the segment limit.
+
+    The title gives way, never the id: cut at the end, a long title would lose
+    exactly the part that makes the name this track's own.
+    """
+    suffix = " [" + sanitise_segment(video_id, "id") + "]"
+    room = max(MAX_SEGMENT_CHARS - len(suffix), 1)
+    return title_seg[:room].rstrip(" .") + suffix
+
+
 def track_paths(artist: str | None, album: str | None, title: str | None,
                 video_id: str) -> tuple[Path, Path]:
-    """Return (audio_path, cover_path) for a track, avoiding collisions.
+    """Return (audio_path, cover_path) for a download of video_id.
 
-    If an audio file already exists at the natural path, " [video_id]" is
-    appended to the title segment rather than overwriting it. A file that is
-    already this video_id's own is reused as-is, so a re-run is idempotent.
+    Two different video ids never get the same audio path, and no file that is
+    not this track's own is ever the target: yt-dlp does not replace a file
+    already at its output path, it reports it as downloaded, and the pipeline
+    would then tag and record someone else's audio as this track.
+
+    A track that is live in the catalogue goes back to the path on its row,
+    provided that path is still its own: either the file there is the audio it
+    recorded (same SHA-256), or there is no file and no lower live id is
+    recorded at the same path. That second rule is what separates two ids
+    already recorded at one path once the file is gone. Otherwise, and for a
+    track that is new or was deleted, the natural path Artist/Album/Title.m4a
+    is used when it is free, and `Title [video_id].m4a` beside it when it is
+    not. Nothing is ever renamed or moved to make room.
+
+    Raises PathConflict when the track's own bracketed path holds a file that
+    is not its recorded audio: there is no further name to fall back to.
     """
+    from . import db
+    from .integrity import sha256_of
+
     artist_seg = sanitise_segment(artist, UNKNOWN_ARTIST)
     album_seg = sanitise_segment(album, NO_ALBUM)
     title_seg = sanitise_segment(title, video_id)
 
     album_dir = MUSIC_DIR / artist_seg / album_seg
-    audio_path = album_dir / f"{title_seg}.m4a"
+    cover_path = album_dir / COVER_FILENAME
+    natural = album_dir / f"{title_seg}.m4a"
+    bracketed = album_dir / f"{_with_video_id(title_seg, video_id)}.m4a"
 
-    if audio_path.exists() and not _belongs_to(audio_path, video_id):
-        disambiguated = sanitise_segment(f"{title_seg} [{video_id}]", video_id)
-        audio_path = album_dir / f"{disambiguated}.m4a"
+    own = db.get_track(video_id)
+    if own is not None and own.get("deleted_at") is None and own.get("file_path"):
+        recorded = Path(own["file_path"])
+        claims = db.path_claims(str(recorded))
+        if recorded.exists():
+            still_own = (recorded.is_file() and own.get("sha256") is not None
+                         and sha256_of(recorded) == own["sha256"])
+        else:
+            still_own = min(c["id"] for c in claims if c["live"]) == video_id
+        if still_own:
+            return recorded, cover_path
+        if recorded == bracketed:
+            raise PathConflict(
+                f"{recorded} holds a file that is not the audio recorded for "
+                f"{video_id}; it was left untouched and nothing was downloaded"
+            )
+        return bracketed, cover_path
 
-    return audio_path, album_dir / COVER_FILENAME
-
-
-def _belongs_to(audio_path: Path, video_id: str) -> bool:
-    """True when `audio_path` is already the file Prisma stored for `video_id`."""
-    from . import db
-
-    existing = db.track_for_path(str(audio_path))
-    return existing is not None and existing == video_id
+    claims = db.path_claims(str(natural))
+    taken = any(c["live"] and c["id"] != video_id for c in claims)
+    # A file with no live owner is still not ours to write into, unless it is
+    # what a deletion of this same track left behind.
+    leftover = natural.exists() and not any(c["id"] == video_id for c in claims)
+    if taken or leftover:
+        return bracketed, cover_path
+    return natural, cover_path
 
 
 def set_owner(path: Path) -> None:
