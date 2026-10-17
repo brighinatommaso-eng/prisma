@@ -3,8 +3,8 @@ import Observation
 import SwiftData
 import SwiftUI
 
-/// Every change to playlists and favourites. Stored only on this iPhone: no
-/// backend, no sync.
+/// Every change to playlists and favourites. Saved on this iPhone first, always;
+/// `CollectionSync` then keeps the server's copy in step behind it.
 @Observable
 final class PlaylistStore {
     /// The last failed action, shown until dismissed.
@@ -15,6 +15,9 @@ final class PlaylistStore {
     @ObservationIgnored private let context: ModelContext
     @ObservationIgnored private let downloads: DownloadManager
     @ObservationIgnored private let playback: PlaybackEngine
+    /// Called after favourites or playlists may have changed, so the server copy can
+    /// follow. `AppModel` points this at `CollectionSync`; the change is already saved.
+    @ObservationIgnored var onCollectionChange: (() -> Void)?
 
     init(context: ModelContext, downloads: DownloadManager, playback: PlaybackEngine) {
         self.context = context
@@ -48,7 +51,45 @@ final class PlaylistStore {
                                  message: "Impossibile leggere i brani della playlist sul telefono: riavvia l'app; se si ripete, controlla lo spazio libero.")
             return []
         }
-        return Self.ordered(all, of: playlist)
+        let listed = Self.ordered(all, of: playlist)
+        adoptLibraryRows(listed)
+        return listed
+    }
+
+    /// Gives a slot that only carries a video id its library row, the first time the
+    /// library has one.
+    ///
+    /// A slot added from Cerca names a track that exists nowhere yet. Once it has
+    /// been acquired the sync writes a `StoredTrack` with that same id, and from that
+    /// moment the slot should be an ordinary slot: it plays and it downloads. The
+    /// same happens to a slot whose track left the library and came back. Doing it here
+    /// means every action goes through it — play, download, add, remove, reorder —
+    /// and nothing else has to know that two kinds of slot ever existed.
+    ///
+    /// The projection shows an un-adopted slot correctly in the meantime, by looking
+    /// the id up itself, so there is never a moment where the screen is wrong.
+    private func adoptLibraryRows(_ entries: [PlaylistEntry]) {
+        let wanted = entries.compactMap { $0.track == nil ? $0.videoID : nil }
+        guard !wanted.isEmpty else { return }
+        let found = ModelLookup.tracks(wanted, in: context)
+        guard !found.isEmpty else { return }
+        let byID = Dictionary(found.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+        var linked = 0
+        for entry in entries where entry.track == nil {
+            guard let videoID = entry.videoID, let track = byID[videoID] else { continue }
+            entry.track = track
+            linked += 1
+        }
+        guard linked > 0 else { return }
+        save("linking \(linked) playlist entries to tracks that have arrived in the library")
+    }
+
+    /// The same adoption, asked for by the playlist's screen as soon as its
+    /// projection sees a slot whose track has arrived — typically one chosen in the
+    /// playlist's Cerca, whose acquisition the sync has just written — so the slot
+    /// does not stay un-adopted until the next tap.
+    func adoptLibraryRows(in playlist: Playlist) {
+        _ = entries(of: playlist)
     }
 
     // MARK: - Playlists
@@ -85,12 +126,19 @@ final class PlaylistStore {
         save("renaming the playlist to “\(name)”")
     }
 
+    /// Deletes the playlists and, by the cascade on `Playlist.entries`, their slots.
+    /// Nothing else: the tracks stay in the library and on the phone, and the
+    /// favourites stay in Preferiti. The server's copy of the collection follows.
     func delete(_ playlists: [Playlist]) {
+        guard !playlists.isEmpty else { return }
         let names = playlists.map(\.name)
         for playlist in playlists {
             context.delete(playlist)
         }
-        save("deleting \(names.joined(separator: ", "))")
+        guard save("deleting \(names.joined(separator: ", "))") else { return }
+        notice = names.count == 1
+            ? "Playlist “\(names[0])” eliminata. I suoi brani sono ancora nei preferiti."
+            : "\(names.count) playlist eliminate. I loro brani sono ancora nei preferiti."
     }
 
     /// `ordered` is the list as displayed; the new order is stored in `sortPosition`.
@@ -113,6 +161,124 @@ final class PlaylistStore {
         if save("adding “\(track.title ?? track.serverID)” to “\(playlist.name)”") {
             notice = "“\(track.title ?? track.serverID)” aggiunto a “\(playlist.name)”."
         }
+    }
+
+    /// Adds tracks to the end of a playlist, in the order given, and makes sure each
+    /// one is in Preferiti.
+    ///
+    /// Takes drafts rather than tracks because that is the only shape both ways of
+    /// filling a playlist from the playlist share — Dai preferiti, and Cerca opened
+    /// over the playlist: a favourite already in the collection has one, and so does
+    /// a search result that is in no library at all. For the second
+    /// kind `addFavourite` creates the favourite — the not-acquired state, with what
+    /// search knew and nothing downloaded — and the slot carries the video id until
+    /// the track is acquired.
+    ///
+    /// The end is worked out here, from the store, at the moment of the tap: the
+    /// highest position there is now, plus one per track. So a sync that removed a
+    /// slot between the sheet being drawn and the button being pressed only lowers
+    /// that number, and the new tracks still land after everything that survived.
+    /// Within one call the order is the order given, which is the order they were
+    /// picked in.
+    ///
+    /// A track the playlist already holds is skipped rather than added twice: this
+    /// is a picker, and it said which tracks were already there. The other direction,
+    /// Aggiungi a playlist… on a track row, still allows a second copy on purpose.
+    func add(_ drafts: [FavouriteDraft], to playlist: Playlist) {
+        guard !drafts.isEmpty else { return }
+        let listed = entries(of: playlist)
+        var held = Set(listed.compactMap(\.trackID))
+        var next = (listed.map(\.position).max() ?? -1) + 1
+        var added: [String] = []
+        var skipped = 0
+        for draft in drafts {
+            guard held.insert(draft.videoID).inserted else {
+                skipped += 1
+                continue
+            }
+            addFavourite(draft)
+            if let track = ModelLookup.track(draft.videoID, in: context) {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, track: track))
+            } else {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, videoID: draft.videoID))
+            }
+            next += 1
+            added.append(draft.title ?? draft.videoID)
+        }
+        let alreadyThere = skipped == 1
+            ? " 1 era già nella playlist."
+            : " \(skipped) erano già nella playlist."
+        guard !added.isEmpty else {
+            notice = "Nessun brano aggiunto a “\(playlist.name)”:" + alreadyThere
+            return
+        }
+        playlist.updatedAt = Date()
+        guard save("adding \(added.count) tracks to “\(playlist.name)”") else { return }
+        let what = added.count == 1
+            ? "“\(added[0])” aggiunto a “\(playlist.name)”."
+            : "\(added.count) brani aggiunti a “\(playlist.name)”."
+        notice = what + (skipped == 0 ? "" : alreadyThere)
+    }
+
+    /// Makes a playlist hold everything an imported file lists, repeats included,
+    /// by appending what it does not hold yet.
+    ///
+    /// Unlike `add(_:to:)`, which is a picker's action and never puts a track in
+    /// twice, this is a copy of somebody else's list: a playlist may hold the same
+    /// track more than once, and one imported from Demus has to come out the same
+    /// length and in the same order as it was there.
+    ///
+    /// The rule is a difference between two multisets, taken in the file's order.
+    /// If the file lists a track N times and the playlist already holds it M times,
+    /// max(0, N − M) slots are appended for it, and they are the file's later
+    /// occurrences: the first M are taken to be the ones already there. So:
+    ///
+    /// - into an empty playlist, every line of the file becomes a slot, in order;
+    /// - importing the same file again into the same playlist appends nothing;
+    /// - a track the playlist holds more often than the file lists it is left
+    ///   alone, and so is everything the playlist holds that the file does not.
+    ///
+    /// Each appended track is made a favourite if it is not one yet, as every way
+    /// into a playlist does. Saves once, and the collection hook follows.
+    func appendMissing(_ drafts: [FavouriteDraft], to playlist: Playlist) {
+        guard !drafts.isEmpty else { return }
+        let listed = entries(of: playlist)
+        var held: [String: Int] = [:]
+        for id in listed.compactMap(\.trackID) {
+            held[id, default: 0] += 1
+        }
+        // One read of the library for the whole file, not one per line.
+        let libraryRows = ModelLookup.tracks(Array(Set(drafts.map(\.videoID))), in: context)
+        let rowByID = Dictionary(libraryRows.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var next = (listed.map(\.position).max() ?? -1) + 1
+        var seenInFile: [String: Int] = [:]
+        var favourited = Set<String>()
+        var added = 0
+        for draft in drafts {
+            let occurrence = (seenInFile[draft.videoID] ?? 0) + 1
+            seenInFile[draft.videoID] = occurrence
+            guard occurrence > (held[draft.videoID] ?? 0) else { continue }
+            if favourited.insert(draft.videoID).inserted {
+                addFavourite(draft)
+            }
+            if let track = rowByID[draft.videoID] {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, track: track))
+            } else {
+                context.insert(PlaylistEntry(position: next, playlist: playlist, videoID: draft.videoID))
+            }
+            next += 1
+            added += 1
+        }
+        guard added > 0 else {
+            notice = "“\(playlist.name)” contiene già tutti i brani del file, quindi è rimasta com'è."
+            return
+        }
+        playlist.updatedAt = Date()
+        guard save("importing \(added) tracks into “\(playlist.name)”") else { return }
+        notice = added == 1
+            ? "1 brano importato in “\(playlist.name)”."
+            : "\(added) brani importati in “\(playlist.name)”."
     }
 
     func remove(_ entries: [PlaylistEntry], from playlist: Playlist) {
@@ -139,13 +305,19 @@ final class PlaylistStore {
         }
     }
 
-    /// Entries whose track is gone. Deleting a track cascades to its entries, so this
-    /// should find nothing; it runs at launch as a safety net and reports what it
-    /// removes.
+    /// Entries that name nothing at all. A slot keeps its video id when its track
+    /// leaves the library, so this should find nothing; it runs at launch as a
+    /// safety net and reports what it removes.
+    ///
+    /// A slot with no `track` is not an orphan by itself any more: one added from
+    /// Cerca has only a video id until its track is acquired, and it is a real line
+    /// of the playlist the whole time. An orphan is a slot that belongs to no
+    /// playlist, or one that names neither a library row nor an id.
     func removeOrphanedEntries() {
         let orphans: [PlaylistEntry]
         do {
-            orphans = try context.fetch(FetchDescriptor<PlaylistEntry>()).filter { $0.track == nil || $0.playlist == nil }
+            orphans = try context.fetch(FetchDescriptor<PlaylistEntry>())
+                .filter { ($0.track == nil && $0.videoID == nil) || $0.playlist == nil }
         } catch {
             lastError = .storage("Could not check playlists for removed tracks", location: nil, error: error,
                                  message: "Impossibile controllare le playlist per i brani rimossi dalla libreria: riavvia l'app; se si ripete, controlla lo spazio libero.")
@@ -166,13 +338,33 @@ final class PlaylistStore {
 
     // MARK: - Downloads and playback
 
-    /// Starts a download for every track in the playlist that is not on the phone.
+    /// Starts a device download for every track in the playlist that the server has
+    /// and this phone has not.
+    ///
+    /// A device download fetches GET /tracks/{id}/file, so it needs a track the
+    /// server still holds. A slot added with the plus in Cerca, and one whose only
+    /// copy this phone claimed and then deleted, have no file there to fetch: they
+    /// have to be asked of the server again, with a destination, which tapping their
+    /// row asks for. They are counted and named here rather than skipped in silence.
     func downloadMissing(in playlist: Playlist) {
         var seen = Set<String>()
         var started = 0
         var busy = 0
+        var notAcquired = 0
         for entry in entries(of: playlist) {
-            guard let track = entry.track, seen.insert(track.serverID).inserted else { continue }
+            guard let track = entry.track else {
+                if let videoID = entry.videoID, seen.insert(videoID).inserted {
+                    notAcquired += 1
+                }
+                continue
+            }
+            guard seen.insert(track.serverID).inserted else { continue }
+            guard track.serverDroppedAt == nil else {
+                if track.downloadState != .downloaded {
+                    notAcquired += 1
+                }
+                continue
+            }
             switch track.downloadState {
             case .notDownloaded, .failed, .cancelled:
                 downloads.download(track)
@@ -183,20 +375,37 @@ final class PlaylistStore {
                 break
             }
         }
+        let stillMissing = notAcquired == 0 ? "" :
+            (notAcquired == 1
+                ? " 1 brano non è né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo."
+                : " \(notAcquired) brani non sono né sul telefono né sul server: tocca ciascuno nella playlist e scegli dove scaricarlo.")
         if started == 0 && busy == 0 {
-            notice = "Tutti i brani di “\(playlist.name)” sono già scaricati."
+            notice = (notAcquired == 0
+                      ? "Tutti i brani di “\(playlist.name)” sono già scaricati."
+                      : "Non c'è niente da scaricare dal server per “\(playlist.name)”.") + stillMissing
         } else {
             notice = (started == 1 ? "Avviato 1 download" : "Avviati \(started) download")
                 + (busy > 0 ? ", \(busy) erano già in corso" : "")
                 + ". La riga di ogni brano mostra l'avanzamento o perché non è partito."
+                + stillMissing
         }
     }
 
     /// Plays the playlist from the entry at `index` in its displayed order.
     func play(_ playlist: Playlist, fromEntryAt index: Int) {
         let listed = entries(of: playlist)
-        guard listed.indices.contains(index), listed[index].track != nil else {
-            lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
+        guard listed.indices.contains(index) else {
+            lastError = .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in questa playlist: riapri la schermata e riprova.")
+            return
+        }
+        // Told apart, because they need different things of the user: a slot that
+        // names nothing can only be removed, while one that names a track with no
+        // library row — added da Cerca and not downloaded yet, or downloaded once
+        // and since gone from the library — can be downloaded from its row.
+        guard listed[index].track != nil else {
+            lastError = listed[index].videoID == nil
+                ? .invalidInput("Impossibile riprodurre questo brano", detail: "Non è più in libreria: toglilo dalla playlist.")
+                : .invalidInput("Impossibile riprodurre questo brano", detail: "Non è né sul telefono né sul server: toccalo nella playlist e scegli dove scaricarlo.")
             return
         }
         let tracks = listed.compactMap(\.track)
@@ -207,9 +416,9 @@ final class PlaylistStore {
     // MARK: - Favourites
 
     /// Preferiti is a collection of its own: a `FavouriteTrack` keyed by video id,
-    /// which exists whether or not the track does. `StoredTrack.favouritedAt` is
-    /// kept in step here, and only here, so every row projection keeps reading one
-    /// field and an older build still finds its favourites.
+    /// which exists whether or not the track does, and whose existence is the only
+    /// thing that decides whether a track is a favourite. `StoredTrack.favouritedAt`
+    /// is still written here so an older build finds its favourites; nothing reads it.
     ///
     /// Takes values, not a track: Cerca favourites a result that is in no library.
     func toggleFavourite(_ draft: FavouriteDraft) {
@@ -225,8 +434,11 @@ final class PlaylistStore {
 
     /// Adds the favourite if it is not already there, without saving. The callers
     /// that also acquire a track save once, after both changes.
-    func addFavourite(_ draft: FavouriteDraft) {
-        let now = Date()
+    ///
+    /// `date` is when it counts as added, which is its place in Preferiti. Now,
+    /// unless several are added together and their order has to be given.
+    func addFavourite(_ draft: FavouriteDraft, at date: Date = Date()) {
+        let now = date
         if let existing = storedFavourite(draft.videoID) {
             // Already a favourite: fill in anything it did not know yet, e.g. a
             // favourite added from search before the album title was known.
@@ -247,6 +459,26 @@ final class PlaylistStore {
             ))
         }
         ModelLookup.track(draft.videoID, in: context)?.favouritedAt = now
+        // The caller saves right after; the push waits long enough to see it.
+        onCollectionChange?()
+    }
+
+    /// Adds several favourites at once, and saves. One already in Preferiti is
+    /// filled in and otherwise left where it is, exactly as `addFavourite` does.
+    ///
+    /// Preferiti is newest first, and these all arrive in the same instant, so the
+    /// order is given rather than left to chance: a millisecond apart, the first one
+    /// newest, so the new ones read in Preferiti in the order they were given —
+    /// which for an imported playlist is the playlist's own. A millisecond because
+    /// that is the precision the collection keeps on the server; anything finer
+    /// would come back from a sync as a tie.
+    func addFavourites(_ drafts: [FavouriteDraft]) {
+        guard !drafts.isEmpty else { return }
+        let now = Date()
+        for (offset, draft) in drafts.enumerated() {
+            addFavourite(draft, at: now.addingTimeInterval(-Double(offset) / 1000))
+        }
+        save("adding \(drafts.count) tracks to the favourites")
     }
 
     private func storedFavourite(_ videoID: String) -> FavouriteTrack? {
@@ -344,6 +576,7 @@ final class PlaylistStore {
     private func save(_ activity: String) -> Bool {
         do {
             try context.save()
+            onCollectionChange?()
             return true
         } catch {
             lastError = .storage("Saving failed while \(activity)", location: nil, error: error,

@@ -47,6 +47,15 @@ nonisolated struct APIClient: Sendable {
     nonisolated enum Timeout {
         /// The backend probes YouTube Music for up to 8 s.
         static let health: TimeInterval = 20
+        /// "Is the server there right now", for `ServerReachability`.
+        ///
+        /// Idle timeout, and /health is the slowest cheap endpoint the backend has:
+        /// it caps its own upstream probes at 8 s and caches them for a minute, so
+        /// all but the first call of each minute answers in milliseconds. Ten
+        /// seconds is therefore the point past which a server that is answering at
+        /// all has stopped answering — and nothing on screen waits for it, because
+        /// the interface reads the last recorded answer rather than this request.
+        static let reachability: TimeInterval = 10
         /// The backend allows YouTube Music 20 s, then HEAD-checks each artwork URL.
         static let search: TimeInterval = 45
         static let library: TimeInterval = 20
@@ -59,6 +68,12 @@ nonisolated struct APIClient: Sendable {
         /// DELETE /tracks/{id} removes files on the server; a busy library answers
         /// 409 straight away rather than waiting.
         static let deletion: TimeInterval = 30
+        /// GET and PUT /collection only touch one small row.
+        static let collection: TimeInterval = 20
+        /// POST /import/demus uploads a file of at most 4 MiB and the server only
+        /// decompresses and reads it. Idle, like the others: a slow uplink that
+        /// keeps sending is not a timeout.
+        static let demusImport: TimeInterval = 30
     }
 
     let address: ServerAddress
@@ -82,6 +97,22 @@ nonisolated struct APIClient: Sendable {
 
     func health() async throws -> APIResponse<Health> {
         try await getJSON("/health", timeout: Timeout.health)
+    }
+
+    /// Is the server answering? GET /health, status only.
+    ///
+    /// The body is not decoded on purpose: this asks whether the backend is there,
+    /// and a response this build cannot parse still proves that it is. Anything
+    /// other than a 2xx throws, because something that answers /health with an error
+    /// will not serve a track's file either.
+    @discardableResult
+    func ping() async throws -> Int {
+        let fetched = try await fetch(
+            try address.endpoint("/health"),
+            accept: "application/json",
+            timeout: Timeout.reachability
+        )
+        return fetched.status
     }
 
     func search(query: String, limit: Int = 20) async throws -> APIResponse<[SongResult]> {
@@ -112,9 +143,18 @@ nonisolated struct APIClient: Sendable {
         return try await requestJSON("/downloads", method: "POST", body: body, timeout: Timeout.jobs)
     }
 
-    /// GET /downloads: every server job with its state and progress.
-    func downloadJobs() async throws -> APIResponse<[ServerJob]> {
-        try await getJSON("/downloads", timeout: Timeout.jobs)
+    /// GET /downloads: the server's jobs with their state and progress.
+    ///
+    /// By default the server lists the jobs still queued or running and those that
+    /// ended within the last hour, which is all a poll needs. `all` asks for every
+    /// job it has ever had: for the one question a poll cannot answer, what became
+    /// of a request sent before this phone went away for longer than that.
+    func downloadJobs(all: Bool = false) async throws -> APIResponse<[ServerJob]> {
+        try await getJSON(
+            "/downloads",
+            query: all ? [(name: "all", value: "true")] : [],
+            timeout: Timeout.jobs
+        )
     }
 
     /// DELETE /tracks/{id}: deletes the track and its file from the server. The
@@ -122,6 +162,50 @@ nonisolated struct APIClient: Sendable {
     func deleteTrack(trackID: String) async throws -> APIResponse<TrackDeletionResult> {
         let segment = try ServerAddress.pathSegment(trackID)
         return try await requestJSON("/tracks/" + segment, method: "DELETE", body: nil, timeout: Timeout.deletion)
+    }
+
+    /// GET /collection: the favourites and playlists, with the server's version.
+    func collection() async throws -> APIResponse<ServerCollection> {
+        try await getJSON("/collection", timeout: Timeout.collection)
+    }
+
+    /// PUT /collection: replaces the collection. `collection.version` is the version
+    /// the sent copy was based on. A 409 is an answer, not a failure: it carries the
+    /// server's current collection.
+    func putCollection(_ collection: ServerCollection) async throws -> CollectionPush {
+        let url = try address.endpoint("/collection")
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(collection)
+        } catch {
+            throw APIError.unexpected(error, url: url)
+        }
+        let fetched = try await fetch(
+            url, accept: "application/json", timeout: Timeout.collection,
+            method: "PUT", body: body, alsoAccepting: [409]
+        )
+        let value: ServerCollection
+        do {
+            value = try JSONDecoder().decode(ServerCollection.self, from: fetched.data)
+        } catch {
+            throw APIError.decoding(error, url: url, body: fetched.data)
+        }
+        return fetched.status == 409 ? .stale(value) : .accepted(value)
+    }
+
+    /// The largest file POST /import/demus accepts: the backend's limit on the
+    /// compressed size. Checked on the phone first, so a file that cannot be
+    /// accepted is never uploaded.
+    static let demusFileLimit = 4 * 1024 * 1024
+
+    /// POST /import/demus: the bytes of a `.playlist` file exported by Demus, sent
+    /// as they are. The server parses them and changes nothing; an unreadable file
+    /// is a 422 whose `serverDetail` says what is wrong with it.
+    func importDemus(file: Data) async throws -> APIResponse<DemusPlaylist> {
+        try await requestJSON(
+            "/import/demus", method: "POST", body: file,
+            timeout: Timeout.demusImport, contentType: "application/octet-stream"
+        )
     }
 
     /// Turns an artwork or cover URL from a response into a request URL.
@@ -241,10 +325,14 @@ nonisolated struct APIClient: Sendable {
         query: [(name: String, value: String)] = [],
         method: String,
         body: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        contentType: String = "application/json"
     ) async throws -> APIResponse<Value> {
         let url = try address.endpoint(path, query: query)
-        let fetched = try await fetch(url, accept: "application/json", timeout: timeout, method: method, body: body)
+        let fetched = try await fetch(
+            url, accept: "application/json", timeout: timeout,
+            method: method, body: body, contentType: contentType
+        )
         let value: Value
         do {
             value = try JSONDecoder().decode(Value.self, from: fetched.data)
@@ -267,7 +355,9 @@ nonisolated struct APIClient: Sendable {
         timeout: TimeInterval,
         headers: [String: String] = [:],
         method: String = "GET",
-        body: Data? = nil
+        body: Data? = nil,
+        contentType bodyType: String = "application/json",
+        alsoAccepting extraStatuses: Set<Int> = []
     ) async throws -> Fetched {
         // A conditional request must reach the server, not be answered from the
         // in-memory cache, so its 304 comes back to the caller.
@@ -280,7 +370,7 @@ nonisolated struct APIClient: Sendable {
         request.httpMethod = method
         if let body {
             request.httpBody = body
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(bodyType, forHTTPHeaderField: "Content-Type")
         }
         request.setValue(accept, forHTTPHeaderField: "Accept")
         for (name, value) in headers {
@@ -305,7 +395,7 @@ nonisolated struct APIClient: Sendable {
         }
         let contentType = http.value(forHTTPHeaderField: "Content-Type")
         let isNotModified = isConditional && http.statusCode == 304
-        guard (200...299).contains(http.statusCode) || isNotModified else {
+        guard (200...299).contains(http.statusCode) || isNotModified || extraStatuses.contains(http.statusCode) else {
             throw APIError.http(status: http.statusCode, url: url, contentType: contentType, body: data)
         }
         return Fetched(

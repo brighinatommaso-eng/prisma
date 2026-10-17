@@ -53,34 +53,82 @@ enum TrackPresence: String, Equatable, Sendable {
     case favouriteOnly
 }
 
+/// What the app knows about the server right now, as a value.
+///
+/// `ServerReachability` holds the truth; this is the shape the interface reasons
+/// in. It is not part of the store projection and does not need to be: reachability
+/// is a service in the environment, like `DownloadManager` and `PlaybackEngine`,
+/// and reading it below a body is safe because there is no row that can be deleted
+/// underneath it. What it must not do is disagree with the engine, so the
+/// playability rule is written once, as `TrackRowData.canPlay`, and the engine's
+/// `canPlayNow` is the same rule over the stored track.
+enum ServerState: Equatable, Sendable {
+    /// Nothing has asked the server yet in this session.
+    case unknown
+    case reachable
+    case unreachable
+
+    init(_ isReachable: Bool?) {
+        switch isReachable {
+        case nil: self = .unknown
+        case true?: self = .reachable
+        case false?: self = .unreachable
+        }
+    }
+
+    /// Streaming is worth attempting. "Not asked yet" counts as yes: attempting is
+    /// the fastest way to find out, and the attempt is bounded by the engine's
+    /// streaming deadline, so it cannot hang.
+    var mayStream: Bool { self != .unreachable }
+}
+
 /// The three states a Preferiti row tells apart, and the words for each.
 ///
-/// Streaming does not exist yet, so two of the three cannot be played, and each
-/// says why in its own terms rather than sharing one vague sentence.
+/// A track on the server is now playable too, by streaming, but only while the
+/// server answers — so what the row says about it depends on `ServerState`, and the
+/// three states no longer map one-to-one onto "plays" and "does not play".
 enum FavouriteState: Equatable, Sendable {
-    /// The file is on this phone: it plays.
+    /// The file is on this phone: it plays, with or without a network.
     case onPhone
-    /// The server has it and this phone does not.
+    /// The server has it and this phone does not: it streams while the server
+    /// answers, and nothing can play it when it does not.
     case onServer
     /// Neither the server nor this phone has it.
     case notAcquired
 
     /// The row's subtitle prefix, so the state is legible without tapping.
-    var label: String {
+    func label(_ server: ServerState) -> String {
         switch self {
-        case .onPhone: return "Sul telefono"
-        case .onServer: return "Sul server"
-        case .notAcquired: return "Non ancora scaricato"
+        case .onPhone:
+            return "Sul telefono"
+        case .onServer:
+            switch server {
+            case .reachable: return "Sul server · in streaming"
+            case .unreachable: return "Sul server · non raggiungibile"
+            case .unknown: return "Sul server"
+            }
+        case .notAcquired:
+            return "Non ancora scaricato"
+        }
+    }
+
+    /// Whether this state can produce audio with the server in this state.
+    func canPlay(_ server: ServerState) -> Bool {
+        switch self {
+        case .onPhone: return true
+        case .onServer: return server.mayStream
+        case .notAcquired: return false
         }
     }
 
     /// Why the track will not play, in full, or nil when it will.
-    func reason(title: String) -> String? {
+    func reason(title: String, server: ServerState) -> String? {
         switch self {
         case .onPhone:
             return nil
         case .onServer:
-            return "“\(title)” è sul server ma non su questo telefono, e Prisma non riproduce ancora in streaming: scaricalo sul telefono per ascoltarlo."
+            guard !server.mayStream else { return nil }
+            return "“\(title)” è sul server ma non su questo telefono, e il server ora non risponde, quindi non si può nemmeno riprodurre in streaming. Scaricalo sul telefono quando il server torna raggiungibile, così lo ascolti anche in modalità aereo."
         case .notAcquired:
             return "“\(title)” non è ancora stato scaricato: non è né sul server né su questo telefono. Scegli dove scaricarlo per poterlo ascoltare."
         }
@@ -128,7 +176,28 @@ struct TrackRowData: Identifiable, Equatable {
         }
     }
 
-    var isPlayable: Bool { downloadState == .downloaded }
+    /// The device download stopped because the server was not there, and nothing
+    /// else: it is started again when the server is back, so it is waiting, not
+    /// failed. A failure with any other cause is a failure.
+    var isWaitingForServer: Bool {
+        downloadState == .failed && (failureCause?.isReachabilityRelated ?? false)
+    }
+
+    /// The file is here. Plays with no network at all, and is the source chosen
+    /// even when the server is one hop away.
+    var isOnPhone: Bool { downloadState == .downloaded }
+
+    /// The server has a file for this track and this phone has not, so it is the
+    /// one kind of row that streaming is for. A copy this phone claimed as its only
+    /// one, and a favourite with no track anywhere, are not: `/tracks/{id}/file`
+    /// would answer 404 for both.
+    var isOnServerOnly: Bool { presence == .inLibrary && downloadState != .downloaded }
+
+    /// Can it produce audio right now? The rule the engine implements, as a value,
+    /// so a row and the engine cannot disagree about what a tap will do.
+    func canPlay(_ server: ServerState) -> Bool {
+        isOnPhone || (isOnServerOnly && server.mayStream)
+    }
 
     /// Playlists, Elimina dal server and the device download all need a library row.
     var hasLibraryRow: Bool { presence != .favouriteOnly }
@@ -161,11 +230,33 @@ struct TrackRowData: Identifiable, Equatable {
     }
 }
 
-/// One slot of a playlist. `track` is nil when the track has left the library and
-/// only the entry is left to remove.
+/// Why a playlist slot has nothing to show.
+enum MissingEntryReason: Equatable, Sendable {
+    /// The slot pointed at a library row that has gone, and only the slot is left.
+    case leftTheLibrary
+    /// The slot names a video id that is in neither the library nor Preferiti.
+    /// Either a track added from Cerca whose favourite was removed before it was
+    /// ever downloaded, or one that was downloaded, then left the library, and
+    /// whose favourite was removed too. The slot cannot tell which, so the text
+    /// claims neither.
+    case unknownTrack
+
+    var text: String {
+        switch self {
+        case .leftTheLibrary:
+            return "Brano non più in libreria"
+        case .unknownTrack:
+            return "Brano non più in libreria né nei preferiti"
+        }
+    }
+}
+
+/// One slot of a playlist. `track` is nil only when nothing at all is known about
+/// what the slot names, and `missing` then says which of the two ways that happened.
 struct PlaylistRowData: Identifiable, Equatable {
     let entryID: UUID
     let track: TrackRowData?
+    let missing: MissingEntryReason?
 
     var id: UUID { entryID }
 }
@@ -175,16 +266,39 @@ struct PlaylistData: Identifiable, Equatable {
     let id: UUID
     let name: String
     let rows: [PlaylistRowData]
+    /// Some slot still names its track by video id alone although the library now
+    /// has a row for it: the sync wrote the track after the slot was added. The
+    /// screen hands the playlist to `PlaylistStore.adoptLibraryRows(in:)` when this
+    /// turns true, so the slot becomes an ordinary one without waiting for a tap.
+    let awaitsAdoption: Bool
 
     var tracks: [TrackRowData] { rows.compactMap(\.track) }
     var trackIDs: [String] { tracks.map(\.id) }
     var covers: [AlbumCover] { Projection.covers(of: tracks) }
-    /// Offsets into `rows` whose track is on the phone.
-    var playable: [Int] { rows.indices.filter { rows[$0].track?.downloadState == .downloaded } }
-    /// Distinct tracks not on the phone.
-    var missingCount: Int {
+    /// Offsets into `rows` whose track can produce audio with the server in this
+    /// state: on the phone, or on the server while it answers.
+    func playable(_ server: ServerState) -> [Int] {
+        rows.indices.filter { rows[$0].track?.canPlay(server) ?? false }
+    }
+
+    /// Distinct tracks the server has and this phone has not: the ones "Scarica i
+    /// brani mancanti" can actually start, because a device download fetches
+    /// GET /tracks/{id}/file and so needs a track the server still holds.
+    var downloadableCount: Int {
+        distinct { $0.isOnServerOnly }
+    }
+
+    /// Distinct tracks that are in no library at all — added with the plus, or
+    /// claimed as this phone's only copy and then removed. A device download cannot
+    /// fetch them: they have to be asked of the server with a destination, which is
+    /// what tapping one of their rows does.
+    var notAcquiredCount: Int {
+        distinct { !$0.isOnPhone && !$0.isOnServerOnly }
+    }
+
+    private func distinct(_ isIncluded: (TrackRowData) -> Bool) -> Int {
         Set(rows.compactMap { row -> String? in
-            guard let track = row.track, track.downloadState != .downloaded else { return nil }
+            guard let track = row.track, isIncluded(track) else { return nil }
             return track.id
         }).count
     }
@@ -216,6 +330,28 @@ struct AddToPlaylistData: Equatable {
     let targets: [PlaylistTargetData]
 }
 
+/// One line of the Dai preferiti picker: a favourite, and whether the playlist
+/// already holds it.
+struct FavouritePickerRow: Identifiable, Equatable {
+    let track: TrackRowData
+    /// Shown as such and not selectable: a picker exists to say what is already
+    /// there, so it never offers to put the same track in twice.
+    let isInPlaylist: Bool
+
+    var id: String { track.id }
+}
+
+/// Everything the Dai preferiti sheet needs, from one read of the store: which
+/// playlist it is adding to, and the collection to pick from, each line marked with
+/// whether the playlist already holds it.
+struct PlaylistAdditionData: Equatable {
+    /// nil once the playlist has been deleted while the sheet was open.
+    let playlistName: String?
+    let rows: [FavouritePickerRow]
+
+    var addableCount: Int { rows.filter { !$0.isInPlaylist }.count }
+}
+
 /// A track being acquired from Search, before it is a library track.
 struct AcquisitionData: Identifiable, Equatable {
     /// The YouTube video id, which every action carries.
@@ -233,16 +369,85 @@ struct AcquisitionData: Identifiable, Equatable {
     var isActive: Bool { stage != .failed }
 }
 
+/// One imported playlist whose tracks are still arriving, as the line at the top of
+/// the Downloads tab shows it.
+///
+/// Every number is counted from the tracks and the acquisitions as they are now,
+/// each time the screen is drawn. The import's own record holds only which tracks
+/// it asked for, so nothing here can go stale across a relaunch.
+struct ImportProgressData: Identifiable, Equatable {
+    let id: UUID
+    let name: String
+    /// The distinct tracks of the import.
+    let total: Int
+    /// On this phone, which is where an import is going.
+    let done: Int
+    /// Not on this phone, with nothing fetching them: the acquisition failed, the
+    /// device download failed or was cancelled, or the track was taken out again.
+    /// Never counted as done, and never as still on its way.
+    let failed: Int
+    /// Asked of the server and not being downloaded there yet: waiting in its queue.
+    let waitingOnServer: Int
+
+    /// Nothing is on its way any more.
+    var isFinished: Bool { done + failed >= total }
+    /// Every track is on the phone: the line has nothing left to say.
+    var isComplete: Bool { done >= total }
+}
+
 /// The Downloads tab.
 struct DownloadsData: Equatable {
     let tracks: [TrackRowData]
     let acquisitions: [AcquisitionData]
+    /// The imports with something still to say: under way, or ended with tracks
+    /// that did not arrive. Oldest first.
+    let imports: [ImportProgressData]
+    /// Imports whose every track is on the phone. They are not shown; the screen
+    /// hands their ids to `DemusImporter` to be forgotten.
+    let completedImportIDs: [UUID]
 
     func tracks(in states: Set<DownloadState>) -> [TrackRowData] {
         tracks.filter { states.contains($0.downloadState) }
     }
 
-    var isEmpty: Bool { tracks.isEmpty && acquisitions.isEmpty }
+    var isEmpty: Bool { tracks.isEmpty && acquisitions.isEmpty && imports.isEmpty }
+}
+
+/// A playlist of that exact name which is already in Prisma, as the import preview
+/// needs to describe it before asking whether to update it.
+struct DemusExistingPlaylist: Equatable {
+    /// The one an update would go into.
+    let id: UUID
+    /// How many playlists carry the name. More than one means `id` was chosen.
+    let sameNameCount: Int
+    /// The slots an update would append: for each track, how many more times the
+    /// file lists it than the playlist holds it (`PlaylistStore.appendMissing`).
+    let missingCount: Int
+}
+
+/// What the import preview says about a parsed Demus file, set against what this
+/// phone already has.
+struct DemusPreviewData: Equatable {
+    /// The name the playlist will have.
+    let name: String
+    /// The songs as the file lists them, a repeated one counted each time: the
+    /// length the playlist will have.
+    let songCount: Int
+    /// The distinct tracks among them: what is favourited and acquired.
+    let trackCount: Int
+    let totalDuration: String
+    /// Distinct tracks that already have a favourite.
+    let alreadyFavourite: Int
+    /// Distinct tracks whose file is already on this phone.
+    let onPhone: Int
+    /// What the tracks still to download are estimated to need on this phone.
+    let estimatedBytes: Int64
+    /// What the device downloads already queued or running will take.
+    let queuedBytes: Int64
+    let existing: DemusExistingPlaylist?
+
+    var toDownload: Int { trackCount - onPhone }
+    var repeated: Int { songCount - trackCount }
 }
 
 /// What Search needs to decide, per result, whether it is in the library, already a
@@ -252,6 +457,43 @@ struct SearchIndex: Equatable {
     let tracks: [String: TrackRowData]
     let acquisitions: [String: AcquisitionData]
     let favourites: Set<String>
+    /// The playlist results are being added to, when Cerca is open over one; nil in
+    /// the Cerca tab, and nil once that playlist has been deleted.
+    let playlist: PlaylistSearchTarget?
+}
+
+/// The playlist Cerca adds to when it is presented over a playlist: its name, and
+/// the video ids it already holds, so a result can say it is already there without
+/// a library track existing.
+struct PlaylistSearchTarget: Equatable {
+    let id: UUID
+    let name: String
+    let alreadyIn: Set<String>
+
+    func slot(for videoID: String) -> PlaylistSlotTarget {
+        PlaylistSlotTarget(playlistID: id, playlistName: name, holdsTrack: alreadyIn.contains(videoID))
+    }
+}
+
+/// One search result's view of that playlist: where it would go, and whether it is
+/// there already. An id and strings only, so a row can carry it and act on it later.
+struct PlaylistSlotTarget: Equatable {
+    let playlistID: UUID
+    let playlistName: String
+    let holdsTrack: Bool
+}
+
+/// Where a queued line's audio would come from, so the queue can show what will be
+/// skipped instead of silently skipping it.
+enum QueueRowSource: Equatable, Sendable {
+    /// The file is on this phone.
+    case onPhone
+    /// Only the server has it: it streams while the server answers.
+    case onServer
+    /// In the library, but on neither the phone nor the server.
+    case nowhere
+    /// Not in the library any more: it was queued and then deleted.
+    case gone
 }
 
 /// One line of the play queue.
@@ -260,6 +502,29 @@ struct QueueRowData: Identifiable, Equatable {
     let id: Int
     let title: String
     let artist: String
+    let source: QueueRowSource
+
+    func canPlay(_ server: ServerState) -> Bool {
+        switch source {
+        case .onPhone: return true
+        case .onServer: return server.mayStream
+        case .nowhere, .gone: return false
+        }
+    }
+
+    /// Why this line will be passed over, or nil when it will play.
+    func skippedReason(_ server: ServerState) -> String? {
+        switch source {
+        case .onPhone:
+            return nil
+        case .onServer:
+            return server.mayStream ? nil : "Solo sul server, non raggiungibile"
+        case .nowhere:
+            return "Non è sul telefono né sul server"
+        case .gone:
+            return "Non più in libreria"
+        }
+    }
 }
 
 // MARK: - Reading the store, once
@@ -278,7 +543,10 @@ enum Projection {
         return AlbumCover(palette: album.palette, fileName: album.coverFileName, savedAt: album.coverSavedAt)
     }
 
-    static func row(of track: StoredTrack, acquisition: AcquisitionData? = nil) -> TrackRowData {
+    /// `isFavourite` is whether a `FavouriteTrack` exists for this track's video id.
+    /// It is asked of the caller, with no default, because the track itself does not
+    /// know: every screen that draws a heart reads Preferiti to decide it.
+    static func row(of track: StoredTrack, isFavourite: Bool, acquisition: AcquisitionData? = nil) -> TrackRowData {
         let album = track.album
         return TrackRowData(
             id: track.serverID,
@@ -289,7 +557,7 @@ enum Projection {
             durationS: track.durationS,
             downloadState: track.downloadState,
             failureCause: track.failureCause,
-            isFavourite: track.isFavourite,
+            isFavourite: isFavourite,
             cover: cover(of: album),
             artworkURL: nil,
             presence: track.serverDroppedAt == nil ? .inLibrary : .phoneOnly,
@@ -318,6 +586,14 @@ enum Projection {
             acquisition: acquisition,
             downloadToken: nil
         )
+    }
+
+    /// The mini-player and the full player: the track the engine holds, with the
+    /// heart decided by Preferiti.
+    static func nowPlaying(_ track: StoredTrack?, favourites: [FavouriteTrack]) -> TrackRowData? {
+        guard let track else { return nil }
+        let id = track.serverID
+        return row(of: track, isFavourite: favourites.contains { $0.videoID == id })
     }
 
     static func acquisition(_ record: PendingAcquisition) -> AcquisitionData {
@@ -370,33 +646,86 @@ enum Projection {
             .sorted { $0.addedAt > $1.addedAt }
             .map { favourite in
                 if let track = byID[favourite.videoID] {
-                    return row(of: track, acquisition: pending[favourite.videoID])
+                    return row(of: track, isFavourite: true, acquisition: pending[favourite.videoID])
                 }
                 return row(of: favourite, acquisition: pending[favourite.videoID])
             }
     }
 
     /// Libreria, Playlist filter.
-    static func playlistSummaries(_ playlists: [Playlist], entries: [PlaylistEntry]) -> [PlaylistSummaryData] {
+    static func playlistSummaries(
+        _ playlists: [Playlist],
+        entries: [PlaylistEntry],
+        tracks: [StoredTrack],
+        favourites: [FavouriteTrack]
+    ) -> [PlaylistSummaryData] {
         let byPlaylist = group(entries)
+        let index = SlotIndex(tracks: tracks, favourites: favourites)
         return playlists.map { playlist in
             PlaylistSummaryData(
                 id: playlist.id,
                 name: playlist.name,
-                tracks: (byPlaylist[ObjectIdentifier(playlist)] ?? []).compactMap { entry in entry.track.map { row(of: $0) } }
+                tracks: (byPlaylist[ObjectIdentifier(playlist)] ?? []).compactMap { slot($0, in: index).track }
             )
         }
     }
 
     /// One playlist's screen. nil once the playlist itself is gone.
-    static func playlist(id: UUID, playlists: [Playlist], entries: [PlaylistEntry]) -> PlaylistData? {
+    static func playlist(
+        id: UUID,
+        playlists: [Playlist],
+        entries: [PlaylistEntry],
+        tracks: [StoredTrack],
+        favourites: [FavouriteTrack]
+    ) -> PlaylistData? {
         guard let playlist = playlists.first(where: { $0.id == id }) else { return nil }
         let ordered = group(entries)[ObjectIdentifier(playlist)] ?? []
+        let index = SlotIndex(tracks: tracks, favourites: favourites)
         return PlaylistData(
             id: playlist.id,
             name: playlist.name,
-            rows: ordered.map { entry in PlaylistRowData(entryID: entry.id, track: entry.track.map { row(of: $0) }) }
+            rows: ordered.map { slot($0, in: index) },
+            awaitsAdoption: ordered.contains { entry in
+                entry.track == nil && entry.videoID.map { index.tracks[$0] != nil } == true
+            }
         )
+    }
+
+    /// The library and Preferiti by video id, built once per projection pass so a
+    /// slot is resolved by two dictionary lookups rather than a search.
+    private struct SlotIndex {
+        let tracks: [String: StoredTrack]
+        let favourites: [String: FavouriteTrack]
+
+        init(tracks: [StoredTrack], favourites: [FavouriteTrack]) {
+            self.tracks = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
+            self.favourites = Dictionary(favourites.map { ($0.videoID, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+    }
+
+    /// What one slot shows.
+    ///
+    /// The relationship first, because it is the row the slot was made from and it
+    /// carries the download state. Failing that, the video id: a slot added from
+    /// Cerca has no relationship until its track is acquired, and until then it is
+    /// its favourite that knows the title. Only an id nobody recognises, or a slot
+    /// that names nothing at all, has nothing to show.
+    private static func slot(_ entry: PlaylistEntry, in index: SlotIndex) -> PlaylistRowData {
+        if let track = entry.track {
+            let isFavourite = index.favourites[track.serverID] != nil
+            return PlaylistRowData(entryID: entry.id, track: row(of: track, isFavourite: isFavourite), missing: nil)
+        }
+        guard let videoID = entry.videoID else {
+            return PlaylistRowData(entryID: entry.id, track: nil, missing: .leftTheLibrary)
+        }
+        if let track = index.tracks[videoID] {
+            let isFavourite = index.favourites[videoID] != nil
+            return PlaylistRowData(entryID: entry.id, track: row(of: track, isFavourite: isFavourite), missing: nil)
+        }
+        if let favourite = index.favourites[videoID] {
+            return PlaylistRowData(entryID: entry.id, track: row(of: favourite), missing: nil)
+        }
+        return PlaylistRowData(entryID: entry.id, track: nil, missing: .unknownTrack)
     }
 
     /// The Aggiungi a playlist… sheet, for the track that opened it.
@@ -404,9 +733,11 @@ enum Projection {
         trackID: String,
         tracks: [StoredTrack],
         playlists: [Playlist],
-        entries: [PlaylistEntry]
+        entries: [PlaylistEntry],
+        favourites: [FavouriteTrack]
     ) -> AddToPlaylistData {
         let track = tracks.first { $0.serverID == trackID }
+        let isFavourite = favourites.contains { $0.videoID == trackID }
         let albumLine = track?.album.map { "\($0.artist) · \($0.title)" }
         let byPlaylist = group(entries)
         let targets = playlists.map { playlist in
@@ -418,7 +749,11 @@ enum Projection {
                 holdsTrack: listed.contains { $0.track?.serverID == trackID }
             )
         }
-        return AddToPlaylistData(track: track.map { row(of: $0) }, albumLine: albumLine, targets: targets)
+        return AddToPlaylistData(
+            track: track.map { row(of: $0, isFavourite: isFavourite) },
+            albumLine: albumLine,
+            targets: targets
+        )
     }
 
     /// The Downloads tab: device downloads first by state, then by when they were
@@ -429,7 +764,13 @@ enum Projection {
     /// one download. A Telefono acquisition outlives its handoff — it still has the
     /// server's copy to delete — and that last step is its own row again, because
     /// nothing else says it is happening.
-    static func downloads(tracks: [StoredTrack], acquisitions: [PendingAcquisition]) -> DownloadsData {
+    static func downloads(
+        tracks: [StoredTrack],
+        acquisitions: [PendingAcquisition],
+        favourites: [FavouriteTrack],
+        imports: [PlaylistImport]
+    ) -> DownloadsData {
+        let favouriteIDs = Set(favourites.map(\.videoID))
         let ordered = tracks.sorted {
             // Downloading before queued, then by when they were asked for.
             if $0.downloadState != $1.downloadState {
@@ -437,13 +778,152 @@ enum Projection {
             }
             return ($0.queuedAt ?? .distantPast) < ($1.queuedAt ?? .distantPast)
         }
-        let rows = ordered.map { row(of: $0) }
+        let rows = ordered.map { row(of: $0, isFavourite: favouriteIDs.contains($0.serverID)) }
         let transferring: Set<DownloadState> = [.queued, .downloading, .downloaded]
         let started = Set(rows.filter { transferring.contains($0.downloadState) }.map(\.id))
         let records = acquisitions
             .map { acquisition($0) }
             .filter { $0.stage != .handingOff || !started.contains($0.id) }
-        return DownloadsData(tracks: rows, acquisitions: records)
+        let progress = importProgress(imports, tracks: tracks, acquisitions: acquisitions)
+        return DownloadsData(
+            tracks: rows,
+            acquisitions: records,
+            imports: progress.filter { !$0.isComplete },
+            completedImportIDs: progress.filter { $0.isComplete }.map(\.id)
+        )
+    }
+
+    /// Where each import stands, counted from its tracks as they are now.
+    ///
+    /// A track of an import is in exactly one of three places. It is on the phone:
+    /// done. Something is still fetching it, or will again without being asked — an
+    /// acquisition that has not failed, a device download queued or running, or one
+    /// that only the server's absence stopped, which is started again when the
+    /// server is back: on its way. Or neither, and then it is not going to arrive
+    /// by itself: a failed acquisition, a device download that failed for a real
+    /// reason or was cancelled, a track removed again. That third kind is what
+    /// keeps a line from running forever, and it is never added to the first.
+    ///
+    /// An Entrambi acquisition deletes its record the moment the device download
+    /// owns the track, so "on its way" has to look at both, and "done" can only be
+    /// the track's own state.
+    private static func importProgress(
+        _ imports: [PlaylistImport],
+        tracks: [StoredTrack],
+        acquisitions: [PendingAcquisition]
+    ) -> [ImportProgressData] {
+        guard !imports.isEmpty else { return [] }
+        let states = Dictionary(tracks.map { ($0.serverID, $0.downloadState) }, uniquingKeysWith: { first, _ in first })
+        let waitingForServer = Set(
+            tracks
+                .filter { $0.downloadState == .failed && ($0.failureCause?.isReachabilityRelated ?? false) }
+                .map(\.serverID)
+        )
+        let pending = Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first })
+        return imports
+            .sorted { $0.startedAt < $1.startedAt }
+            .map { record -> ImportProgressData in
+                var done = 0
+                var failed = 0
+                var waitingOnServer = 0
+                let ids = record.videoIDs
+                for id in ids {
+                    let state = states[id]
+                    if state == .downloaded {
+                        done += 1
+                    } else if let acquisition = pending[id], acquisition.isActive {
+                        let running = acquisition.serverJobState == ServerJob.State.running.rawValue
+                        if acquisition.stage == .requesting || (acquisition.stage == .onServer && !running) {
+                            waitingOnServer += 1
+                        }
+                    } else if state != .queued && state != .downloading && !waitingForServer.contains(id) {
+                        failed += 1
+                    }
+                }
+                return ImportProgressData(
+                    id: record.id,
+                    name: record.name,
+                    total: ids.count,
+                    done: done,
+                    failed: failed,
+                    waitingOnServer: waitingOnServer
+                )
+            }
+    }
+
+    /// The import preview: a parsed Demus file against Preferiti, the library and
+    /// the playlists. Nothing is written by looking.
+    ///
+    /// Two counts, because importing acts on two things. The playlist is a copy
+    /// of the file, so its length and its duration count every line, repeats
+    /// included. A favourite and an acquisition exist once per track however often
+    /// the file lists it, so what is already in Preferiti, what is already on the
+    /// phone and what there is to download are counted over distinct video ids.
+    ///
+    /// With several playlists of the same name, the one an update goes into is the
+    /// first in the user's own order of playlists (`sortPosition`), then the oldest,
+    /// then the lowest id: the same answer every time, and the one the user sees
+    /// first in Libreria.
+    static func demusPreview(
+        _ file: DemusPlaylist,
+        favourites: [FavouriteTrack],
+        tracks: [StoredTrack],
+        playlists: [Playlist],
+        entries: [PlaylistEntry]
+    ) -> DemusPreviewData {
+        var seen = Set<String>()
+        let songs = file.songs.filter { seen.insert($0.videoID).inserted }
+        let ids = songs.map(\.videoID)
+
+        let favouriteIDs = Set(favourites.map(\.videoID))
+        let onPhoneIDs = Set(tracks.filter { $0.downloadState == .downloaded }.map(\.serverID))
+        let missing = songs.filter { !onPhoneIDs.contains($0.videoID) }
+        let queuedBytes = tracks
+            .filter { $0.downloadState == .queued || $0.downloadState == .downloading }
+            .reduce(Int64(0)) { $0 + Int64($1.fileBytes ?? 0) }
+
+        let name = DemusImporter.playlistName(file.name)
+        let sameName = playlists
+            .filter { $0.name == name }
+            .sorted { left, right in
+                if left.sortPosition != right.sortPosition { return left.sortPosition < right.sortPosition }
+                if left.createdAt != right.createdAt { return left.createdAt < right.createdAt }
+                return left.id.uuidString < right.id.uuidString
+            }
+        var existing: DemusExistingPlaylist?
+        if let target = sameName.first {
+            var held: [String: Int] = [:]
+            for id in (group(entries)[ObjectIdentifier(target)] ?? []).compactMap(\.trackID) {
+                held[id, default: 0] += 1
+            }
+            // The same multiset difference `PlaylistStore.appendMissing` applies.
+            var seenInFile: [String: Int] = [:]
+            var missingCount = 0
+            for song in file.songs {
+                let occurrence = (seenInFile[song.videoID] ?? 0) + 1
+                seenInFile[song.videoID] = occurrence
+                if occurrence > (held[song.videoID] ?? 0) {
+                    missingCount += 1
+                }
+            }
+            existing = DemusExistingPlaylist(
+                id: target.id,
+                sameNameCount: sameName.count,
+                missingCount: missingCount
+            )
+        }
+
+        return DemusPreviewData(
+            name: name,
+            songCount: file.songs.count,
+            trackCount: songs.count,
+            totalDuration: Formatting.totalDuration(file.songs.map(\.durationS)),
+            alreadyFavourite: ids.filter { favouriteIDs.contains($0) }.count,
+            onPhone: ids.filter { onPhoneIDs.contains($0) }.count,
+            estimatedBytes: DemusEstimate.bytes(durations: missing.map(\.durationS)),
+            queuedBytes: queuedBytes,
+            existing: existing
+        )
     }
 
     /// The one line Libreria shows about syncing.
@@ -452,28 +932,84 @@ enum Projection {
     }
 
     /// Cerca: what a result needs to know about the library, about Preferiti and
-    /// about what is already being acquired, by video id.
+    /// about what is already being acquired, by video id — and, when Cerca is open
+    /// over a playlist, which of those video ids the playlist already holds.
+    ///
+    /// One pass for the tab and for the overlay, so the two cannot come to disagree
+    /// about what a result is. The tab passes no `playlistID`, and then no playlist
+    /// is looked at.
     static func search(
         tracks: [StoredTrack],
         favourites: [FavouriteTrack],
-        acquisitions: [PendingAcquisition]
+        acquisitions: [PendingAcquisition],
+        playlistID: UUID? = nil,
+        playlists: [Playlist] = [],
+        entries: [PlaylistEntry] = []
     ) -> SearchIndex {
-        SearchIndex(
-            tracks: Dictionary(tracks.map { ($0.serverID, row(of: $0)) }, uniquingKeysWith: { first, _ in first }),
+        var target: PlaylistSearchTarget?
+        if let playlistID, let playlist = playlists.first(where: { $0.id == playlistID }) {
+            let listed = group(entries)[ObjectIdentifier(playlist)] ?? []
+            // `trackID` reads the id off the slot, or off the library row it points
+            // at for a slot written before slots carried one.
+            target = PlaylistSearchTarget(
+                id: playlist.id,
+                name: playlist.name,
+                alreadyIn: Set(listed.compactMap(\.trackID))
+            )
+        }
+        let favouriteIDs = Set(favourites.map(\.videoID))
+        return SearchIndex(
+            tracks: Dictionary(
+                tracks.map { ($0.serverID, row(of: $0, isFavourite: favouriteIDs.contains($0.serverID))) },
+                uniquingKeysWith: { first, _ in first }
+            ),
             acquisitions: Dictionary(acquisitions.map { ($0.videoID, acquisition($0)) }, uniquingKeysWith: { first, _ in first }),
-            favourites: Set(favourites.map(\.videoID))
+            favourites: favouriteIDs,
+            playlist: target
         )
+    }
+
+    /// The Dai preferiti sheet: the collection, and what is already in the playlist.
+    ///
+    /// A picker shows no transfers, so no acquisitions are read for it — a row here
+    /// says what the track is, not what is happening to it.
+    static func playlistAddition(
+        playlistID: UUID,
+        playlists: [Playlist],
+        entries: [PlaylistEntry],
+        favourites: [FavouriteTrack],
+        tracks: [StoredTrack]
+    ) -> PlaylistAdditionData {
+        let playlist = playlists.first { $0.id == playlistID }
+        let listed = playlist.map { group(entries)[ObjectIdentifier($0)] ?? [] } ?? []
+        // `trackID` reads the id off the slot, or off the library row it points at
+        // for a slot written before slots carried one.
+        let alreadyIn = Set(listed.compactMap(\.trackID))
+        // Named in full: the parameter `favourites` shadows the function of the
+        // same name, and the collection here is exactly the Preferiti list.
+        let rows = Projection.favourites(favourites: favourites, tracks: tracks, acquisitions: [])
+            .map { FavouritePickerRow(track: $0, isInPlaylist: alreadyIn.contains($0.id)) }
+        return PlaylistAdditionData(playlistName: playlist?.name, rows: rows)
     }
 
     /// The play queue sheet: the engine's ids against the library.
     static func queue(ids: [String], tracks: [StoredTrack]) -> [QueueRowData] {
         let byID = Dictionary(tracks.map { ($0.serverID, $0) }, uniquingKeysWith: { first, _ in first })
         return ids.enumerated().map { offset, id in
-            let track = byID[id]
+            guard let track = byID[id] else {
+                return QueueRowData(id: offset, title: "Brano non più in libreria", artist: "", source: .gone)
+            }
+            let source: QueueRowSource
+            if track.downloadState == .downloaded {
+                source = .onPhone
+            } else {
+                source = track.serverDroppedAt == nil ? .onServer : .nowhere
+            }
             return QueueRowData(
                 id: offset,
-                title: track?.title ?? "Brano non più in libreria",
-                artist: track?.album?.artist ?? ""
+                title: track.title ?? "Senza titolo",
+                artist: track.album?.artist ?? "",
+                source: source
             )
         }
     }

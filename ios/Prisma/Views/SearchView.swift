@@ -2,7 +2,56 @@ import Foundation
 import SwiftData
 import SwiftUI
 
+/// The Cerca tab.
 struct SearchView: View {
+    var body: some View {
+        SearchScreen(playlistID: nil)
+    }
+}
+
+/// Cerca opened over a playlist, from its +: the same screen as the tab, in a sheet
+/// of its own, with the playlist as the place a chosen result also goes.
+///
+/// Presented rather than switched to, so the playlist is still underneath when it
+/// closes. The theme is applied here again because a sheet is a presentation of its
+/// own: the ink, the background and the colour scheme the tab gets from `RootView`.
+struct PlaylistSearchSheet: View {
+    /// By id: the sheet stays up while the playlist changes behind it, and says so if
+    /// it is deleted meanwhile.
+    let playlistID: UUID
+
+    @Environment(ThemeEngine.self) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SearchScreen(playlistID: playlistID)
+                .themedScreenBackground()
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Fine") { dismiss() }
+                    }
+                }
+        }
+        .prismaInk()
+        .preferredColorScheme(theme.resolved.surface.colorScheme)
+    }
+}
+
+/// The one search screen, for the tab and for a playlist.
+///
+/// A result is the same row in both places and a tap does the same thing: a result
+/// in the library plays, one that is not asks where to keep it (Telefono, Server,
+/// Entrambi) and acquires it. Over a playlist, two things change and nothing else.
+/// The chosen result also goes into that playlist — the destination sheet writes
+/// the slot at the tap, then starts the acquisition. And the plus, which in the tab
+/// puts a result in Preferiti, there puts it in the playlist *and* in Preferiti,
+/// downloading nothing: the one way to fill a playlist with tracks that are not
+/// fetched yet.
+struct SearchScreen: View {
+    /// The playlist results are added to, or nil for the tab.
+    let playlistID: UUID?
+
     @Environment(AppSettings.self) private var settings
     @Environment(\.prismaInk) private var ink
     @State private var model = SearchModel()
@@ -13,10 +62,21 @@ struct SearchView: View {
     @Query private var acquisitions: [PendingAcquisition]
     /// Preferiti, so the plus knows whether it would add or remove.
     @Query private var favourites: [FavouriteTrack]
+    /// Over a playlist, what it already holds. The tab queries them too — a query
+    /// cannot be left out conditionally — and the projection ignores them there.
+    @Query private var playlists: [Playlist]
+    @Query private var entries: [PlaylistEntry]
 
     var body: some View {
         // The one place this screen reads the store.
-        let index = Projection.search(tracks: libraryTracks, favourites: favourites, acquisitions: acquisitions)
+        let index = Projection.search(
+            tracks: libraryTracks,
+            favourites: favourites,
+            acquisitions: acquisitions,
+            playlistID: playlistID,
+            playlists: playlists,
+            entries: entries
+        )
 
         List {
             SearchField(query: $model.query) {
@@ -27,13 +87,29 @@ struct SearchView: View {
             .prismaRow()
             .listRowSeparator(.hidden)
 
+            if playlistID != nil {
+                if index.playlist == nil {
+                    ProblemBlock("Questa playlist non esiste più, quindi i brani scelti qui non entrano in nessuna playlist: questa ricerca funziona come quella della scheda Cerca.")
+                        .prismaRow()
+                        .listRowSeparator(.hidden)
+                }
+                // What the last addition did, and anything that went wrong with it,
+                // where the tap happened rather than behind the sheet.
+                PlaylistStoreMessages()
+                    .listRowSeparator(.hidden)
+            }
+
             AcquisitionCoordinatorError()
                 .prismaRow()
                 .listRowSeparator(.hidden)
 
             switch model.state {
             case .idle:
-                message("Cerca un brano, un artista o un album.")
+                if let target = index.playlist {
+                    message("Cerca un brano da aggiungere a “\(target.name)”. Toccalo per scegliere dove scaricarlo: entra nella playlist e nei preferiti. Il + lo aggiunge senza scaricare niente.")
+                } else {
+                    message("Cerca un brano, un artista o un album.")
+                }
             case .loading:
                 HStack(spacing: 10) {
                     ProgressView()
@@ -62,7 +138,8 @@ struct SearchView: View {
                             client: results.client,
                             localTrack: index.tracks[song.videoID],
                             pending: index.acquisitions[song.videoID],
-                            isFavourite: index.favourites.contains(song.videoID)
+                            isFavourite: index.favourites.contains(song.videoID),
+                            playlist: index.playlist?.slot(for: song.videoID)
                         )
                         .prismaRow()
                     }
@@ -71,7 +148,8 @@ struct SearchView: View {
         }
         .prismaList()
         .scrollDismissesKeyboard(.immediately)
-        .navigationTitle("Cerca")
+        .navigationTitle(index.playlist.map { "Aggiungi a “\($0.name)”" } ?? "Cerca")
+        .navigationBarTitleDisplayMode(playlistID == nil ? .automatic : .inline)
     }
 
     private func message(_ text: String) -> some View {
@@ -126,6 +204,12 @@ private struct SearchField: View {
 /// A search result: the plus, which adds it to Preferiti and downloads nothing, and
 /// the download button, which asks where the copy should go and then acquires it.
 ///
+/// Over a playlist (`playlist` set) the plus adds to the playlist and to Preferiti,
+/// still downloading nothing, and turns into a check once the playlist holds the
+/// track; the destination sheet also puts the track in the playlist. Everything
+/// else — the tap, the long press on a library result, the state icon — is the
+/// tab's row unchanged.
+///
 /// The only `@State` is the destination sheet, and it changes on a tap and never on
 /// its own. That matters because `RemoteImage` reports a failure whenever the
 /// network answers, unattended and with nothing else changing; the one piece that
@@ -138,15 +222,18 @@ private struct SongRow: View {
     let localTrack: TrackRowData?
     let pending: AcquisitionData?
     let isFavourite: Bool
+    /// The playlist this result would join, when Cerca is open over one.
+    let playlist: PlaylistSlotTarget?
 
     @Environment(PlaylistStore.self) private var store
+    @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
 
     /// By value, so it stays up while the library changes behind it.
     @State private var destination: AcquisitionRequest?
 
     var body: some View {
-        let subtitle = [song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
+        let subtitle = [membership, song.artist, song.album].compactMap { $0 }.joined(separator: " · ")
         Group {
             if let localTrack {
                 // In the library: the shared track row, so a result already on the
@@ -199,12 +286,49 @@ private struct SongRow: View {
             }
         }
         .sheet(item: $destination) { request in
-            DestinationSheet(request: request, reason: nil)
+            DestinationSheet(request: request, reason: nil, joining: playlist)
         }
     }
 
-    /// Adds the result to Preferiti immediately, and downloads nothing.
+    /// Over a playlist, where the result already is, so the line says it before the
+    /// plus does. The tab says nothing: the heart is its marker.
+    private var membership: String? {
+        guard let playlist else { return nil }
+        if playlist.holdsTrack { return "Già in questa playlist" }
+        return isFavourite ? "Nei preferiti" : nil
+    }
+
+    @ViewBuilder
     private var plus: some View {
+        if let playlist {
+            playlistPlus(playlist)
+        } else {
+            favouritePlus
+        }
+    }
+
+    /// Over a playlist: adds the result to the playlist and to Preferiti at once,
+    /// and downloads nothing. A check, not a button, once the playlist holds it.
+    private func playlistPlus(_ playlist: PlaylistSlotTarget) -> some View {
+        Button {
+            guard let stored = ModelLookup.playlist(playlist.playlistID, in: context) else { return }
+            store.add([draft], to: stored)
+        } label: {
+            Image(systemName: playlist.holdsTrack ? "checkmark" : "plus")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(playlist.holdsTrack ? ink.accentText : ink.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .disabled(playlist.holdsTrack)
+        .accessibilityLabel(playlist.holdsTrack
+            ? "Già in “\(playlist.playlistName)”"
+            : "Aggiungi a “\(playlist.playlistName)” e ai preferiti, senza scaricare")
+    }
+
+    /// Adds the result to Preferiti immediately, and downloads nothing.
+    private var favouritePlus: some View {
         Button {
             store.toggleFavourite(draft)
         } label: {

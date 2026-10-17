@@ -32,6 +32,64 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!--
+	Playlists exported by the Demus app: files ending in .playlist.
+
+	The type is imported, not exported: the format belongs to Demus, and Prisma only
+	says it can read it. It is declared under Prisma's own identifier because the
+	identifier Demus uses for its exports, if it declares one at all, is not known;
+	iOS matches an undeclared file to this type by its extension.
+
+	CFBundleDocumentTypes is what puts Prisma in the share sheet and in "Open in"
+	for such a file. Alternate, not Owner: Prisma is one more app that can take the
+	file, never the default one.
+	-->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.brighina.prisma.demus-playlist</string>
+			<key>UTTypeDescription</key>
+			<string>Demus playlist</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>playlist</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Demus playlist</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.brighina.prisma.demus-playlist</string>
+			</array>
+		</dict>
+	</array>
+	<!--
+	Not in place. Prisma reads a playlist file once, into memory, and never writes
+	it back, so it has no use for the original: with this set to false iOS gives it
+	a private copy in Documents/Inbox, which is still there after the sharing app
+	has deleted its temporary export, and which Prisma removes as soon as it has
+	read it. Opening in place would instead hand over a security-scoped URL into
+	another app's storage that can vanish before it is read. Stated explicitly
+	because an app that declares document types is expected to say which it is.
+	-->
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<false/>
 	<!-- Filled by CI with the short commit SHA; shown on the Settings tab. -->
 	<key>PrismaCommitSHA</key>
 	<string>$(PRISMA_COMMIT_SHA)</string>

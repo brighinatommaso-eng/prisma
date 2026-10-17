@@ -12,6 +12,12 @@ nonisolated struct Health: Decodable, Sendable {
     let trackCount: Int
     let albumCount: Int
     let totalBytesStored: Int
+    /// Whether the server's download queue is resting after YouTube's bot wall, and
+    /// until when (Unix seconds; nil while it is not). Optional, both of them: a
+    /// backend from before the cooldown existed does not send either, and its
+    /// /health must still decode.
+    let downloadCooldownActive: Bool?
+    let downloadCooldownUntil: Int?
 
     nonisolated enum CodingKeys: String, CodingKey {
         case ytdlpVersion = "ytdlp_version"
@@ -21,6 +27,17 @@ nonisolated struct Health: Decodable, Sendable {
         case trackCount = "track_count"
         case albumCount = "album_count"
         case totalBytesStored = "total_bytes_stored"
+        case downloadCooldownActive = "download_cooldown_active"
+        case downloadCooldownUntil = "download_cooldown_until"
+    }
+
+    /// When the queue starts again, or nil when it is not resting — which is also
+    /// what an older backend, a cooldown with no end, and an end already in the
+    /// past all read as.
+    var downloadCooldownEnd: Date? {
+        guard downloadCooldownActive == true, let downloadCooldownUntil else { return nil }
+        let end = Date(timeIntervalSince1970: TimeInterval(downloadCooldownUntil))
+        return end > Date() ? end : nil
     }
 }
 
@@ -100,6 +117,42 @@ nonisolated struct LibraryTrack: Decodable, Sendable, Identifiable {
         case fileBytes = "file_bytes"
         case sha256
         case updatedAt = "updated_at"
+    }
+}
+
+/// Reply to POST /import/demus: a playlist exported by the Demus app, as the server
+/// read it. The server only parses the file; nothing there changes.
+nonisolated struct DemusPlaylist: Decodable, Sendable, Equatable {
+    let name: String
+    /// Unix seconds, from the export; nil when it carried no date.
+    let createdAt: Int?
+    /// In the playlist's order. A song listed twice in the file appears twice.
+    let songs: [DemusSong]
+
+    nonisolated enum CodingKeys: String, CodingKey {
+        case name
+        case createdAt = "created_at"
+        case songs
+    }
+}
+
+nonisolated struct DemusSong: Decodable, Sendable, Equatable {
+    /// The YouTube video id: the key of a favourite, of a library track and of
+    /// POST /downloads alike.
+    let videoID: String
+    let title: String?
+    let artist: String?
+    let album: String?
+    let artworkURL: String?
+    let durationS: Int?
+
+    nonisolated enum CodingKeys: String, CodingKey {
+        case videoID = "video_id"
+        case title
+        case artist
+        case album
+        case artworkURL = "artwork_url"
+        case durationS = "duration_s"
     }
 }
 

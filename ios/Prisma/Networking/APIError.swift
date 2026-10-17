@@ -35,6 +35,10 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
     var urlErrorCode: Int? = nil
     /// The status of an HTTP error response.
     var httpStatus: Int? = nil
+    /// FastAPI's `detail` from an HTTP error body, when it sent one. Kept apart from
+    /// `details` so the one endpoint whose detail is written for the user — the
+    /// Demus import, which says what is wrong with the file — can be read by code.
+    var serverDetail: String? = nil
 
     var errorDescription: String? { title }
 
@@ -135,14 +139,18 @@ nonisolated struct APIError: Error, LocalizedError, Sendable {
             "HTTP status: \(status) (\(HTTPURLResponse.localizedString(forStatusCode: status)))",
             "Content-Type: \(contentType ?? "(none)")",
         ]
-        if let detail = fastAPIDetail(in: body) {
+        let detail = fastAPIDetail(in: body)
+        if let detail {
             lines.append("Server says: \(detail)")
         }
         lines.append("Body (\(body.count) bytes): \(preview(body, contentType: contentType))")
         if status == 404 {
             lines.append("Hint: this path does not exist on the server. Check the address points at the Prisma backend, and that the deployed backend has this endpoint.")
         }
-        return APIError(kind: .http, title: "Server returned HTTP \(status)", url: url.absoluteString, details: lines, httpStatus: status)
+        return APIError(
+            kind: .http, title: "Server returned HTTP \(status)", url: url.absoluteString,
+            details: lines, httpStatus: status, serverDetail: detail
+        )
     }
 
     static func invalidResponse(url: URL, response: URLResponse) -> APIError {

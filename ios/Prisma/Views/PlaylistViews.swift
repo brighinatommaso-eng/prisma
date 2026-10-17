@@ -51,9 +51,12 @@ struct FavouriteButton: View {
     }
 }
 
-/// Errors and notices from playlist actions, with a way to dismiss them.
+/// Errors and notices from playlist actions, with a way to dismiss them. What the
+/// collection sync did to the collection has a line of its own here, so the next
+/// playlist action cannot replace it before it has been read.
 struct PlaylistStoreMessages: View {
     @Environment(PlaylistStore.self) private var store
+    @Environment(CollectionSync.self) private var collection
     @Environment(\.prismaInk) private var ink
 
     var body: some View {
@@ -71,6 +74,16 @@ struct PlaylistStoreMessages: View {
                     .foregroundStyle(ink.secondary)
                     .padding(.top, 8)
                 DismissLink { store.clearNotice() }
+            }
+            .prismaRow()
+        }
+        if let notice = collection.notice {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(notice)
+                    .font(.footnote)
+                    .foregroundStyle(ink.secondary)
+                    .padding(.top, 8)
+                DismissLink { collection.clearNotice() }
             }
             .prismaRow()
         }
@@ -103,15 +116,20 @@ struct PlaylistsContent: View {
     @Environment(\.prismaInk) private var ink
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var entries: [PlaylistEntry]
+    /// A slot may name a track that has no library row yet, so the summary resolves
+    /// it the same way the playlist's own screen does.
+    @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var creating = false
     @State private var newName = ""
     @State private var renaming: PlaylistSummaryData?
     @State private var renameText = ""
+    @State private var confirmation: DestructiveConfirmation?
 
     var body: some View {
         // The one place this filter reads the store.
-        let summaries = Projection.playlistSummaries(playlists, entries: entries)
+        let summaries = Projection.playlistSummaries(playlists, entries: entries, tracks: tracks, favourites: favourites)
 
         Button {
             newName = ""
@@ -144,6 +162,9 @@ struct PlaylistsContent: View {
             }
             Button("Annulla", role: .cancel) {}
         }
+        .destructiveConfirmation($confirmation)
+
+        DemusImportButton()
 
         PlaylistStoreMessages()
 
@@ -162,9 +183,14 @@ struct PlaylistsContent: View {
                 PlaylistSummaryRow(summary: summary)
             }
             .swipeActions(edge: .trailing) {
-                Button("Elimina", role: .destructive) {
-                    store.delete(ModelLookup.playlists([summary.id], in: context))
+                // Asks first, like every other destructive action: the swipe only
+                // opens the question, and the playlist goes on Elimina playlist.
+                // Red by tint rather than by role: a destructive role makes the
+                // list animate the row away before the question is answered.
+                Button("Elimina") {
+                    confirmation = .deletePlaylist(summary.id, named: summary.name, store: store, context: context)
                 }
+                .tint(.red)
                 Button("Rinomina") {
                     renameText = summary.name
                     renaming = summary
@@ -180,6 +206,31 @@ struct PlaylistsContent: View {
             let resolved = ModelLookup.playlists(summaries.map(\.id), in: context)
             guard resolved.count == summaries.count else { return }
             store.movePlaylists(resolved, from: source, to: destination)
+        }
+    }
+}
+
+extension DestructiveConfirmation {
+    /// Deleting a playlist, from the swipe on its row in the list and from its own
+    /// screen's menu: the same question in both places, naming the playlist and
+    /// saying what goes and what stays.
+    ///
+    /// By id, resolved at the tap, like every action here. `then` runs after the
+    /// deletion; the playlist's own screen uses it to go back to the list.
+    static func deletePlaylist(
+        _ id: UUID,
+        named name: String,
+        store: PlaylistStore,
+        context: ModelContext,
+        then done: @escaping () -> Void = {}
+    ) -> DestructiveConfirmation {
+        DestructiveConfirmation(
+            title: "Eliminare la playlist “\(name)”?",
+            message: "Si cancellano la playlist e il suo elenco di brani, nient'altro. I brani restano nei preferiti e dove sono adesso, sul telefono o sul server: nessun file viene eliminato.",
+            button: "Elimina playlist"
+        ) {
+            store.delete(ModelLookup.playlists([id], in: context))
+            done()
         }
     }
 }
@@ -219,18 +270,30 @@ struct PlaylistDetailView: View {
     @Environment(PlaylistStore.self) private var store
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
     @Environment(\.prismaInk) private var ink
+    @Environment(\.dismiss) private var dismiss
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var allEntries: [PlaylistEntry]
+    /// A slot added from Cerca has no library row until its track is acquired, and
+    /// until then it is its favourite that knows the title: both are read here, once.
+    @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var renaming = false
     @State private var renameText = ""
     @State private var editMode: EditMode = .inactive
+    /// Which of the two sources the + opened, each its own sheet.
+    @State private var addingFrom: AddTrackSource?
+    @State private var confirmation: DestructiveConfirmation?
 
     var body: some View {
         // The one place this screen reads the store.
-        let data = Projection.playlist(id: playlistID, playlists: playlists, entries: allEntries)
+        let data = Projection.playlist(
+            id: playlistID, playlists: playlists, entries: allEntries,
+            tracks: tracks, favourites: favourites
+        )
 
         List {
             if let data {
@@ -247,17 +310,65 @@ struct PlaylistDetailView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    ForEach(AddTrackSource.allCases) { source in
+                        Button {
+                            addingFrom = source
+                        } label: {
+                            Label(source.label, systemImage: source.symbol)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Aggiungi brani")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
                     Button {
                         renameText = data?.name ?? name
                         renaming = true
                     } label: {
                         Label("Rinomina…", systemImage: "pencil")
                     }
+                    Button(role: .destructive) {
+                        // Back to the list once it is gone: this screen would
+                        // otherwise stay open on a playlist that no longer exists.
+                        let dismiss = self.dismiss
+                        confirmation = .deletePlaylist(
+                            playlistID,
+                            named: data?.name ?? name,
+                            store: store,
+                            context: context
+                        ) {
+                            dismiss()
+                        }
+                    } label: {
+                        Label("Elimina playlist", systemImage: "trash")
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                 }
                 .accessibilityLabel("Altre azioni")
             }
+        }
+        .sheet(item: $addingFrom) { source in
+            // By id: each sheet stays up on its own while this screen changes
+            // behind it, and says so if the playlist is deleted meanwhile.
+            switch source {
+            case .favourites:
+                AddFavouritesToPlaylistSheet(playlistID: playlistID)
+            case .search:
+                PlaylistSearchSheet(playlistID: playlistID)
+            }
+        }
+        .destructiveConfirmation($confirmation)
+        // A slot chosen in Cerca names its track by video id until the sync writes
+        // the library row; the moment the projection sees that row, the slot is
+        // linked to it, so it behaves like any other slot from then on.
+        .task(id: data?.awaitsAdoption ?? false) {
+            guard data?.awaitsAdoption == true,
+                  let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
+            store.adoptLibraryRows(in: playlist)
         }
         .alert("Rinomina playlist", isPresented: $renaming) {
             TextField("Nome", text: $renameText)
@@ -281,7 +392,7 @@ struct PlaylistDetailView: View {
         PlaylistStoreMessages()
 
         if data.rows.isEmpty {
-            Text("Questa playlist è vuota. Aggiungi brani da Libreria o Cerca tenendo premuto su un brano.")
+            Text("Questa playlist è vuota. Tocca + qui sopra per aggiungere brani dai preferiti o cercandoli, oppure tieni premuto su un brano in Libreria o Cerca.")
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
                 .padding(.vertical, 12)
@@ -295,6 +406,10 @@ struct PlaylistDetailView: View {
                         data: track,
                         subtitle: track.artist,
                         placement: PlaylistPlacement(playlistID: data.id, entryID: row.entryID),
+                        // A track on neither the phone nor the server — added with
+                        // the plus — asks where to keep it when tapped, as it does
+                        // in Preferiti and in Cerca, instead of doing nothing.
+                        choosesDestination: track.favouriteState == .notAcquired,
                         play: {
                             presenter.sourceName = data.name
                             play(fromEntryAt: index)
@@ -306,7 +421,11 @@ struct PlaylistDetailView: View {
                             .frame(width: 18, alignment: .leading)
                     }
                 } else {
-                    MissingEntryRow(playlistID: data.id, entryID: row.entryID)
+                    MissingEntryRow(
+                        playlistID: data.id,
+                        entryID: row.entryID,
+                        reason: row.missing ?? .leftTheLibrary
+                    )
                 }
             }
             .prismaRow()
@@ -315,12 +434,14 @@ struct PlaylistDetailView: View {
             move(rows: data.rows, from: source, to: destination)
         }
 
-        if data.missingCount > 0 {
+        // Two different kinds of missing, and only one of them is a download this
+        // screen can start: the server has to have the file.
+        if data.downloadableCount > 0 {
             Button {
                 guard let playlist = ModelLookup.playlist(playlistID, in: context) else { return }
                 store.downloadMissing(in: playlist)
             } label: {
-                Text(data.missingCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(data.missingCount) brani mancanti")
+                Text(data.downloadableCount == 1 ? "Scarica 1 brano mancante" : "Scarica \(data.downloadableCount) brani mancanti")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(ink.accentText)
                     .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
@@ -328,6 +449,18 @@ struct PlaylistDetailView: View {
             }
             .buttonStyle(.plain)
             .prismaRow()
+        }
+
+        // Not what Scarica can fetch, so said apart from it — and pointing at the
+        // rows themselves, which ask where to keep the track when tapped.
+        if data.notAcquiredCount > 0 {
+            Text(data.notAcquiredCount == 1
+                 ? "1 brano non è né sul telefono né sul server: toccalo per scegliere dove scaricarlo."
+                 : "\(data.notAcquiredCount) brani non sono né sul telefono né sul server: tocca ciascuno per scegliere dove scaricarlo.")
+                .font(.caption)
+                .foregroundStyle(ink.secondary)
+                .padding(.vertical, 8)
+                .prismaRow()
         }
     }
 
@@ -357,16 +490,19 @@ struct PlaylistDetailView: View {
                 problemKey: "playlist-\(data.id.uuidString)"
             ))
 
-            PlayShufflePair(isEnabled: !data.playable.isEmpty) {
-                guard let first = data.playable.first else { return }
+            // What can play now, which with the server answering includes the
+            // entries that are only on it.
+            let playable = data.playable(ServerState(reachability.isReachable))
+            PlayShufflePair(isEnabled: !playable.isEmpty) {
+                guard let first = playable.first else { return }
                 // Riproduci plays in playlist order, even if shuffle was left on.
                 playback.setShuffle(false)
                 presenter.sourceName = data.name
                 play(fromEntryAt: first)
             } onShuffle: {
                 // Starts shuffled: shuffle on first, so the new queue is built
-                // shuffled from a random downloaded entry.
-                guard let start = data.playable.randomElement() else { return }
+                // shuffled from a random playable entry.
+                guard let start = playable.randomElement() else { return }
                 playback.setShuffle(true)
                 presenter.sourceName = data.name
                 play(fromEntryAt: start)
@@ -393,11 +529,14 @@ struct PlaylistDetailView: View {
     }
 }
 
-/// An entry whose track has left the library. Not a track row: there is no track
-/// left to act on, only the entry to remove.
+/// A slot with nothing left to show. Not a track row: there is no track to act on,
+/// only the slot to remove. `reason` says which of the two ways it happened — the
+/// library row went, or the slot names a video id that is in neither the library nor
+/// Preferiti.
 private struct MissingEntryRow: View {
     let playlistID: UUID
     let entryID: UUID
+    let reason: MissingEntryReason
 
     @Environment(PlaylistStore.self) private var store
     @Environment(\.modelContext) private var context
@@ -405,7 +544,7 @@ private struct MissingEntryRow: View {
 
     var body: some View {
         HStack {
-            Text("Brano non più in libreria")
+            Text(reason.text)
                 .font(.subheadline)
                 .foregroundStyle(ink.secondary)
             Spacer(minLength: 0)
@@ -448,12 +587,15 @@ struct AddToPlaylistSheet: View {
     @Query(sort: \Playlist.sortPosition) private var playlists: [Playlist]
     @Query private var tracks: [StoredTrack]
     @Query private var entries: [PlaylistEntry]
+    @Query private var favourites: [FavouriteTrack]
 
     @State private var newName = ""
 
     var body: some View {
         // The one place this sheet reads the store.
-        let data = Projection.addToPlaylist(trackID: trackID, tracks: tracks, playlists: playlists, entries: entries)
+        let data = Projection.addToPlaylist(
+            trackID: trackID, tracks: tracks, playlists: playlists, entries: entries, favourites: favourites
+        )
 
         NavigationStack {
             List {
@@ -540,12 +682,13 @@ struct AddToPlaylistSheet: View {
 /// Preferiti: the collection. A flat list of tracks, newest favourite first, with no
 /// album grouping — each row's icon is the cover of the album its track belongs to.
 ///
-/// A favourite is in one of three states and the row says which: on the phone, where
-/// it plays; on the server, where it cannot be played because Prisma does not stream
-/// yet; and not acquired, where it is on neither. The last two are still real rows
-/// with a real title, because a favourite added from Cerca with the plus downloads
-/// nothing.
+/// A favourite is in one of three states and the row says which: on the phone,
+/// where it plays with or without a network; on the server, where it plays by
+/// streaming while the server answers and not at all when it does not; and not
+/// acquired, where it is on neither. The last two are still real rows with a real
+/// title, because a favourite added from Cerca with the plus downloads nothing.
 struct FavouritesContent: View {
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.prismaInk) private var ink
     @Query private var favourites: [FavouriteTrack]
     @Query private var tracks: [StoredTrack]
@@ -554,6 +697,7 @@ struct FavouritesContent: View {
     var body: some View {
         // The one place this filter reads the store.
         let rows = Projection.favourites(favourites: favourites, tracks: tracks, acquisitions: acquisitions)
+        let server = ServerState(reachability.isReachable)
 
         if !rows.isEmpty {
             PlayShuffleButtons(tracks: rows, sourceName: "Preferiti")
@@ -565,6 +709,15 @@ struct FavouritesContent: View {
 
         PlaylistStoreMessages()
 
+        // Said only when it changes what the user can do: some favourites are only
+        // on the server, and the server is not answering, so those rows will not
+        // play until it does.
+        if server == .unreachable, rows.contains(where: { $0.isOnServerOnly }) {
+            ProblemBlock(reachability.statusLine)
+                .prismaRow()
+                .listRowSeparator(.hidden)
+        }
+
         if rows.isEmpty {
             Text("Nessun preferito. Cerca un brano e tocca + per aggiungerlo qui, oppure la freccia per scaricarlo subito.")
                 .font(.subheadline)
@@ -575,12 +728,12 @@ struct FavouritesContent: View {
         }
 
         ForEach(rows) { row in
-            FavouriteRow(data: row)
+            FavouriteRow(data: row, server: server)
                 .prismaRow()
         }
 
         if !rows.isEmpty {
-            Text(Self.summary(of: rows))
+            Text(Self.summary(of: rows, server: server))
                 .font(.caption)
                 .foregroundStyle(ink.secondary)
                 .padding(.top, 20)
@@ -591,14 +744,20 @@ struct FavouritesContent: View {
     }
 
     /// How the collection is spread over the three states, counted from the values
-    /// the projection produced.
-    static func summary(of rows: [TrackRowData]) -> String {
+    /// the projection produced, and what the server's state makes of it.
+    static func summary(of rows: [TrackRowData], server: ServerState) -> String {
         let onPhone = rows.filter { $0.favouriteState == .onPhone }.count
         let onServer = rows.filter { $0.favouriteState == .onServer }.count
         let missing = rows.filter { $0.favouriteState == .notAcquired }.count
         var parts = [Formatting.trackCount(rows.count) + " nei preferiti"]
         if onPhone > 0 { parts.append("\(onPhone) sul telefono") }
-        if onServer > 0 { parts.append("\(onServer) solo sul server") }
+        if onServer > 0 {
+            switch server {
+            case .reachable: parts.append("\(onServer) in streaming dal server")
+            case .unreachable: parts.append("\(onServer) solo sul server, non raggiungibile")
+            case .unknown: parts.append("\(onServer) solo sul server")
+            }
+        }
         if missing > 0 { parts.append("\(missing) non ancora scaricati") }
         return parts.joined(separator: " · ") + "."
     }
@@ -610,6 +769,9 @@ struct FavouritesContent: View {
 /// where a missing track should go rather than starting a download on its own.
 private struct FavouriteRow: View {
     let data: TrackRowData
+    /// Read once by the screen above and handed down, so every row on this screen
+    /// says the same thing about the server.
+    let server: ServerState
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
 
@@ -620,9 +782,9 @@ private struct FavouriteRow: View {
             subtitleLineLimit: 2,
             choosesDestination: true
         ) {
-            FavouriteArtwork(data: data)
+            FavouriteArtwork(data: data, server: server)
         } trailing: {
-            FavouriteStateSlot(data: data)
+            FavouriteStateSlot(data: data, server: server)
         }
     }
 
@@ -640,12 +802,7 @@ private struct FavouriteRow: View {
         case .notDownloaded, .downloaded, .failed, .cancelled:
             break
         }
-        let lead: String?
-        switch data.favouriteState {
-        case .onPhone: lead = nil
-        case .onServer: lead = "Sul server"
-        case .notAcquired: lead = "Non ancora scaricato"
-        }
+        let lead = data.favouriteState == .onPhone ? nil : data.favouriteState.label(server)
         return [lead, data.artist].compactMap { $0 }.joined(separator: " · ")
     }
 }
@@ -659,6 +816,7 @@ private struct FavouriteRow: View {
 /// URL search returned, which is loaded the way Cerca loads its thumbnails.
 private struct FavouriteArtwork: View {
     let data: TrackRowData
+    let server: ServerState
 
     @Environment(AppSettings.self) private var settings
     @Environment(\.prismaInk) private var ink
@@ -677,7 +835,9 @@ private struct FavouriteArtwork: View {
                 CoverArt(cover: data.cover, side: side, cornerRadius: 10)
             }
         }
-        .opacity(data.favouriteState == .onPhone ? 1 : 0.5)
+        // Full strength for a file on this phone, nearly full for one the server
+        // will stream, dim for one that nothing can play right now.
+        .opacity(data.favouriteState.canPlay(server) ? (data.isOnPhone ? 1 : 0.8) : 0.5)
         .overlay(alignment: .bottomTrailing) {
             badge
         }
@@ -718,6 +878,7 @@ private struct FavouriteArtwork: View {
 /// arrow that asks where the copy should go instead of starting one.
 private struct FavouriteStateSlot: View {
     let data: TrackRowData
+    let server: ServerState
 
     @Environment(AcquisitionCoordinator.self) private var acquisitions
     @Environment(\.prismaInk) private var ink
@@ -728,17 +889,25 @@ private struct FavouriteStateSlot: View {
     var body: some View {
         content
             .sheet(item: $destination) { request in
-                DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title))
+                DestinationSheet(request: request, reason: data.favouriteState.reason(title: data.title, server: server))
             }
     }
 
     @ViewBuilder
     private var content: some View {
-        if let record = data.acquisition, record.isActive {
+        if let record = data.acquisition, record.isActive,
+           AcquisitionText.isWaitingForServer(record, pollFailures: acquisitions.pollFailures) {
+            // Held up by the server being away: standing still, so nothing turns.
+            Image(systemName: "pause.fill")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(ink.secondary)
+                .frame(width: 44, height: 44)
+                .accessibilityLabel("In attesa: il server non è raggiungibile")
+        } else if let record = data.acquisition, record.isActive {
             ProgressRing(fraction: record.stage == .onServer ? record.serverProgress : nil, color: ink.accent, side: 18)
                 .frame(width: 44, height: 44)
                 .accessibilityLabel(AcquisitionText.phase(of: record, pollFailures: acquisitions.pollFailures))
-        } else if data.isPlayable || data.isBusy || (data.downloadState == .failed && data.presence == .inLibrary) {
+        } else if data.isOnPhone || data.isBusy || (data.downloadState == .failed && data.presence == .inLibrary) {
             // On the phone, arriving, or a device download to retry: the icon every
             // other screen shows, doing what it does everywhere.
             TrackStateSlot(data: data)
@@ -808,22 +977,26 @@ struct PlayShuffleButtons: View {
 
     @Environment(PlaybackEngine.self) private var playback
     @Environment(PlayerPresenter.self) private var presenter
+    @Environment(ServerReachability.self) private var reachability
     @Environment(\.modelContext) private var context
 
     var body: some View {
-        let playable = tracks.indices.filter { tracks[$0].downloadState == .downloaded }
+        // Enabled by what can play now; the engine decides again at the tap, over
+        // the tracks it reads back then, so a server that went away in between
+        // simply produces a shorter queue rather than a dead button.
+        let playable = tracks.contains { $0.canPlay(ServerState(reachability.isReachable)) }
         // The buttons are tapped long after this body, so their closures keep the
         // ids and read the tracks back then.
         let ids = tracks.map(\.id)
-        PlayShufflePair(isEnabled: !playable.isEmpty) {
+        PlayShufflePair(isEnabled: playable) {
             let live = ModelLookup.tracks(ids, in: context)
-            guard let first = live.firstIndex(where: { $0.downloadState == .downloaded }) else { return }
+            guard let first = live.firstIndex(where: { playback.canPlayNow($0) }) else { return }
             playback.setShuffle(false)
             presenter.sourceName = sourceName
             playback.play(playlistTracks: live, startingAt: first)
         } onShuffle: {
             let live = ModelLookup.tracks(ids, in: context)
-            guard let start = live.indices.filter({ live[$0].downloadState == .downloaded }).randomElement() else { return }
+            guard let start = live.indices.filter({ playback.canPlayNow(live[$0]) }).randomElement() else { return }
             playback.setShuffle(true)
             presenter.sourceName = sourceName
             playback.play(playlistTracks: live, startingAt: start)

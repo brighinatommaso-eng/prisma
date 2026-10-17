@@ -12,12 +12,15 @@ final class AppModel {
     struct Services {
         let container: ModelContainer
         let downloads: DownloadManager
+        let reachability: ServerReachability
         let sync: LibrarySync
         let playback: PlaybackEngine
         let theme: ThemeEngine
         let playlists: PlaylistStore
         let acquisitions: AcquisitionCoordinator
         let deletion: TrackDeletion
+        let collection: CollectionSync
+        let importer: DemusImporter
     }
 
     let settings: AppSettings
@@ -29,31 +32,79 @@ final class AppModel {
         let settings = AppSettings()
         self.settings = settings
         do {
-            // FavouriteTrack is a new entity and the fields added to StoredTrack,
-            // SyncRecord and PendingAcquisition are optional or carry a default, so
-            // the library already on the phone opens with a lightweight migration
-            // and nothing in it is rewritten.
+            // FavouriteTrack and PlaylistImport are new entities and the fields added
+            // to StoredTrack, SyncRecord and PendingAcquisition are optional or carry
+            // a default, so the library already on the phone opens with a
+            // lightweight migration and nothing in it is rewritten.
             let container = try ModelContainer(
                 for: StoredAlbum.self, StoredTrack.self, SyncRecord.self,
-                Playlist.self, PlaylistEntry.self, PendingAcquisition.self, FavouriteTrack.self
+                Playlist.self, PlaylistEntry.self, PendingAcquisition.self, FavouriteTrack.self,
+                PlaylistImport.self
             )
             let downloads = DownloadManager(context: container.mainContext, settings: settings)
             let sync = LibrarySync(context: container.mainContext, settings: settings, downloads: downloads)
-            settings.onAddressChange = { [downloads] previous, new in
+            let reachability = ServerReachability(settings: settings)
+            let collection = CollectionSync(context: container.mainContext, settings: settings, reachability: reachability)
+            settings.onAddressChange = { [downloads, reachability, collection] previous, new in
                 downloads.serverAddressChanged(from: previous, to: new)
+                // The recorded answer was about a different server.
+                reachability.addressChanged()
+                // The same server by another name: nothing the collection remembers
+                // is dropped, but a pass in flight must not write what the old
+                // client hears back.
+                collection.addressChanged()
             }
-            let playback = PlaybackEngine(context: container.mainContext, downloads: downloads)
+            let playback = PlaybackEngine(
+                context: container.mainContext, settings: settings,
+                downloads: downloads, reachability: reachability
+            )
             sync.playback = playback
             let theme = ThemeEngine(playback: playback)
             let playlists = PlaylistStore(context: container.mainContext, downloads: downloads, playback: playback)
+            playlists.onCollectionChange = { [collection] in collection.localChanged() }
             // Created here but idle: it only runs once RootView reports the app is
             // in the foreground, never during a background launch.
             let acquisitions = AcquisitionCoordinator(
                 context: container.mainContext, settings: settings, sync: sync,
-                downloads: downloads, playlists: playlists
+                downloads: downloads, playlists: playlists, reachability: reachability
             )
+            // The single wire between "is the server there" and "what can play".
+            // Only a real change arrives here, so a queue is never reconsidered
+            // because a probe merely repeated itself.
+            reachability.onChange = { [playback, collection, acquisitions, downloads] reachable in
+                playback.serverReachabilityChanged(reachable: reachable)
+                // Changes made while the server was away are pushed now, and the
+                // acquisitions left where they were go on from there. Not a retry
+                // timer: this is the server coming back.
+                if reachable {
+                    collection.serverBecameReachable()
+                    // The device downloads the outage failed, before the chain that
+                    // hands new ones over: the revival marks its tracks as being
+                    // checked first, so the coordinator's pass finds them taken and
+                    // leaves them alone, rather than the two meeting on one track.
+                    downloads.serverBecameReachable()
+                    acquisitions.serverBecameReachable()
+                }
+            }
+            // A device download that could not reach the server says so here, so
+            // the answer on file turns to "unreachable" and the server's return is
+            // then a change — which is the only thing that revives it.
+            downloads.onServerUnreachable = { [reachability] in
+                reachability.retry()
+            }
+            // Starts the network-path watch, whose first update is the first probe
+            // of the process. Nothing here repeats on a schedule. Started only now,
+            // with everything the wire above reaches in existence.
+            reachability.start()
             let deletion = TrackDeletion(context: container.mainContext, settings: settings, sync: sync)
-            services = Services(container: container, downloads: downloads, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion)
+            // Idle until a file arrives. It writes through the two services above, so
+            // an import is the same playlist change and the same acquisitions a hand
+            // would have made, fifty at a time.
+            let importer = DemusImporter(
+                context: container.mainContext, settings: settings, playlists: playlists,
+                acquisitions: acquisitions, downloads: downloads
+            )
+            services = Services(container: container, downloads: downloads, reachability: reachability, sync: sync, playback: playback, theme: theme, playlists: playlists, acquisitions: acquisitions, deletion: deletion, collection: collection, importer: importer)
             playlists.removeOrphanedEntries()
             // Preferiti is now the only place a track is browsed, so everything
             // already on this phone becomes a favourite once. Runs before any view

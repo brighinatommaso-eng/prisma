@@ -60,6 +60,25 @@ enum FailureCause: String, CaseIterable {
         }
     }
 
+    /// Failures that mean nothing more than "the server was not there": the
+    /// pre-flight or the transfer could not reach it, or iOS never got a byte.
+    /// These, and only these, are started again by themselves when
+    /// `ServerReachability` reports the server back, and until then they read as
+    /// waiting rather than failed.
+    ///
+    /// `noAddress` is not one of them. The server coming back changes nothing for
+    /// a download that had no address to go to; saving an address is what revives
+    /// it, and that is `isAddressRelated`.
+    var isReachabilityRelated: Bool {
+        switch self {
+        case .unreachable, .neverStarted:
+            return true
+        case .noAddress, .httpStatus, .verification, .storage, .missingServerData, .serverFileChanged,
+             .fileMissing, .systemCancelled, .other:
+            return false
+        }
+    }
+
     /// Why an address change leaves a failure of this kind alone.
     var notRevivedReason: String {
         switch self {
@@ -174,12 +193,12 @@ final class StoredTrack {
     /// From a failed or interrupted transfer, so a retry can continue from there.
     @Attribute(.externalStorage) var resumeData: Data?
 
-    /// Mirror of `FavouriteTrack`, kept in step by `PlaylistStore`.
+    /// Written for older builds only. Nothing in this build reads it.
     ///
-    /// The collection itself is `FavouriteTrack`, keyed by video id, because a
-    /// favourite may exist with no track anywhere. This flag stays because every
-    /// row projection already reads it, and because a build installed before the
-    /// collection existed still reads favourites from here.
+    /// Whether a track is a favourite is whether a `FavouriteTrack` exists for its
+    /// video id, and that is the only thing any screen or action asks. This column
+    /// is still kept in step by `PlaylistStore`, because a build installed before
+    /// the collection existed reads its favourites from here.
     var favouritedAt: Date?
 
     /// When this phone asked the server to drop its copy, so that this phone could
@@ -202,19 +221,18 @@ final class StoredTrack {
     /// owns it once more.
     var serverDroppedAt: Date?
 
-    /// Every playlist entry pointing at this track. Deleting the track (as a sync
-    /// does when the server removes it) deletes these entries with it, so no
-    /// playlist can keep a reference to a track that no longer exists.
-    @Relationship(deleteRule: .cascade, inverse: \PlaylistEntry.track)
+    /// Every playlist entry pointing at this track.
+    ///
+    /// Nullify, not cascade: a slot outlives its track. When the library drops a
+    /// track, `LibrarySync` first makes sure each of these slots carries the video
+    /// id and lets go of the row, so the slot stays in its playlist as a line that
+    /// resolves again if the track comes back. Only the user removes a slot.
+    @Relationship(deleteRule: .nullify, inverse: \PlaylistEntry.track)
     var playlistEntries: [PlaylistEntry] = []
 
     init(serverID: String) {
         self.serverID = serverID
         self.downloadStateRaw = DownloadState.notDownloaded.rawValue
-    }
-
-    var isFavourite: Bool {
-        favouritedAt != nil
     }
 
     var downloadState: DownloadState {
@@ -250,8 +268,9 @@ final class StoredTrack {
 ///
 /// The video id is the same id `StoredTrack.serverID` uses, so a favourite and a
 /// library track are matched by comparing two strings and reading neither row.
-/// Nothing in the sync writes here: the server has no idea what is favourited, and
-/// deleting a track from the server leaves its favourite behind on purpose.
+/// The library sync never writes here, and deleting a track from the server leaves
+/// its favourite behind on purpose. `CollectionSync` keeps the favourites on the
+/// server as well, as part of the collection.
 @Model
 final class FavouriteTrack {
     @Attribute(.unique) var videoID: String
@@ -299,7 +318,7 @@ struct FavouriteDraft: Equatable, Sendable {
     let durationS: Int?
 }
 
-/// A user playlist, stored only on this iPhone.
+/// A user playlist. Kept on the server as well, by `CollectionSync`.
 @Model
 final class Playlist {
     @Attribute(.unique) var id: UUID
@@ -324,6 +343,24 @@ final class Playlist {
 
 /// One slot in a playlist. Its own row, so the same track can appear more than
 /// once, and the order is the stored `position`, never insertion time.
+///
+/// A slot names its track twice over, and the two are not the same thing:
+///
+/// - `track` is the library row, when there is one. It carries the download state
+///   and the album. When the library drops the track the slot lets go of it and
+///   stays, named by its `videoID` alone.
+/// - `videoID` is the YouTube video id, which is what `FavouriteTrack` is keyed by
+///   and what `StoredTrack.serverID` holds. It is the *name* of the track, and it
+///   exists even when nothing has been downloaded anywhere.
+///
+/// The second was added because a playlist can now be filled from Cerca, and a
+/// result chosen there has no library row at all — exactly the case `FavouriteTrack`
+/// was created for. A slot like that carries only the id until the track is
+/// acquired; `PlaylistStore.entries(of:)` links it to its library row the first time
+/// it sees one, and from that moment it behaves like every other slot.
+///
+/// Optional because entries written by earlier builds have no id recorded; they
+/// have a `track`, and everything that needs an id falls back to its `serverID`.
 @Model
 final class PlaylistEntry {
     @Attribute(.unique) var id: UUID
@@ -331,6 +368,7 @@ final class PlaylistEntry {
     var addedAt: Date
     var playlist: Playlist?
     var track: StoredTrack?
+    var videoID: String?
 
     init(position: Int, playlist: Playlist, track: StoredTrack) {
         self.id = UUID()
@@ -338,6 +376,23 @@ final class PlaylistEntry {
         self.addedAt = Date()
         self.playlist = playlist
         self.track = track
+        self.videoID = track.serverID
+    }
+
+    /// A slot for a track that is in no library yet: chosen from Cerca, added to
+    /// Preferiti in the same action, and downloaded whenever the user decides.
+    init(position: Int, playlist: Playlist, videoID: String) {
+        self.id = UUID()
+        self.position = position
+        self.addedAt = Date()
+        self.playlist = playlist
+        self.track = nil
+        self.videoID = videoID
+    }
+
+    /// What this slot names, however it was created.
+    var trackID: String? {
+        videoID ?? track?.serverID
     }
 }
 
@@ -354,5 +409,54 @@ final class SyncRecord {
     /// Kept here because this row already exists exactly once.
     var favouritesMigratedAt: Date?
 
+    /// The server's version of the favourites and playlists this phone last agreed
+    /// with. nil means it never has: the next sync is the first one, which merges
+    /// rather than replaces.
+    var collectionVersion: Int?
+    /// Fingerprint of the favourites and playlists as they were when they last
+    /// matched the server. What the phone holds now differing from this is what
+    /// "pending" means, so there is no flag to fall out of step with the data.
+    var collectionSyncedDigest: String?
+    /// Digests of the collections pushed since the server last confirmed one,
+    /// written before each request leaves. An upload can be stored by the server
+    /// while its answer is lost; when the server later shows a newer version, this
+    /// is how the phone knows that version is its own and not a conflict.
+    var collectionSentDigests: [String]?
+    /// When a collection sync last finished without a failure.
+    var collectionLastSyncAt: Date?
+
     init() {}
+}
+
+/// One import of a playlist file, kept while its tracks are still arriving.
+///
+/// An import of fifty tracks takes the server the better part of an hour, and
+/// longer when YouTube makes it rest, so the app is closed and reopened long
+/// before it ends. This is what lets the Downloads tab still say
+/// "Importazione «Sad»: 12 di 53" afterwards: which tracks belonged to it, under
+/// which name, since when.
+///
+/// It records what was asked and nothing about how it is going. The counts are
+/// worked out each time from the tracks and the acquisitions themselves
+/// (`Projection.downloads`), so there is no counter here to fall out of step with
+/// them. Deleted when every track is on the phone, or when the user closes the
+/// line of an import that ended with some tracks not downloaded.
+///
+/// A new entity, so the store an earlier build wrote opens with a lightweight
+/// migration.
+@Model
+final class PlaylistImport {
+    @Attribute(.unique) var id: UUID
+    /// The playlist's name as it was imported, for the line.
+    var name: String
+    /// The video ids of the import, each once, in the file's order.
+    var videoIDs: [String]
+    var startedAt: Date
+
+    init(name: String, videoIDs: [String]) {
+        self.id = UUID()
+        self.name = name
+        self.videoIDs = videoIDs
+        self.startedAt = Date()
+    }
 }

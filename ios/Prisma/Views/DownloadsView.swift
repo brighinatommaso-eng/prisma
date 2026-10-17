@@ -6,19 +6,27 @@ import SwiftUI
 ///
 /// One list from the tap in Search to a playable track: acquisitions still in the
 /// server phase come first in "In corso", followed by device downloads, and each
-/// row says which phase it is in.
+/// row says which phase it is in. Above them, one line per imported playlist whose
+/// tracks are still arriving.
 struct DownloadsView: View {
     @Environment(DownloadManager.self) private var downloads
+    @Environment(DemusImporter.self) private var importer
     @Query(sort: \PendingAcquisition.createdAt) private var acquisitions: [PendingAcquisition]
     @Environment(\.prismaInk) private var ink
 
     @Query private var tracks: [StoredTrack]
+    @Query private var favourites: [FavouriteTrack]
+    @Query(sort: \PlaylistImport.startedAt) private var imports: [PlaylistImport]
 
     var body: some View {
         // The one place this screen reads the store.
-        let data = Projection.downloads(tracks: tracks, acquisitions: acquisitions)
-        let inProgress = data.tracks(in: [.downloading, .queued])
-        let failed = data.tracks(in: [.failed])
+        let data = Projection.downloads(
+            tracks: tracks, acquisitions: acquisitions, favourites: favourites, imports: imports
+        )
+        // A device download the server's absence stopped is started again when the
+        // server is back, so it belongs with what is on its way, not with what failed.
+        let inProgress = data.tracks(in: [.downloading, .queued]) + data.tracks(in: [.failed]).filter(\.isWaitingForServer)
+        let failed = data.tracks(in: [.failed]).filter { !$0.isWaitingForServer }
         let cancelled = data.tracks(in: [.cancelled])
         let downloaded = data.tracks(in: [.downloaded])
         let acquiring = data.acquisitions.filter(\.isActive)
@@ -28,6 +36,11 @@ struct DownloadsView: View {
             AcquisitionCoordinatorError()
                 .prismaRow()
                 .listRowSeparator(.hidden)
+
+            ForEach(data.imports) { line in
+                ImportProgressLine(data: line)
+                    .prismaRow()
+            }
 
             if data.isEmpty {
                 Text("Nessun download. Tocca un brano in Cerca, o la freccia accanto a un brano in Libreria.")
@@ -50,6 +63,12 @@ struct DownloadsView: View {
         }
         .prismaList()
         .navigationTitle("Download")
+        // An import whose every track is on the phone has no line left to show; its
+        // record is forgotten the moment the projection sees that. By id, like every
+        // action: the projection's values, never the records themselves.
+        .task(id: data.completedImportIDs) {
+            importer.forget(data.completedImportIDs)
+        }
     }
 
     @ViewBuilder
@@ -132,6 +151,9 @@ private struct DownloadRow: View {
 
     /// Device-phase rows say so, to read apart from acquisitions still on the server.
     private var subtitle: String {
+        if data.isWaitingForServer, downloads.preflights[data.id] == nil {
+            return "In attesa · server non raggiungibile"
+        }
         if data.downloadState == .failed, downloads.preflights[data.id] == nil {
             return "Download sul telefono non riuscito"
         }
