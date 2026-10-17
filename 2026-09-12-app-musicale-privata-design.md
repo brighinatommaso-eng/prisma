@@ -16,6 +16,8 @@ Un'app musicale personale su un solo iPhone, con libreria offline. L'utente cerc
 - Scaricare l'audio sul server, taggarlo, e trasferirlo sull'iPhone.
 - Riprodurre offline con controlli di sistema (lock screen, AirPods, Centro di Controllo).
 - Riprodurre in streaming dal proprio server i brani non ancora scaricati, con gli stessi controlli di sistema, e tornare ai soli brani locali quando il server non è raggiungibile.
+- Importare le playlist esportate dall'app Demus: ricreare la playlist con lo stesso nome e
+  lo stesso ordine, mettere ogni brano nei preferiti e scaricarlo su server e iPhone.
 - Funzionare identica in casa e fuori, senza esporre porte su internet.
 - Avere un'interfaccia curata, conforme a Liquid Glass, con tema configurabile.
 
@@ -142,7 +144,9 @@ jobs(
 | `GET` | `/library/delta?since=` | solo le modifiche dal timestamp — sincronizzazione incrementale |
 | `GET` | `/tracks/{id}/file` | il file audio, **con supporto Range** |
 | `GET` | `/tracks/{id}/artwork` | JPEG copertina |
-| `GET` | `/health` | versione yt-dlp, spazio disco, numero brani |
+| `GET` | `/health` | versione yt-dlp, spazio disco, numero brani, `missing_files` (§3.8) |
+| `POST` | `/import/demus` | body = file `.playlist` grezzo → playlist letta, nessuna scrittura (§3.9) |
+| `POST` | `/repair` | riaccoda i brani con file mancante o SHA errato; `?dry_run=true` elenca soltanto (§3.8) |
 
 **Range — verificato:** `FileResponse` di Starlette **1.6.0 implementa le richieste Range** (`_parse_range_header`, `_handle_single_range`, `_handle_multiple_ranges`), quindi non serve implementarlo a mano. Misurato sul deploy, non dedotto dalla documentazione: `curl -r 0-1023` risponde `206` con `content-range: bytes 0-1023/7069872` e 1024 byte esatti; una richiesta senza header `Range` risponde `200` con il file intero; scaricando lo stesso file in due metà e concatenandole, lo sha256 coincide con quello nel database. `accept-ranges: bytes` è annunciato sia sul 200 sia sul 206. Resta valido il motivo per cui serve: senza Range un download interrotto al 90% ripartirebbe da zero. Da riverificare se la versione di Starlette cambia.
 
@@ -162,6 +166,48 @@ Mitigazione, tre livelli:
 I file finiscono in `/mnt/nas/musica/`, montato nel container. Puntando **Navidrome** (già disponibile nell'app store di CasaOS) alla stessa cartella si ottiene gratis un player web dal PC, senza scrivere una riga di codice in più.
 
 La rete è già risolta: Tailscale è installato su entrambi i dispositivi. L'app punta a `http://your-server:8000` via MagicDNS e funziona identica ovunque. Nessuna porta aperta sul Fritz!Box, nessun DDNS, nessun certificato.
+
+### 3.8 Integrità della libreria e backup
+
+Il catalogo e i file audio possono divergere: l'11 ottobre 2026 una cancellazione manuale
+dal file manager di CasaOS ha tolto tutti i file sotto la cartella musica tranne `.prisma`,
+e il catalogo ha continuato a elencare brani senza file. Da allora:
+
+- **`missing_files` in `/health`** — quanti brani vivi hanno il file assente o uno SHA-256
+  diverso da quello registrato. Calcolato con gli altri probe e la stessa cache di 60 s;
+  un file si riesamina solo quando cambiano dimensione o data di modifica. `null` quando non
+  si sa, mai `0` per finta.
+- **`POST /repair`** — riaccoda quei brani sul worker normale: concorrenza 1, pausa tra i
+  download, cooldown sul muro anti-bot, nessun retry. Parte solo se chiamato: mai all'avvio,
+  mai a tempo, mai da `/health`.
+- **Auto-riparazione** — `POST /downloads` tratta un brano in catalogo con il file mancante
+  come assente e lo accoda invece di rispondere `exists`.
+- **Percorsi** — due video id diversi non finiscono mai sullo stesso file: il secondo prende
+  `{Titolo} [{video_id}].m4a`, e il catalogo registra quel percorso.
+- **Backup di `.prisma`** — ogni notte uno script sull'host copia catalogo e
+  `collection.json` fuori dalla cartella musica e tiene le ultime 7 copie. La copia del
+  database SQLite usa la API di backup e viene verificata prima di contare. Il percorso sta
+  nel `.env`, mai nei file del repository.
+- **Avviso visibile** — un file `LEGGIMI-NON-CANCELLARE.txt` nella cartella musica, perché
+  compaia in qualunque file manager che la apre.
+
+### 3.9 Import da Demus
+
+Il file `.playlist` di Demus è JSON compresso xz: titolo, data e i brani in ordine. L'`id`
+di ogni brano è il videoId YouTube, la chiave di Prisma, quindi la corrispondenza è esatta e
+mai approssimata. `albumId` non è affidabile (a volte è un id di canale) e si ignora: i
+metadati dell'album li risolve la pipeline di download come per ogni altro brano.
+
+`POST /import/demus` legge soltanto: nessun download, nessuna scrittura. Dimensione compressa
+e decompressa hanno un limite, controllato mentre si legge, così un file ostile non esaurisce
+la memoria. Un file illeggibile risponde 422 con il motivo.
+
+Un import accoda decine di download, il volume che aveva già fatto scattare il muro anti-bot
+di YouTube. Il worker resta a concorrenza 1, lascia 12–20 s tra un download e l'altro, e
+quando un job incontra il muro anti-bot quel job fallisce senza retry e il resto della coda
+si ferma per circa 30 minuti. La fine del cooldown è salvata nel database, perché un redeploy
+è proprio ciò che segue di solito un blocco. `/health` dice se un cooldown è attivo e quando
+finisce.
 
 ---
 
@@ -198,6 +244,27 @@ Application Support/
 Non `Documents` (visibile in File e sincronizzata), non `Caches` (il sistema la cancella quando lo spazio scarseggia, e perderesti la libreria senza preavviso).
 
 ---
+
+### 4.4 Import da Demus sull'iPhone
+
+Il file arriva dal foglio di condivisione di Demus (Prisma dichiara il tipo `.playlist`) o dal
+pulsante "Importa da Demus" in Libreria → Playlist. Un'anteprima mostra nome, numero di
+brani, quanti sono già nei preferiti e la durata totale; finché non si conferma non cambia
+nulla. Alla conferma, tutto salvato prima in locale:
+
+1. La playlist con lo stesso nome e lo stesso ordine, ripetizioni comprese. Se ne esiste già
+   una con quel nome si chiede se aggiornarla (aggiungendo solo le voci mancanti) o crearne
+   una nuova.
+2. Ogni brano nei preferiti, con la durata di Demus, senza duplicati.
+3. Ogni brano non ancora sul telefono acquisito con destinazione Entrambi, attraverso la
+   catena di acquisizione esistente; quelli già sul server ricevono solo il download sul
+   telefono.
+4. Prima di partire, un controllo dello spazio libero stimato dalla durata.
+
+In Download una riga per import ("Importazione «Sad»: 12 di 53") spiega anche un cooldown
+di YouTube e l'ora di ripresa. Un server irraggiungibile non fa fallire nulla: le richieste
+aspettano e ripartono quando `ServerReachability` lo vede tornare. L'import non avvia mai la
+riproduzione.
 
 ## 5. Design system — Prisma
 
@@ -410,6 +477,13 @@ L'indirizzo del server sta in un file di configurazione locale non committato, n
 ## 8. Testing
 
 **Backend** — pytest. La ricerca e il download si testano contro fixture registrate, non contro YouTube: i test non devono dipendere dalla rete né rompersi quando YouTube cambia. Un singolo test di integrazione marcato `@slow` colpisce YouTube davvero, eseguito a mano.
+
+**I test non girano mai in produzione.** Ogni script di test si rifiuta di partire, prima di
+importare o creare qualunque cosa, se la cartella musica che eredita è `/music` o
+`/opt/prisma/music`, o se lì c'è un catalogo. Dove servono le dipendenze del server si usa un
+container usa e getta della stessa immagine, senza volume e senza rete, con
+`PRISMA_MUSIC_DIR` puntato altrove; mai `docker compose exec` nel container che serve la
+libreria.
 
 **App** — unit test sulla logica pura: parsing, calcolo della luminanza dello scrim, macchina a stati del download. Le view non si testano automaticamente in questo contesto: senza simulatore in CI non ha senso.
 
