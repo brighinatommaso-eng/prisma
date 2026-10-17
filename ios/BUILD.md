@@ -60,8 +60,11 @@ These come from Apple and apply per Apple ID, whichever tool does the signing.
 4. Scroll to **Artifacts** at the bottom of the summary and download **`Prisma.ipa`**.
    It downloads as the `.ipa` itself, not a zip. Beside it are two artifacts you do
    not need now: `Prisma.app.dSYM`, which is what makes a crash report readable, and
-   `xcodebuild-log`, which you only need when a build fails. The same dSYM is also
-   attached to a **release**, which is the easier way to get it later — see
+   `xcodebuild-log`, which you only need when a build fails. The same `.ipa` and
+   dSYM are also attached to a **release** tagged `build-<number>`, which needs no
+   GitHub sign-in: open
+   `https://github.com/brighinatommaso-eng/prisma/releases/tag/build-<number>` and
+   download `Prisma.ipa` from there — the easier route on the phone itself. See also
    [Reading a crash report](#reading-a-crash-report).
    Use the browser for this. `gh run download` treats the `.ipa` as a zip and unpacks
    it into a `Payload/` folder, which Sideloadly cannot use.
@@ -232,8 +235,8 @@ symbolication along with the `.ips`, and it does not expire. The identical
 `Prisma.app.dSYM` artifact on the run itself does need a sign-in and is deleted after
 30 days; use it only if a release is somehow missing.
 
-Releases are marked as pre-releases and carry no `.ipa`. The app still comes from the
-run's `Prisma.ipa` artifact, as in [1.2](#12-download-the-build).
+Releases are marked as pre-releases and carry the build's `Prisma.ipa` beside its
+dSYM; the workflow checks that the `.ipa` on the release is the very file it verified.
 
 ### What you can do on Windows
 
