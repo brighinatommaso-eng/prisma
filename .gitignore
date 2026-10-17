@@ -30,3 +30,6 @@ music/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local knowledge-graph output (graphify), never part of the repo
+graphify-out/
